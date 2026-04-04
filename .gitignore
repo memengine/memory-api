@@ -1,0 +1,66 @@
+.env
+.env.*
+!.env.example
+.envrc
+
+venv/
+.venv/
+osenv/
+
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+dist/
+build/
+.DS_Store
+node_modules/
+.npm-cache/
+.pnpm-store/
+.yarn/
+.turbo/
+.next/
+*.log
+
+# Local databases and dumps
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets and certificates
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.cer
+*.csr
+secrets.*
+*.secrets.*
+service-account*.json
+
+# Terraform state and local overrides
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfplan
+*.tfvars
+*.tfvars.json
+infrastructure/
+
+# Misc local runtime artifacts
+edge-tmp/
+tmp/
+tmp_uvicorn_*.log
+pytest-cache-files-*/
+
+# Keep local GitHub workflow drafts/config out of this repo for now
+.github/
+.docs/
+
