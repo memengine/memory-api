@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import time
+import warnings
+from typing import Any
+
+import httpx
+
+from memoryos.errors import MemoryOSError
+from memoryos.errors import map_sdk_error
+from memoryos.types import AddEnvelope
+from memoryos.types import AddRequest
+from memoryos.types import AddResult
+from memoryos.types import ConversationMessage
+from memoryos.types import DeleteEnvelope
+from memoryos.types import ExportEnvelope
+from memoryos.types import MemoryExport
+from memoryos.types import MemoryListEnvelope
+from memoryos.types import MemoryPage
+from memoryos.types import QuotaMode
+from memoryos.types import RetrieveResult
+from memoryos.types import RetrieveEnvelope
+
+
+class Memory:
+    DEFAULT_BASE_URL = "https://api.memoryos.io"
+    DEFAULT_TIMEOUT = 30.0
+    MAX_RETRIES = 3
+
+    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL, timeout: int | float = DEFAULT_TIMEOUT) -> None:
+        if not api_key.strip():
+            raise ValueError("api_key must not be empty.")
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            timeout=self.timeout,
+            headers={
+                "Authorization": f"ApiKey {self.api_key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "memoryos-python/0.1.0",
+            },
+        )
+
+    def __enter__(self) -> Memory:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._client.close()
+
+    @staticmethod
+    def _resolve_external_user_id(
+        external_user_id: str | None,
+        kwargs: dict[str, Any],
+    ) -> str:
+        deprecated_user_id = kwargs.pop("user_id", None)
+        if deprecated_user_id is not None:
+            warnings.warn(
+                "user_id is deprecated, use external_user_id",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if external_user_id is None:
+                external_user_id = str(deprecated_user_id)
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
+        if external_user_id is None:
+            raise TypeError("external_user_id is required")
+        return external_user_id
+
+    def add(
+        self,
+        messages: list[dict[str, str]] | list[ConversationMessage],
+        external_user_id: str,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AddResult:
+        payload = AddRequest(
+            external_user_id=external_user_id,
+            agent_id=agent_id,
+            messages=[item if isinstance(item, ConversationMessage) else ConversationMessage.model_validate(item) for item in messages],
+            metadata=metadata or {},
+        )
+        response = self._request_response("POST", "/v1/memories/add", json=payload.model_dump(mode="json"))
+        parsed = AddEnvelope.model_validate(self._parse_json(response))
+        return AddResult(
+            job_id=parsed.job_id,
+            status=parsed.status,
+            blocked_reason=parsed.blocked_reason,
+            retry_after_seconds=parsed.retry_after_seconds,
+            budget_remaining_pct=parsed.budget_remaining_pct,
+            quota_mode=self._quota_mode_from_response(response),
+            processing_eta_seconds=parsed.processing_eta_seconds,
+            processing_status=self._processing_status_from_response(response, parsed.processing_status),
+            circuit_status=self._circuit_status_from_response(response),
+        )
+
+    def get(
+        self,
+        query: str,
+        external_user_id: str,
+        limit: int = 10,
+        categories: list[str] | None = None,
+    ) -> RetrieveResult:
+        response = self._request_response(
+            "POST",
+            "/v1/memories/retrieve",
+            json={
+                "query": query,
+                "external_user_id": external_user_id,
+                "limit": limit,
+                "categories": categories or [],
+                "format": "bullets",
+            },
+        )
+        parsed = RetrieveEnvelope.model_validate(self._parse_json(response))
+        quota_mode = parsed.quota_mode or self._quota_mode_from_response(response)
+        return RetrieveResult(
+            items=parsed.data,
+            cached=parsed.cached,
+            system_prompt_addition=parsed.system_prompt_addition,
+            quota_mode=quota_mode,
+            is_passthrough=quota_mode == "PASSTHROUGH",
+            is_degraded=quota_mode == "DEGRADED_RETRIEVE",
+            circuit_status=self._circuit_status_from_response(response),
+        )
+
+    def delete(
+        self,
+        memory_id: str,
+        external_user_id: str | None = None,
+        hard_delete: bool = False,
+        **kwargs: Any,
+    ) -> bool:
+        _ = self._resolve_external_user_id(external_user_id, kwargs)
+        response = self._request(
+            "DELETE",
+            f"/v1/memories/{memory_id}",
+            params={"hard_delete": str(hard_delete).lower()},
+        )
+        return DeleteEnvelope.model_validate(response).data.deleted
+
+    def list(
+        self,
+        external_user_id: str | None = None,
+        page_cursor: str | None = None,
+        limit: int = 50,
+        **kwargs: Any,
+    ) -> MemoryPage:
+        _ = self._resolve_external_user_id(external_user_id, kwargs)
+        params: dict[str, Any] = {"limit": limit}
+        if page_cursor:
+            params["cursor"] = page_cursor
+        response = self._request("GET", "/v1/memories", params=params)
+        parsed = MemoryListEnvelope.model_validate(response)
+        return MemoryPage(
+            items=parsed.data,
+            next_cursor=parsed.pagination.next_cursor,
+            limit=parsed.pagination.limit,
+            total=parsed.pagination.total,
+        )
+
+    def export(self, external_user_id: str | None = None, **kwargs: Any) -> MemoryExport:
+        _ = self._resolve_external_user_id(external_user_id, kwargs)
+        response = self._request("GET", "/v1/users/me/export")
+        return ExportEnvelope.model_validate(response).data
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = self._request_response(method, path, json=json, params=params)
+        return self._parse_json(response)
+
+    def _request_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        last_error: MemoryOSError | None = None
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                response = self._client.request(method, path, json=json, params=params)
+            except httpx.HTTPError as exc:
+                raise MemoryOSError(f"MemoryOS request failed: {exc}") from exc
+
+            if response.status_code < 400:
+                return response
+
+            error = self._error_from_response(response)
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < self.MAX_RETRIES:
+                last_error = error
+                time.sleep(2**attempt)
+                continue
+            raise error
+
+        raise last_error or MemoryOSError("Request failed after retries.")
+
+    @staticmethod
+    def _parse_json(response: httpx.Response) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise MemoryOSError("MemoryOS returned a non-JSON response.", status_code=response.status_code) from exc
+        if not isinstance(payload, dict):
+            raise MemoryOSError("MemoryOS returned an unexpected response payload.", status_code=response.status_code)
+        return payload
+
+    def _error_from_response(self, response: httpx.Response) -> MemoryOSError:
+        try:
+            payload = self._parse_json(response)
+        except MemoryOSError:
+            return map_sdk_error(
+                status_code=response.status_code,
+                message=f"MemoryOS request failed with status {response.status_code}.",
+            )
+
+        error_payload = payload.get("error", "request_failed")
+        message = str(error_payload).replace("_", " ")
+        return map_sdk_error(
+            status_code=response.status_code,
+            message=message,
+            code=str(payload.get("code")) if payload.get("code") else None,
+            request_id=str(payload.get("request_id")) if payload.get("request_id") else None,
+            details=payload.get("details"),
+        )
+
+    @staticmethod
+    def _quota_mode_from_response(response: httpx.Response) -> QuotaMode:
+        raw_mode = response.headers.get("X-MemoryOS-Quota-Mode", "FULL").upper()
+        if raw_mode in {"FULL", "PASSTHROUGH", "DEGRADED_RETRIEVE", "BLOCKED"}:
+            return raw_mode  # type: ignore[return-value]
+        return "FULL"
+
+    @staticmethod
+    def _circuit_status_from_response(response: httpx.Response) -> str:
+        raw_status = response.headers.get("X-MemoryOS-Circuit-Status", "HEALTHY").upper()
+        if raw_status in {"HEALTHY", "DEGRADED", "CRITICAL"}:
+            return raw_status
+        return "HEALTHY"
+
+    @staticmethod
+    def _processing_status_from_response(response: httpx.Response, fallback: str = "normal") -> str:
+        raw_status = response.headers.get("X-MemoryOS-Processing", fallback).lower()
+        if raw_status in {"normal", "delayed"}:
+            return raw_status
+        return "normal"

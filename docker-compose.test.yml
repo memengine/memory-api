@@ -1,0 +1,37 @@
+services:
+  api:
+    environment:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-memoryos}:${POSTGRES_PASSWORD:-memoryos123}@postgres:5432/${POSTGRES_DB:-memoryos_test}
+      REDIS_URL: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/3
+      QDRANT_URL: http://qdrant:6333
+      AWS_ENDPOINT_URL: http://localstack:4566
+    command: ["pytest", "tests", "-q"]
+    ports: !reset []
+
+  celery-worker:
+    profiles: ["disabled"]
+
+  celery-beat:
+    profiles: ["disabled"]
+
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memoryos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memoryos123}
+      POSTGRES_DB: ${POSTGRES_DB:-memoryos_test}
+    ports: !reset []
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    ports: !reset []
+
+  qdrant:
+    ports: !reset []
+
+  localstack:
+    ports: !reset []

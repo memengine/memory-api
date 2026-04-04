@@ -1,0 +1,208 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-memoryos}:${POSTGRES_PASSWORD:-memoryos123}@postgres:5432/${POSTGRES_DB:-memoryos}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  QDRANT_URL: http://qdrant:6333
+  AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://localstack:4566}
+  APP_ENV: ${APP_ENV:-development}
+  APP_VERSION: ${APP_VERSION:-dev}
+
+x-app-service: &app-service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: memoryos-api:latest
+  env_file:
+    - .env
+  environment: *app-env
+  init: true
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *app-service
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  celery-enterprise:
+    <<: *app-service
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "enterprise-extraction", "-c", "4", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-enterprise.pid"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-enterprise.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  celery-growth:
+    <<: *app-service
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "growth-extraction", "-c", "3", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-growth.pid"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-growth.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  celery-starter:
+    <<: *app-service
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "starter-extraction,free-extraction", "-c", "3", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-starter.pid"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-starter.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  celery-background:
+    <<: *app-service
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "celery,reembedding,dead-letter", "-c", "2", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-background.pid"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-background.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  celery-beat:
+    <<: *app-service
+    command: ["celery", "-A", "api.celery_app.celery_app", "beat", "--loglevel=info", "--pidfile=/tmp/celery-beat.pid", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-beat.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memoryos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memoryos123}
+      POSTGRES_DB: ${POSTGRES_DB:-memoryos}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memoryos} -d ${POSTGRES_DB:-memoryos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:latest
+    environment:
+      SERVICES: ${LOCALSTACK_SERVICES:-s3,sqs}
+      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: ${LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT:-1}
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/_localstack/health', timeout=5)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  localstack_data:

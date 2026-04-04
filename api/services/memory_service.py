@@ -1,0 +1,467 @@
+from __future__ import annotations
+
+import uuid
+from datetime import UTC
+from datetime import datetime
+from typing import Any
+from typing import Awaitable
+from typing import Callable
+
+from sqlalchemy import func
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.db.cache import CacheService
+from api.db.models import EmbeddingModel
+from api.db.models import ExtractionJob
+from api.db.models import ExtractionJobStatus
+from api.db.models import Memory
+from api.db.models import ProxyUser
+from api.db.vector_store import QdrantService
+from api.errors import APIError
+from api.services.embedding_service import EmbeddingResult
+from api.services.embedding_service import EmbeddingService
+from api.services.proxy_user_service import ProxyUserService
+from api.services.common import resolve_authorized_user
+from api.services.quota_manager import QuotaManager
+from api.services.vector_outbox import build_vector_payload
+from api.services.vector_outbox import enqueue_vector_delete
+from api.services.vector_outbox import enqueue_vector_upsert
+from api.tasks.queue_router import QueueRouter
+
+
+EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
+DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
+DispatchTask = Callable[[str, list[Any]], Awaitable[Any] | Any]
+
+
+class MemoryService:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        cache_service: CacheService,
+        qdrant_service: QdrantService,
+        quota_manager: QuotaManager,
+        proxy_user_service: ProxyUserService | None = None,
+        embedding_service: EmbeddingService | None = None,
+        dispatch_task: DispatchTask | None = None,
+        region_id: str | None = None,
+    ) -> None:
+        self.session = session
+        self.cache_service = cache_service
+        self.qdrant_service = qdrant_service
+        self.quota_manager = quota_manager
+        self.proxy_user_service = proxy_user_service
+        self.embedding_service = embedding_service or EmbeddingService(async_session=session)
+        self.dispatch_task = dispatch_task
+        self.queue_router = QueueRouter(session=session, cache_service=cache_service)
+        self.region_id = region_id
+
+    async def queue_memory_add(
+        self,
+        *,
+        requested_user_id: str | None,
+        authenticated_user_id: str | None,
+        agent_id: str | None,
+        messages: list[dict[str, str]],
+        metadata: dict[str, Any],
+        idempotency_key: str | None,
+        tenant_id: str | None = None,
+        external_user_id: str | None = None,
+        proxy_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        proxy_user = None
+        resolved_proxy_user_id = proxy_user_id
+        if tenant_id:
+            quota_envelope = await self.quota_manager.get_quota_envelope(tenant_id)
+            if quota_envelope.mode.value == "BLOCKED":
+                return {
+                    "job_id": None,
+                    "status": "blocked",
+                    "blocked_reason": "budget_exhausted",
+                    "budget_remaining_pct": quota_envelope.budget_remaining_pct,
+                }
+            if quota_envelope.mode.value == "PASSTHROUGH":
+                return {
+                    "job_id": None,
+                    "status": "passthrough",
+                    "blocked_reason": None,
+                    "budget_remaining_pct": quota_envelope.budget_remaining_pct,
+                }
+            if not external_user_id:
+                raise APIError(
+                    status_code=422,
+                    code="REQ_422",
+                    error="external_user_id_required",
+                )
+            if not resolved_proxy_user_id:
+                if self.proxy_user_service is None:
+                    raise APIError(
+                        status_code=500,
+                        code="PRX_500",
+                        error="proxy_user_service_unavailable",
+                    )
+                proxy_user = await self.proxy_user_service.resolve(
+                    tenant_id=tenant_id,
+                    external_user_id=external_user_id,
+                    metadata=metadata,
+                )
+                resolved_proxy_user_id = str(proxy_user.id)
+
+        user = None
+        if authenticated_user_id:
+            user = await resolve_authorized_user(
+                self.session,
+                requested_user_id=requested_user_id,
+                authenticated_user_id=authenticated_user_id,
+            )
+        if idempotency_key:
+            cached_job = await self.cache_service.get_idempotent_response(idempotency_key)
+            if cached_job is not None:
+                return cached_job
+
+        job = {
+            "job_id": str(uuid.uuid4()),
+            "status": "queued",
+            "memories_created": 0,
+            "proxy_user_id": resolved_proxy_user_id,
+            "tenant_id": tenant_id,
+            "external_user_id": external_user_id,
+            "agent_id": agent_id,
+            "message_count": len(messages),
+            "messages": messages,
+            "metadata": metadata,
+            "queued_at": datetime.now(UTC).isoformat(),
+        }
+        if tenant_id:
+            reservation = await self.queue_router.reserve_extraction_slot(
+                tenant_id=tenant_id,
+                job_id=job["job_id"],
+            )
+            if reservation is None:
+                return {
+                    "job_id": None,
+                    "status": "queue_full",
+                    "blocked_reason": "tenant_queue_limit_reached",
+                }
+            job["queue_name"] = reservation.queue_name
+            job["plan_tier"] = reservation.plan_tier
+        await self._create_extraction_job(job)
+        await self.cache_service.set_job_status(job["job_id"], job, ttl=3600)
+        if idempotency_key:
+            await self.cache_service.set_idempotent_response(idempotency_key, job, ttl=86400)
+        dispatch_error = await self._dispatch_extraction_job(job)
+        if dispatch_error:
+            job["status"] = "error"
+            job["error"] = dispatch_error
+            await self._mark_extraction_job_failed(
+                job_id=job["job_id"],
+                error=dispatch_error,
+                status=ExtractionJobStatus.failed,
+            )
+            if tenant_id and job.get("queue_name"):
+                await self.queue_router.release_extraction_slot(
+                    tenant_id=tenant_id,
+                    queue_name=str(job["queue_name"]),
+                    job_id=job["job_id"],
+                )
+            await self.cache_service.set_job_status(job["job_id"], job, ttl=3600)
+        return job
+
+    async def list_memories(
+        self,
+        *,
+        requested_user_id: str | None,
+        authenticated_user_id: str,
+        cursor: str | None,
+        limit: int,
+        categories: list[str],
+        agent_id: str | None,
+    ) -> tuple[list[Memory], str | None, int]:
+        user = await resolve_authorized_user(
+            self.session,
+            requested_user_id=requested_user_id,
+            authenticated_user_id=authenticated_user_id,
+        )
+        query = (
+            select(Memory)
+            .where(Memory.user_id == user.id)
+            .order_by(Memory.created_at.desc(), Memory.id.desc())
+        )
+        if categories:
+            query = query.where(Memory.category.in_(categories))
+        if agent_id:
+            query = query.where(Memory.agent_id == uuid.UUID(agent_id))
+
+        result = await self.session.execute(query)
+        memories = list(result.scalars().all())
+        total = len(memories)
+        sliced = self._slice_with_cursor(memories, cursor=cursor, limit=limit)
+        next_cursor = None
+        if sliced:
+            last_index = memories.index(sliced[-1])
+            if (last_index + 1) < len(memories):
+                next_cursor = str(sliced[-1].id)
+        return sliced, next_cursor, total
+
+    async def get_memory(
+        self,
+        *,
+        authenticated_user_id: str,
+        memory_id: str,
+    ) -> Memory:
+        memory = await self._get_authorized_memory(
+            authenticated_user_id=authenticated_user_id,
+            memory_id=memory_id,
+        )
+        return memory
+
+    async def update_memory(
+        self,
+        *,
+        authenticated_user_id: str,
+        memory_id: str,
+        content: str | None,
+        importance_score: float | None,
+        is_archived: bool | None,
+    ) -> Memory:
+        memory = await self._get_authorized_memory(
+            authenticated_user_id=authenticated_user_id,
+            memory_id=memory_id,
+        )
+        requires_vector_sync = content is not None or importance_score is not None or is_archived is not None
+        next_content = content if content is not None else memory.content
+        next_archived = bool(is_archived) if is_archived is not None else bool(memory.is_archived)
+        next_importance = float(importance_score) if importance_score is not None else float(memory.importance_score)
+        next_embedding: EmbeddingResult | None = None
+        if requires_vector_sync and not next_archived:
+            next_embedding = await self._embed_content(next_content)
+        if content is not None:
+            memory.content = content
+        if importance_score is not None:
+            memory.importance_score = importance_score
+        if is_archived is not None:
+            memory.is_archived = is_archived
+        memory.updated_at = datetime.now(UTC)
+        if requires_vector_sync:
+            if memory.is_archived:
+                qdrant_collection = await self._embedding_collection_for_memory(memory)
+                enqueue_vector_delete(
+                    self.session,
+                    memory_id=memory.id,
+                    payload={
+                        "memory_id": str(memory.id),
+                        "embedding_model_id": memory.embedding_model_id,
+                        "qdrant_collection": qdrant_collection,
+                    },
+                )
+            elif next_embedding is not None:
+                tenant_id = None
+                proxy_user_id = str(memory.proxy_user_id) if memory.proxy_user_id else None
+                if memory.proxy_user_id is not None:
+                    proxy_user = await self.session.get(ProxyUser, memory.proxy_user_id)
+                    tenant_id = str(proxy_user.tenant_id) if proxy_user is not None else None
+                memory.embedding_model_id = next_embedding.model_id
+                enqueue_vector_upsert(
+                    self.session,
+                    memory_id=memory.id,
+                    embedding=next_embedding.vector,
+                    payload=build_vector_payload(
+                        memory,
+                        tenant_id=tenant_id,
+                        proxy_user_id=proxy_user_id,
+                        user_id=str(memory.user_id),
+                        embedding_model_id=next_embedding.model_id,
+                        qdrant_collection=next_embedding.qdrant_collection,
+                    ),
+                )
+        await self.session.commit()
+        await self.session.refresh(memory)
+        await self.cache_service.invalidate_user_cache(self._cache_identity(memory))
+        return memory
+
+    async def delete_memory(
+        self,
+        *,
+        authenticated_user_id: str,
+        memory_id: str,
+        hard_delete: bool,
+    ) -> bool:
+        memory = await self._get_authorized_memory(
+            authenticated_user_id=authenticated_user_id,
+            memory_id=memory_id,
+        )
+        if hard_delete:
+            qdrant_collection = await self._embedding_collection_for_memory(memory)
+            enqueue_vector_delete(
+                self.session,
+                memory_id=memory.id,
+                payload={
+                    "memory_id": str(memory.id),
+                    "embedding_model_id": memory.embedding_model_id,
+                    "qdrant_collection": qdrant_collection,
+                },
+            )
+            await self.session.delete(memory)
+        else:
+            memory.is_archived = True
+            qdrant_collection = await self._embedding_collection_for_memory(memory)
+            enqueue_vector_delete(
+                self.session,
+                memory_id=memory.id,
+                payload={
+                    "memory_id": str(memory.id),
+                    "embedding_model_id": memory.embedding_model_id,
+                    "qdrant_collection": qdrant_collection,
+                },
+            )
+        await self.session.commit()
+        await self.cache_service.invalidate_user_cache(self._cache_identity(memory))
+        return True
+
+    async def get_job_status(self, *, job_id: str) -> dict[str, Any]:
+        job_row = await self.session.get(ExtractionJob, uuid.UUID(job_id))
+        if job_row is not None:
+            return {
+                "tenant_id": str(job_row.tenant_id),
+                "proxy_user_id": str(job_row.proxy_user_id),
+                "external_user_id": job_row.external_user_id,
+                "job_id": str(job_row.id),
+                "status": job_row.status.value,
+                "memories_created": int(job_row.memories_created or 0),
+                "attempts": int(job_row.attempts or 0),
+                "max_attempts": int(job_row.max_attempts or DEFAULT_MAX_EXTRACTION_ATTEMPTS),
+                "created_at": job_row.created_at.isoformat() if job_row.created_at else None,
+                "processing_started_at": job_row.processing_started_at.isoformat()
+                if job_row.processing_started_at
+                else None,
+                "queue_name": job_row.queue_name,
+                "error": job_row.error,
+                "error_summary": self._job_error_summary(job_row.status, job_row.error),
+                "queued_at": job_row.queued_at.isoformat() if job_row.queued_at else None,
+                "started_at": job_row.started_at.isoformat() if job_row.started_at else None,
+                "completed_at": job_row.completed_at.isoformat() if job_row.completed_at else None,
+                "dead_lettered_at": job_row.dead_lettered_at.isoformat() if job_row.dead_lettered_at else None,
+            }
+        cached_job = await self.cache_service.get_job_status(job_id)
+        if cached_job is not None:
+            return cached_job
+
+        return {"job_id": job_id, "status": "unknown", "memories_created": 0}
+
+    async def _create_extraction_job(self, job: dict[str, Any]) -> None:
+        tenant_id = job.get("tenant_id")
+        proxy_user_id = job.get("proxy_user_id")
+        external_user_id = job.get("external_user_id")
+        if not tenant_id or not proxy_user_id or not external_user_id:
+            return
+        row = ExtractionJob(
+            id=uuid.UUID(job["job_id"]),
+            tenant_id=uuid.UUID(str(tenant_id)),
+            proxy_user_id=uuid.UUID(str(proxy_user_id)),
+            external_user_id=str(external_user_id),
+            status=ExtractionJobStatus.queued,
+            max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
+            queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
+            payload=job,
+            result={},
+        )
+        self.session.add(row)
+        await self.session.commit()
+
+    async def _mark_extraction_job_failed(
+        self,
+        *,
+        job_id: str,
+        error: str,
+        status: ExtractionJobStatus,
+    ) -> None:
+        row = await self.session.get(ExtractionJob, uuid.UUID(job_id))
+        if row is None:
+            return
+        row.status = status
+        row.error = error
+        if status == ExtractionJobStatus.dead:
+            row.dead_lettered_at = datetime.now(UTC)
+        await self.session.commit()
+
+    @staticmethod
+    def _job_error_summary(status: ExtractionJobStatus | str, error: str | None) -> str | None:
+        status_value = status.value if isinstance(status, ExtractionJobStatus) else str(status)
+        if status_value == ExtractionJobStatus.dead.value:
+            return "This extraction job failed multiple times and was marked dead. Please retry the job or contact support."
+        if status_value == ExtractionJobStatus.failed.value:
+            return "This extraction job failed and will be retried automatically."
+        if not error:
+            return None
+        return "This extraction job encountered an internal processing error."
+
+    async def _get_authorized_memory(
+        self,
+        *,
+        authenticated_user_id: str,
+        memory_id: str,
+    ) -> Memory:
+        user = await resolve_authorized_user(
+            self.session,
+            requested_user_id=None,
+            authenticated_user_id=authenticated_user_id,
+        )
+        memory = await self.session.get(Memory, uuid.UUID(memory_id))
+        if memory is None or memory.user_id != user.id:
+            raise APIError(
+                status_code=404,
+                code="MEM_404",
+                error="memory_not_found",
+                details={"memory_id": memory_id},
+            )
+        return memory
+
+    @staticmethod
+    def _slice_with_cursor(items: list[Memory], *, cursor: str | None, limit: int) -> list[Memory]:
+        if not cursor:
+            return items[:limit]
+        for index, item in enumerate(items):
+            if str(item.id) == cursor:
+                return items[index + 1 : index + 1 + limit]
+        return items[:limit]
+
+    @staticmethod
+    def _cache_identity(memory: Memory) -> str:
+        if memory.proxy_user_id is not None:
+            return str(memory.proxy_user_id)
+        return str(memory.user_id)
+
+    async def _dispatch_extraction_job(self, job: dict[str, Any]) -> str | None:
+        if self.dispatch_task is None:
+            return None
+        try:
+            queue_name = job.get("queue_name")
+            dispatched = self.dispatch_task(
+                EXTRACTION_TASK_NAME,
+                args=[job],
+                queue=queue_name,
+            )
+            if dispatched is not None and hasattr(dispatched, "__await__"):
+                await dispatched
+            return None
+        except Exception:
+            return "dispatch_failed"
+
+    async def _embed_content(self, content: str) -> EmbeddingResult:
+        try:
+            return await self.embedding_service.embed(content)
+        except Exception as exc:
+            raise APIError(
+                status_code=503,
+                code="EMB_503",
+                error="embedding_unavailable",
+                details={"reason": str(exc)},
+            ) from exc
+
+    async def _embedding_collection_for_memory(self, memory: Memory) -> str | None:
+        if not getattr(memory, "embedding_model_id", None):
+            return None
+        model = await self.session.get(EmbeddingModel, memory.embedding_model_id)
+        return None if model is None else str(model.qdrant_collection)
