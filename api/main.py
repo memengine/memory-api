@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
@@ -8,6 +9,7 @@ from datetime import datetime
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 import sentry_sdk
@@ -42,6 +44,14 @@ from api.settings import get_settings
 
 
 LOGGER = logging.getLogger("memoryos.main")
+
+
+def _cors_allowed_origins() -> list[str]:
+    configured = os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+    origins = [origin.strip() for origin in configured if origin.strip()]
+    if origins:
+        return origins
+    return ["http://localhost:3000", "http://localhost:3001"]
 
 
 def _dependency_status(*, breaker_state: str, service_available: bool = True) -> str:
@@ -135,6 +145,31 @@ def create_app() -> FastAPI:
     app.add_middleware(AdminAuthMiddleware)
     app.add_middleware(QuotaEnvelopeMiddleware)
     app.add_middleware(VersioningMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_allowed_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Admin-Secret",
+            "X-MemoryOS-Quota-Mode",
+            "X-MemoryOS-Budget-Remaining",
+            "X-MemoryOS-Budget-Reset",
+            "X-MemoryOS-Circuit-Status",
+            "X-MemoryOS-Processing",
+            "Idempotency-Key",
+        ],
+        expose_headers=[
+            "X-MemoryOS-Quota-Mode",
+            "X-MemoryOS-Budget-Remaining",
+            "X-MemoryOS-Budget-Reset",
+            "X-MemoryOS-Circuit-Status",
+            "X-MemoryOS-Processing",
+        ],
+        max_age=600,
+    )
 
     @app.exception_handler(APIError)
     async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:

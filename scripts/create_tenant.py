@@ -20,6 +20,7 @@ from api.db.models import ApiKey
 from api.db.models import PlanTier
 from api.db.models import Tenant
 from api.db.models import TenantBudget
+from api.config.plan_limits import apply_plan_limits
 from api.utils.crypto import api_key_prefix
 from api.utils.crypto import hash_api_key
 from api.services.webhook_event_service import generate_webhook_secret
@@ -61,6 +62,8 @@ def create_tenant_with_api_key(*, session: Session, company_name: str, api_key_n
         webhook_secret=generate_webhook_secret(),
     )
     session.add(tenant_budget)
+    session.flush()
+    apply_plan_limits(str(tenant.id), "starter", session)
 
     api_key = ApiKey(
         id=uuid.uuid4(),
@@ -105,6 +108,13 @@ def main() -> int:
     print("API key (shown once):")
     print(raw_api_key)
     print("Store this key securely. It is not persisted in plaintext.")
+    print("ACTION REQUIRED: Set clerk_org_id on this tenant.")
+    print(
+        f"Run: UPDATE tenants SET clerk_org_id = '<your_clerk_org_id>' WHERE id = '{tenant.id}';"
+    )
+    print(
+        "Find your Clerk org ID in the Clerk dashboard under Organizations -> your org -> Organization ID (org_xxxxx)"
+    )
     return 0
 
 

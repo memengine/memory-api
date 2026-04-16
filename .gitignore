@@ -62,9 +62,11 @@ pytest-cache-files-*/
 
 # Keep local GitHub workflow drafts/config out of this repo for now
 .github/
-<<<<<<< HEAD
 .docs/
-
-=======
-.docs/
->>>>>>> 8038da005d9565ea075faacaa1290975e51aad6e
+.vscode/
+.idea/
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+*.orig

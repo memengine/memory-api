@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import calendar
 import json
+import os
 import uuid
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Annotated
 
 import httpx
@@ -12,6 +15,11 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Query
 from fastapi import Request
+from sqlalchemy import String
+from sqlalchemy import case
+from sqlalchemy import cast
+from sqlalchemy import func
+from sqlalchemy import literal
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +29,9 @@ from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_quota_manager
 from api.db.models import ApiDeprecatedField
+from api.db.models import CallQualityBlockedLayer
 from api.db.models import CallQualityLog
+from api.db.models import Memory
 from api.db.models import OveragePolicy
 from api.db.models import ProxyUser
 from api.db.models import TenantBudget
@@ -34,10 +44,15 @@ from api.schemas.responses import ProxyUserBlockData
 from api.schemas.responses import ProxyUserBlockResponse
 from api.schemas.responses import ProxyUserDeleteData
 from api.schemas.responses import ProxyUserDeleteResponse
-from api.schemas.responses import ProxyUserStatsData
-from api.schemas.responses import ProxyUserStatsResponse
+from api.schemas.tenant_schemas import BlockEvent
+from api.schemas.tenant_schemas import CostSummary
+from api.schemas.tenant_schemas import CostSummaryResponse
+from api.schemas.tenant_schemas import ProxyUserDetail
+from api.schemas.tenant_schemas import ProxyUserDetailResponse
 from api.schemas.tenant_schemas import TenantDeprecationUsageEntry
 from api.schemas.tenant_schemas import TenantDeprecationUsageResponse
+from api.schemas.tenant_schemas import TenantMemoryAdditionPoint
+from api.schemas.tenant_schemas import TenantMemoryAdditionsResponse
 from api.schemas.tenant_schemas import TenantProxyUserData
 from api.schemas.tenant_schemas import TenantQualityLogEntry
 from api.schemas.tenant_schemas import TenantQualityLogResponse
@@ -96,9 +111,31 @@ async def _list_proxy_users(
     tenant_id: str,
     cursor: str | None,
     limit: int,
-) -> tuple[list[ProxyUser], str | None, int]:
-    stmt = select(ProxyUser).where(ProxyUser.tenant_id == uuid.UUID(tenant_id))
-    count_stmt = select(ProxyUser.id).where(ProxyUser.tenant_id == uuid.UUID(tenant_id))
+) -> tuple[list[tuple[ProxyUser, float | None]], str | None, int]:
+    tenant_uuid = uuid.UUID(tenant_id)
+    quality_cutoff = datetime.now(UTC) - timedelta(days=7)
+    quality_hash = _quality_log_external_user_hash()
+    quality_subquery = (
+        select(
+            quality_hash.label("external_user_id_hash"),
+            func.avg(CallQualityLog.quality_score).label("quality_score_avg"),
+        )
+        .where(
+            CallQualityLog.tenant_id == tenant_uuid,
+            CallQualityLog.created_at > quality_cutoff,
+        )
+        .group_by(quality_hash)
+        .subquery()
+    )
+    stmt = (
+        select(ProxyUser, quality_subquery.c.quality_score_avg)
+        .outerjoin(
+            quality_subquery,
+            quality_subquery.c.external_user_id_hash == ProxyUser.external_user_id_hash,
+        )
+        .where(ProxyUser.tenant_id == tenant_uuid)
+    )
+    count_stmt = select(func.count(ProxyUser.id)).where(ProxyUser.tenant_id == tenant_uuid)
 
     if cursor:
         cursor_last_active_at, cursor_id = _decode_cursor(cursor)
@@ -110,12 +147,12 @@ async def _list_proxy_users(
         )
 
     stmt = stmt.order_by(ProxyUser.last_active_at.desc(), ProxyUser.id.desc()).limit(limit + 1)
-    items = list((await session.execute(stmt)).scalars().all())
-    total = len((await session.execute(count_stmt)).scalars().all())
+    items = list((await session.execute(stmt)).all())
+    total = int((await session.execute(count_stmt)).scalar_one() or 0)
 
     next_cursor = None
     if len(items) > limit:
-        last_item = items[limit - 1]
+        last_item = items[limit - 1][0]
         next_cursor = _encode_cursor(last_item.last_active_at, last_item.id)
         items = items[:limit]
     return items, next_cursor, total
@@ -179,7 +216,7 @@ async def _send_test_webhook(webhook_url: str, tenant_id: str) -> tuple[bool, in
         "from_mode": "FULL",
         "to_mode": "FULL",
         "reset_at": None,
-        "upgrade_url": "https://memoryos.io/upgrade",
+        "upgrade_url": os.getenv("BILLING_UPGRADE_URL", "").strip(),
         "test": True,
     }
     try:
@@ -212,6 +249,201 @@ async def _list_deprecation_usage(
         .order_by(TenantDeprecationUsage.last_used_at.desc())
     )
     return [dict(row._mapping) for row in result]
+
+
+def _quality_log_external_user_hash():
+    return func.encode(
+        func.digest(
+            func.concat(cast(CallQualityLog.tenant_id, String), literal(":"), CallQualityLog.external_user_id),
+            literal("sha256"),
+        ),
+        literal("hex"),
+    )
+
+
+async def _get_proxy_user_detail(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    external_user_id: str,
+) -> ProxyUserDetail:
+    tenant_uuid = uuid.UUID(tenant_id)
+    external_user_id_hash = ProxyUserService.hash_external_user_id(tenant_id, external_user_id)
+    proxy_user = (
+        await session.execute(
+            select(ProxyUser).where(
+                ProxyUser.tenant_id == tenant_uuid,
+                ProxyUser.external_user_id_hash == external_user_id_hash,
+            )
+        )
+    ).scalar_one_or_none()
+    if proxy_user is None:
+        raise APIError(
+            status_code=404,
+            code="PRX_404",
+            error="proxy_user_not_found",
+            details={
+                "tenant_id": tenant_id,
+                "external_user_id_hash": external_user_id_hash,
+            },
+        )
+
+    quality_cutoff = datetime.now(UTC) - timedelta(days=7)
+    quality_hash = _quality_log_external_user_hash()
+    quality_metrics = (
+        await session.execute(
+            select(
+                func.avg(CallQualityLog.quality_score).label("quality_score_avg"),
+                func.count(CallQualityLog.id).label("total_calls_7d"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (cast(CallQualityLog.layer_blocked_at, String) != "NONE", 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("blocked_calls_7d"),
+            ).where(
+                CallQualityLog.tenant_id == tenant_uuid,
+                quality_hash == external_user_id_hash,
+                CallQualityLog.created_at > quality_cutoff,
+            )
+        )
+    ).one()
+    quality_score_avg = (
+        float(quality_metrics.quality_score_avg)
+        if quality_metrics.quality_score_avg is not None
+        else None
+    )
+    total_calls_7d = int(quality_metrics.total_calls_7d or 0)
+    blocked_calls_7d = int(quality_metrics.blocked_calls_7d or 0)
+
+    block_rows = (
+        await session.execute(
+            select(
+                CallQualityLog.created_at,
+                CallQualityLog.layer_blocked_at,
+                CallQualityLog.reason,
+            )
+            .where(
+                CallQualityLog.tenant_id == tenant_uuid,
+                quality_hash == external_user_id_hash,
+                cast(CallQualityLog.layer_blocked_at, String) != "NONE",
+            )
+            .order_by(CallQualityLog.created_at.desc())
+            .limit(50)
+        )
+    ).all()
+
+    return ProxyUserDetail(
+        external_user_id=external_user_id,
+        user_id=external_user_id,
+        memory_count=int(proxy_user.memory_count or 0),
+        last_active_at=proxy_user.last_active_at,
+        created_at=proxy_user.created_at,
+        quality_score_avg=quality_score_avg,
+        block_history=[
+            BlockEvent(
+                blocked_at=row.created_at,
+                layer=row.layer_blocked_at.value,
+                reason=row.reason,
+            )
+            for row in block_rows
+        ],
+        total_calls_7d=total_calls_7d,
+        blocked_calls_7d=blocked_calls_7d,
+    )
+
+
+async def _get_cost_summary(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+) -> CostSummary:
+    tenant_budget = await _load_tenant_budget(session, tenant_id)
+    if tenant_budget is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_budget_not_found")
+
+    now = datetime.now(UTC)
+    tenant_uuid = uuid.UUID(tenant_id)
+    month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
+    monthly_counts = (
+        await session.execute(
+            select(
+                func.count(CallQualityLog.id).label("total_calls"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (cast(CallQualityLog.layer_blocked_at, String) != "NONE", 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("blocked_calls"),
+            ).where(
+                CallQualityLog.tenant_id == tenant_uuid,
+                CallQualityLog.created_at >= month_start,
+            )
+        )
+    ).one()
+
+    current_month_tokens = int(tenant_budget.current_month_tokens or 0)
+    current_month_calls = int(tenant_budget.current_month_calls or 0)
+    raw_estimated_cost_usd = (current_month_tokens / 1_000_000) * 0.15
+    estimated_cost_usd = round(raw_estimated_cost_usd, 4)
+    cost_per_call = (
+        round(estimated_cost_usd / current_month_calls, 6)
+        if current_month_calls > 0
+        else None
+    )
+    total_calls = int(monthly_counts.total_calls or 0)
+    blocked_calls = int(monthly_counts.blocked_calls or 0)
+    gate_block_rate = round((blocked_calls / total_calls), 4) if total_calls > 0 else 0.0
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    projected_month_cost_usd = round((estimated_cost_usd / now.day) * days_in_month, 4)
+    savings_from_gate_usd = (
+        round(blocked_calls * cost_per_call, 4) if cost_per_call is not None else 0.0
+    )
+
+    return CostSummary(
+        current_month_tokens=current_month_tokens,
+        estimated_cost_usd=estimated_cost_usd,
+        cost_per_call=cost_per_call,
+        gate_block_rate=gate_block_rate,
+        projected_month_cost_usd=projected_month_cost_usd,
+        savings_from_gate_usd=savings_from_gate_usd,
+        cost_is_estimate=True,
+    )
+
+
+async def _get_tenant_memory_additions(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    limit: int,
+) -> list[TenantMemoryAdditionPoint]:
+    tenant_uuid = uuid.UUID(tenant_id)
+    day_bucket = func.date_trunc("day", Memory.created_at)
+    rows = (
+        await session.execute(
+            select(
+                day_bucket.label("day"),
+                func.count(Memory.id).label("count"),
+            )
+            .join(ProxyUser, ProxyUser.id == Memory.proxy_user_id)
+            .where(ProxyUser.tenant_id == tenant_uuid)
+            .group_by(day_bucket)
+            .order_by(day_bucket.desc())
+            .limit(limit)
+        )
+    ).all()
+
+    return [
+        TenantMemoryAdditionPoint(day=row.day, count=int(row.count or 0))
+        for row in reversed(rows)
+        if row.day is not None
+    ]
 
 
 @router.get("/usage", response_model=TenantUsageResponse)
@@ -276,8 +508,9 @@ async def list_tenant_proxy_users(
                 last_active_at=item.last_active_at,
                 created_at=item.created_at,
                 is_blocked=bool(item.is_blocked),
+                quality_score_avg=(float(quality_score_avg) if quality_score_avg is not None else None),
             )
-            for item in proxy_users
+            for item, quality_score_avg in proxy_users
         ],
         pagination=CursorPage(next_cursor=next_cursor, limit=limit, total=total),
         request_id=get_request_id(request),
@@ -285,19 +518,23 @@ async def list_tenant_proxy_users(
     )
 
 
-@router.get("/users/{external_user_id}/stats", response_model=ProxyUserStatsResponse)
+@router.get("/users/{external_user_id}/stats", response_model=ProxyUserDetailResponse)
 async def get_tenant_proxy_user_stats(
     request: Request,
     external_user_id: str,
     tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
-    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
-) -> ProxyUserStatsResponse:
+    session: DbSession,
+) -> ProxyUserDetailResponse:
     """Fetch stats for a single tenant-scoped proxy user.
 
     Parameters: external user id path value. It is hashed inside the proxy-user service before DB lookup.
-    Responses: memory count, last active time, and creation time.
+    Responses: memory count, recent quality metrics, block history, and creation time.
     """
-    stats = await proxy_user_service.get_stats(tenant_id=tenant_id, external_user_id=external_user_id)
+    detail = await _get_proxy_user_detail(
+        session,
+        tenant_id=tenant_id,
+        external_user_id=external_user_id,
+    )
     register_deprecated_field(
         request,
         field_path=DEPRECATED_PROXY_USER_STATS_FIELD_PATH,
@@ -306,14 +543,8 @@ async def get_tenant_proxy_user_stats(
         migration_guide_url=DEPRECATED_PROXY_USER_STATS_FIELD_GUIDE,
         replacement_field="external_user_id",
     )
-    return ProxyUserStatsResponse(
-        data=ProxyUserStatsData(
-            external_user_id=external_user_id,
-            user_id=external_user_id,
-            memory_count=stats.memory_count,
-            last_active_at=stats.last_active_at,
-            created_at=stats.created_at,
-        ),
+    return ProxyUserDetailResponse(
+        data=detail,
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
@@ -399,6 +630,21 @@ async def list_tenant_quality_log(
     )
 
 
+@router.get("/memory-additions", response_model=TenantMemoryAdditionsResponse)
+async def get_tenant_memory_additions(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    limit: int = Query(default=30, ge=1, le=90),
+) -> TenantMemoryAdditionsResponse:
+    """List tenant memory additions grouped by day for dashboard trends."""
+    return TenantMemoryAdditionsResponse(
+        data=await _get_tenant_memory_additions(session, tenant_id=tenant_id, limit=limit),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
 @router.patch("/settings", response_model=TenantSettingsResponse)
 async def update_tenant_settings(
     request: Request,
@@ -476,6 +722,20 @@ async def get_tenant_deprecation_usage(
             )
             for row in rows
         ],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/cost-summary", response_model=CostSummaryResponse)
+async def get_tenant_cost_summary(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> CostSummaryResponse:
+    """Summarize the tenant's current-month usage cost and quality-gate savings."""
+    return CostSummaryResponse(
+        data=await _get_cost_summary(session, tenant_id=tenant_id),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )

@@ -146,6 +146,7 @@ async def test_quality_gate_blocks_on_l1_rate_limit() -> None:
     logged = session.add.call_args.args[0]
     assert isinstance(logged, CallQualityLog)
     assert logged.layer_blocked_at.value == "L1"
+    assert logged.reason == "rate_limit_exceeded"
 
 
 @pytest.mark.asyncio
@@ -165,6 +166,7 @@ async def test_quality_gate_blocks_low_quality_conversation_on_l2() -> None:
     assert result.reason == "low_quality"
     logged = session.add.call_args.args[0]
     assert logged.quality_score < 0.35
+    assert logged.reason == "low_quality"
 
 
 @pytest.mark.asyncio
@@ -322,6 +324,7 @@ async def test_quality_gate_full_pass_through_dispatches_usage_increment() -> No
     assert args[0] == tenant_id
     logged = session.add.call_args.args[0]
     assert logged.layer_blocked_at.value == "NONE"
+    assert logged.reason is None
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,7 @@ class AuditAction(str, enum.Enum):
     deleted = "deleted"
     retrieved = "retrieved"
     proxy_user_deleted = "proxy_user_deleted"
+    job_discarded = "job_discarded"
 
 
 class AgentMemoryScope(str, enum.Enum):
@@ -769,6 +770,7 @@ class CallQualityLog(Base):
         nullable=False,
         server_default=text("0"),
     )
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     semantic_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

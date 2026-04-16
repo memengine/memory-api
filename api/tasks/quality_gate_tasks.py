@@ -14,9 +14,6 @@ from api.db.models import TenantBudget
 from api.services.webhook_event_service import WebhookEventService
 
 
-DEFAULT_UPGRADE_URL = "https://memoryos.io/pricing"
-
-
 @shared_task(name="api.tasks.quality_gate_tasks.increment_tenant_budget_usage")
 def increment_tenant_budget_usage(tenant_id: str, estimated_tokens: int) -> bool:
     engine = create_engine(get_sync_database_url(), pool_pre_ping=True)
@@ -69,7 +66,7 @@ def send_budget_alert(self, tenant_id: str, usage_pct: float, estimated_tokens: 
                 "reset_at": tenant_budget.reset_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
                 if tenant_budget.reset_at
                 else None,
-                "upgrade_url": os.getenv("BILLING_UPGRADE_URL", DEFAULT_UPGRADE_URL),
+                "upgrade_url": os.getenv("BILLING_UPGRADE_URL", "").strip(),
             },
         )
         return True

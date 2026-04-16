@@ -8,7 +8,7 @@ from fastapi import Query
 from fastapi import Request
 
 from api.dependencies import get_api_key_service
-from api.dependencies import get_authenticated_user_id
+from api.dependencies import get_authenticated_tenant_id
 from api.schemas.requests import ApiKeyCreateRequest
 from api.schemas.responses import ApiKeyCreateData
 from api.schemas.responses import ApiKeyCreateResponse
@@ -41,17 +41,17 @@ def _api_key_to_data(api_key) -> ApiKeyData:
 async def list_api_keys(
     request: Request,
     api_key_service: Annotated[ApiKeyService, Depends(get_api_key_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
     cursor: str | None = Query(default=None, description="Cursor from the previous page."),
     limit: int = Query(default=10, ge=1, le=50, description="Maximum number of API keys to return."),
 ) -> ApiKeyListResponse:
-    """List hashed API keys for the authenticated user.
+    """List active API keys for the authenticated tenant.
 
     Parameters: cursor for pagination and a page limit up to 50.
     Responses: paginated API key metadata without exposing raw secrets.
     """
     api_keys, next_cursor, total = await api_key_service.list_api_keys(
-        authenticated_user_id=authenticated_user_id,
+        tenant_id=tenant_id,
         cursor=cursor,
         limit=limit,
     )
@@ -68,15 +68,15 @@ async def create_api_key(
     request: Request,
     payload: ApiKeyCreateRequest,
     api_key_service: Annotated[ApiKeyService, Depends(get_api_key_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
 ) -> ApiKeyCreateResponse:
-    """Create a new API key for SDK access.
+    """Create a new API key for tenant SDK access.
 
     Parameters: display name, permissions, and per-minute rate limit.
     Responses: created API key metadata plus the raw key shown once.
     """
     api_key, raw_key = await api_key_service.create_api_key(
-        authenticated_user_id=authenticated_user_id,
+        tenant_id=tenant_id,
         name=payload.name,
         permissions=payload.permissions,
         rate_limit_per_minute=payload.rate_limit_per_minute,
@@ -93,7 +93,7 @@ async def revoke_api_key(
     request: Request,
     api_key_id: str,
     api_key_service: Annotated[ApiKeyService, Depends(get_api_key_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
 ) -> ApiKeyDeleteResponse:
     """Revoke an API key by id.
 
@@ -101,7 +101,7 @@ async def revoke_api_key(
     Responses: deletion status in the standard envelope.
     """
     deleted = await api_key_service.revoke_api_key(
-        authenticated_user_id=authenticated_user_id,
+        tenant_id=tenant_id,
         api_key_id=api_key_id,
     )
     return ApiKeyDeleteResponse(

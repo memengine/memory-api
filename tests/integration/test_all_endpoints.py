@@ -14,6 +14,8 @@ from api.main import create_app
 from api.middleware.auth import AuthMiddleware
 from api.services.quality_gate import GateResult
 from api.services.retriever import MemoryResult
+from api.schemas.tenant_schemas import CostSummary
+from api.schemas.tenant_schemas import ProxyUserDetail
 
 
 def make_memory(
@@ -458,6 +460,8 @@ def test_health_docs_idempotency_and_core_endpoints(monkeypatch) -> None:
         "/v1/users/{external_user_id}",
         "/v1/users/{external_user_id}/block",
         "/v1/tenant/usage",
+        "/v1/tenant/cost-summary",
+        "/v1/tenant/memory-additions",
         "/v1/tenant/users",
         "/v1/tenant/users/{external_user_id}/stats",
         "/v1/tenant/users/{external_user_id}",
@@ -580,6 +584,32 @@ def test_remaining_endpoint_shapes(monkeypatch) -> None:
 
     monkeypatch.setattr("api.services.embedding_service.EmbeddingService.set_active_model", activate_model)
     monkeypatch.setattr("api.tasks.queue_router.QueueRouter.inspect_all_queues", inspect_all_queues)
+    async def fake_get_proxy_user_detail(session, *, tenant_id: str, external_user_id: str):
+        return ProxyUserDetail(
+            external_user_id=external_user_id,
+            user_id=external_user_id,
+            memory_count=1,
+            last_active_at=datetime.now(UTC),
+            created_at=datetime.now(UTC),
+            quality_score_avg=0.58,
+            block_history=[],
+            total_calls_7d=3,
+            blocked_calls_7d=1,
+        )
+
+    async def fake_get_cost_summary(session, *, tenant_id: str):
+        return CostSummary(
+            current_month_tokens=1000,
+            estimated_cost_usd=0.0002,
+            cost_per_call=0.0002,
+            gate_block_rate=0.25,
+            projected_month_cost_usd=0.001,
+            savings_from_gate_usd=0.0002,
+            cost_is_estimate=True,
+        )
+
+    monkeypatch.setattr("api.routers.tenant._get_proxy_user_detail", fake_get_proxy_user_detail)
+    monkeypatch.setattr("api.routers.tenant._get_cost_summary", fake_get_cost_summary)
     with build_test_client(monkeypatch, bypass_auth_enabled=True) as client:
         get_response = client.get("/v1/memories/123e4567-e89b-12d3-a456-426614174000")
         patch_response = client.patch(
@@ -595,6 +625,7 @@ def test_remaining_endpoint_shapes(monkeypatch) -> None:
         )
         export_response = client.get("/v1/users/me/export")
         delete_user_response = client.delete("/v1/users/me")
+        tenant_cost_summary_response = client.get("/v1/tenant/cost-summary")
         create_key_response = client.post(
             "/v1/api-keys",
             json={"name": "SDK", "permissions": ["read"], "rate_limit_per_minute": 120},
@@ -629,6 +660,8 @@ def test_remaining_endpoint_shapes(monkeypatch) -> None:
     assert settings_response.json()["data"] == {"settings": {"tone": "detailed"}}
     assert export_response.status_code == 200
     assert delete_user_response.status_code == 200
+    assert tenant_cost_summary_response.status_code == 200
+    assert tenant_cost_summary_response.json()["data"]["cost_is_estimate"] is True
     assert create_key_response.status_code == 200
     assert create_key_response.json()["data"]["raw_key"] == "mem_live_key"
     assert revoke_key_response.status_code == 200

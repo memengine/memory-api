@@ -11,11 +11,13 @@ from typing import Any
 from pydantic import ValidationError
 
 from api.infra.llm_providers import AnthropicProvider
+from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
 from api.infra.llm_providers import GeminiProvider
 from api.infra.llm_router import ExtractionUnavailableError
 from api.infra.llm_router import LLMRouter
 from api.schemas.memory_schemas import ExtractedMemory
 from api.schemas.memory_schemas import ExtractionResponseSchema
+from api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,8 @@ class ExtractionService:
         llm_router: LLMRouter | None = None,
     ) -> None:
         self.client = client
-        self.model = model or "gemini-2.5-flash-lite"
+        configured_model = (get_settings().extraction_model or "").strip()
+        self.model = model or configured_model or DEFAULT_GEMINI_EXTRACT_MODEL
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.last_usage_events: list[dict[str, Any]] = []

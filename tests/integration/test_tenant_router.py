@@ -15,6 +15,9 @@ from api.db.models import QuotaMode
 from api.main import create_app
 from api.middleware.auth import AuthMiddleware
 from api.routers import tenant as tenant_router
+from api.schemas.tenant_schemas import CostSummary
+from api.schemas.tenant_schemas import ProxyUserDetail
+from api.schemas.tenant_schemas import TenantMemoryAdditionPoint
 
 
 async def bypass_auth(self, request, call_next):
@@ -114,7 +117,10 @@ def test_tenant_usage_users_quality_log_settings_and_webhook(monkeypatch) -> Non
         return tenant_budget
 
     async def fake_list_proxy_users(session, *, tenant_id: str, cursor: str | None, limit: int):
-        return proxy_users[:limit], "next-user-cursor", len(proxy_users)
+        return [
+            (proxy_users[0], 0.74),
+            (proxy_users[1], None),
+        ][:limit], "next-user-cursor", len(proxy_users)
 
     async def fake_list_quality_logs(session, *, tenant_id: str, cursor: str | None, limit: int):
         return quality_logs[:limit], "next-log-cursor", len(quality_logs)
@@ -127,16 +133,57 @@ def test_tenant_usage_users_quality_log_settings_and_webhook(monkeypatch) -> Non
     async def fake_send_test_webhook(webhook_url: str, tenant_id: str):
         return True, 202
 
+    async def fake_get_proxy_user_detail(session, *, tenant_id: str, external_user_id: str):
+        return ProxyUserDetail(
+            external_user_id=external_user_id,
+            user_id=external_user_id,
+            memory_count=4,
+            last_active_at=datetime(2026, 3, 31, tzinfo=UTC),
+            created_at=datetime(2026, 3, 1, tzinfo=UTC),
+            quality_score_avg=0.63,
+            block_history=[
+                {
+                    "blocked_at": datetime(2026, 3, 31, 8, tzinfo=UTC),
+                    "layer": "L2",
+                    "reason": "low_quality",
+                }
+            ],
+            total_calls_7d=12,
+            blocked_calls_7d=2,
+        )
+
+    async def fake_get_cost_summary(session, *, tenant_id: str):
+        return CostSummary(
+            current_month_tokens=12000,
+            estimated_cost_usd=0.0018,
+            cost_per_call=0.000007,
+            gate_block_rate=0.1667,
+            projected_month_cost_usd=0.0054,
+            savings_from_gate_usd=0.0001,
+            cost_is_estimate=True,
+        )
+
+    async def fake_get_tenant_memory_additions(session, *, tenant_id: str, limit: int):
+        return [
+            TenantMemoryAdditionPoint(day=datetime(2026, 3, 29, tzinfo=UTC), count=2),
+            TenantMemoryAdditionPoint(day=datetime(2026, 3, 30, tzinfo=UTC), count=5),
+        ][:limit]
+
     monkeypatch.setattr(tenant_router, "_load_tenant_budget", fake_load_tenant_budget)
     monkeypatch.setattr(tenant_router, "_list_proxy_users", fake_list_proxy_users)
     monkeypatch.setattr(tenant_router, "_list_quality_logs", fake_list_quality_logs)
     monkeypatch.setattr(tenant_router, "_update_tenant_budget_settings", fake_update_tenant_budget_settings)
     monkeypatch.setattr(tenant_router, "_send_test_webhook", fake_send_test_webhook)
+    monkeypatch.setattr(tenant_router, "_get_proxy_user_detail", fake_get_proxy_user_detail)
+    monkeypatch.setattr(tenant_router, "_get_cost_summary", fake_get_cost_summary)
+    monkeypatch.setattr(tenant_router, "_get_tenant_memory_additions", fake_get_tenant_memory_additions)
 
     with build_tenant_client(monkeypatch) as client:
         usage_response = client.get("/v1/tenant/usage")
         users_response = client.get("/v1/tenant/users", params={"limit": 2})
         stats_response = client.get("/v1/tenant/users/ext-user-123/stats")
+        cost_summary_response = client.get("/v1/tenant/cost-summary")
+        additions_response = client.get("/v1/tenant/memory-additions", params={"limit": 7})
         quality_response = client.get("/v1/tenant/quality-log", params={"limit": 2})
         settings_response = client.patch(
             "/v1/tenant/settings",
@@ -151,14 +198,28 @@ def test_tenant_usage_users_quality_log_settings_and_webhook(monkeypatch) -> Non
     assert users_response.status_code == 200
     assert users_response.json()["pagination"]["next_cursor"] == "next-user-cursor"
     assert users_response.json()["data"][0]["external_user_id"] == "user-1"
+    assert users_response.json()["data"][0]["quality_score_avg"] == 0.74
 
     assert stats_response.status_code == 200
     assert stats_response.json()["data"]["external_user_id"] == "ext-user-123"
     assert stats_response.json()["data"]["user_id"] == "ext-user-123"
     assert stats_response.json()["data"]["memory_count"] == 4
+    assert stats_response.json()["data"]["quality_score_avg"] == 0.63
+    assert stats_response.json()["data"]["total_calls_7d"] == 12
+    assert stats_response.json()["data"]["blocked_calls_7d"] == 2
+    assert stats_response.json()["data"]["block_history"][0]["layer"] == "L2"
+    assert stats_response.json()["data"]["block_history"][0]["reason"] == "low_quality"
     assert stats_response.headers["Deprecation"] == "true"
     assert "2026-10-01" in stats_response.headers["Sunset"]
     assert "user_id (sunset: 2026-10-01)" in stats_response.headers["X-MemoryOS-Deprecated-Fields"]
+
+    assert cost_summary_response.status_code == 200
+    assert cost_summary_response.json()["data"]["current_month_tokens"] == 12000
+    assert cost_summary_response.json()["data"]["cost_is_estimate"] is True
+
+    assert additions_response.status_code == 200
+    assert additions_response.json()["data"][0]["count"] == 2
+    assert additions_response.json()["data"][1]["count"] == 5
 
     assert quality_response.status_code == 200
     assert quality_response.json()["pagination"]["next_cursor"] == "next-log-cursor"

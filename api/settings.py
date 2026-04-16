@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     celery_result_backend: str = Field(default="", alias="CELERY_RESULT_BACKEND")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     local_embedding_endpoint: str = Field(default="", alias="LOCAL_EMBEDDING_ENDPOINT")
+    extraction_model: str = Field(default="", alias="EXTRACTION_MODEL")
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_dimensions: str = Field(default="", alias="EMBEDDING_DIMENSIONS")
     qdrant_collection: str = Field(default="", alias="QDRANT_COLLECTION")

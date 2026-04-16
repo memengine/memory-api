@@ -3,12 +3,10 @@ from __future__ import annotations
 import secrets
 import uuid
 
-from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.models import ApiKey
-from api.services.common import require_user_by_identifier
 from api.utils.crypto import api_key_prefix
 from api.utils.crypto import hash_api_key
 
@@ -20,14 +18,16 @@ class ApiKeyService:
     async def list_api_keys(
         self,
         *,
-        authenticated_user_id: str,
+        tenant_id: str,
         cursor: str | None,
         limit: int,
     ) -> tuple[list[ApiKey], str | None, int]:
-        user = await require_user_by_identifier(self.session, authenticated_user_id)
         result = await self.session.execute(
             select(ApiKey)
-            .where(ApiKey.user_id == user.id)
+            .where(
+                ApiKey.tenant_id == uuid.UUID(tenant_id),
+                ApiKey.is_active.is_(True),
+            )
             .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
         )
         keys = list(result.scalars().all())
@@ -39,16 +39,16 @@ class ApiKeyService:
     async def create_api_key(
         self,
         *,
-        authenticated_user_id: str,
+        tenant_id: str,
         name: str,
         permissions: list[str],
         rate_limit_per_minute: int,
     ) -> tuple[ApiKey, str]:
-        user = await require_user_by_identifier(self.session, authenticated_user_id)
         raw_key = f"mem_{secrets.token_urlsafe(24)}"
         api_key = ApiKey(
             id=uuid.uuid4(),
-            user_id=user.id,
+            tenant_id=uuid.UUID(tenant_id),
+            user_id=None,
             key_hash=hash_api_key(raw_key),
             key_prefix=api_key_prefix(raw_key),
             name=name,
@@ -64,12 +64,11 @@ class ApiKeyService:
     async def revoke_api_key(
         self,
         *,
-        authenticated_user_id: str,
+        tenant_id: str,
         api_key_id: str,
     ) -> bool:
-        user = await require_user_by_identifier(self.session, authenticated_user_id)
         api_key = await self.session.get(ApiKey, uuid.UUID(api_key_id))
-        if api_key is None or api_key.user_id != user.id:
+        if api_key is None or api_key.tenant_id != uuid.UUID(tenant_id):
             return False
         api_key.is_active = False
         await self.session.commit()

@@ -89,6 +89,7 @@ class QualityGateService:
         quality_score = 0.0
         semantic_similarity: float | None = None
         blocked_layer = CallQualityBlockedLayer.none
+        gate_reason: str | None = None
         tenant_budget: TenantBudget | None = None
 
         try:
@@ -104,10 +105,11 @@ class QualityGateService:
 
             if current_count >= rate_limit:
                 blocked_layer = CallQualityBlockedLayer.l1
+                gate_reason = "rate_limit_exceeded"
                 return GateResult(
                     passed=False,
                     blocked_layer=blocked_layer.value,
-                    reason="rate_limit_exceeded",
+                    reason=gate_reason,
                     retry_after_seconds=self._retry_after_seconds(),
                     budget_remaining_pct=budget_remaining_pct,
                 )
@@ -115,10 +117,11 @@ class QualityGateService:
             quality_score = self._conversation_quality_score(messages)
             if quality_score < QUALITY_SCORE_THRESHOLD:
                 blocked_layer = CallQualityBlockedLayer.l2
+                gate_reason = "low_quality"
                 return GateResult(
                     passed=False,
                     blocked_layer=blocked_layer.value,
-                    reason="low_quality",
+                    reason=gate_reason,
                     budget_remaining_pct=budget_remaining_pct,
                 )
 
@@ -129,10 +132,11 @@ class QualityGateService:
             )
             if semantic_similarity is not None and semantic_similarity > SEMANTIC_DUPLICATE_THRESHOLD:
                 blocked_layer = CallQualityBlockedLayer.l3
+                gate_reason = "duplicate_query"
                 return GateResult(
                     passed=False,
                     blocked_layer=blocked_layer.value,
-                    reason="duplicate_query",
+                    reason=gate_reason,
                     budget_remaining_pct=budget_remaining_pct,
                 )
 
@@ -143,10 +147,11 @@ class QualityGateService:
             )
             if not budget_decision.passed:
                 blocked_layer = CallQualityBlockedLayer.l4
+                gate_reason = budget_decision.reason
                 return GateResult(
                     passed=False,
                     blocked_layer=blocked_layer.value,
-                    reason=budget_decision.reason,
+                    reason=gate_reason,
                     budget_remaining_pct=budget_decision.budget_remaining_pct,
                 )
 
@@ -163,16 +168,18 @@ class QualityGateService:
             )
         except Exception:
             LOGGER.exception("Quality gate failed for tenant %s", tenant_id)
+            gate_reason = INTERNAL_ERROR_REASON
             return GateResult(
                 passed=False,
                 blocked_layer=None,
-                reason=INTERNAL_ERROR_REASON,
+                reason=gate_reason,
             )
         finally:
             await self._log_quality_result(
                 tenant_id=tenant_id,
                 external_user_id=external_user_id,
                 blocked_layer=blocked_layer,
+                reason=gate_reason,
                 quality_score=quality_score,
                 semantic_similarity=semantic_similarity,
             )
@@ -272,6 +279,7 @@ class QualityGateService:
         tenant_id: str,
         external_user_id: str,
         blocked_layer: CallQualityBlockedLayer,
+        reason: str | None,
         quality_score: float,
         semantic_similarity: float | None,
     ) -> None:
@@ -282,6 +290,7 @@ class QualityGateService:
                     external_user_id=external_user_id,
                     layer_blocked_at=blocked_layer,
                     quality_score=float(round(quality_score, 6)),
+                    reason=reason,
                     semantic_similarity=(
                         float(round(semantic_similarity, 6))
                         if semantic_similarity is not None

@@ -37,11 +37,43 @@ class TenantProxyUserData(BaseModel):
     last_active_at: datetime | None = None
     created_at: datetime | None = None
     is_blocked: bool = False
+    quality_score_avg: float | None = None
 
 
 class TenantUsersListResponse(ResponseEnvelope):
     data: list[TenantProxyUserData]
     pagination: CursorPage
+
+
+class TenantMemoryAdditionPoint(BaseModel):
+    day: datetime
+    count: int
+
+
+class TenantMemoryAdditionsResponse(ResponseEnvelope):
+    data: list[TenantMemoryAdditionPoint]
+
+
+class BlockEvent(BaseModel):
+    blocked_at: datetime
+    layer: BlockedLayerValue
+    reason: str | None = None
+
+
+class ProxyUserDetail(BaseModel):
+    external_user_id: str
+    user_id: str | None = None
+    memory_count: int
+    last_active_at: datetime | None = None
+    created_at: datetime | None = None
+    quality_score_avg: float | None = None
+    block_history: list[BlockEvent] = Field(default_factory=list)
+    total_calls_7d: int = 0
+    blocked_calls_7d: int = 0
+
+
+class ProxyUserDetailResponse(ResponseEnvelope):
+    data: ProxyUserDetail
 
 
 class TenantQualityLogEntry(BaseModel):
@@ -91,3 +123,17 @@ class TenantDeprecationUsageEntry(BaseModel):
 
 class TenantDeprecationUsageResponse(ResponseEnvelope):
     data: list[TenantDeprecationUsageEntry]
+
+
+class CostSummary(BaseModel):
+    current_month_tokens: int
+    estimated_cost_usd: float
+    cost_per_call: float | None = None
+    gate_block_rate: float
+    projected_month_cost_usd: float
+    savings_from_gate_usd: float
+    cost_is_estimate: bool = True
+
+
+class CostSummaryResponse(ResponseEnvelope):
+    data: CostSummary

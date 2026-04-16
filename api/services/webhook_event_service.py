@@ -27,7 +27,6 @@ from api.utils.webhook_validator import validate_webhook_url
 
 LOGGER = logging.getLogger("memoryos.webhook_events")
 WEBHOOK_EVENT_TASK_NAME = "api.tasks.quota_tasks.send_webhook_event"
-DEFAULT_UPGRADE_URL = "https://memoryos.io/pricing"
 
 
 @dataclass(slots=True)
@@ -222,7 +221,7 @@ class WebhookEventService:
 
     @staticmethod
     def _upgrade_url() -> str:
-        return os.getenv("BILLING_UPGRADE_URL", DEFAULT_UPGRADE_URL)
+        return os.getenv("BILLING_UPGRADE_URL", "").strip()
 
     @staticmethod
     def _ensure_webhook_secret(session: Session, budget: TenantBudget) -> str:

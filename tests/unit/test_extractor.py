@@ -11,6 +11,7 @@ from google.genai import types
 
 from api.schemas.memory_schemas import ExtractionResponseSchema
 from api.services.extractor import ExtractionService
+from api.settings import get_settings
 
 
 SPEC_PATH = Path("docs/extraction_spec.md")
@@ -95,6 +96,16 @@ def _parse_examples() -> list[dict[str, object]]:
 
 
 SPEC_EXAMPLES = _parse_examples()
+
+
+def test_extraction_service_uses_extraction_model_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXTRACTION_MODEL", "gemini-2.0-flash")
+    get_settings.cache_clear()
+    try:
+        service = ExtractionService(client=MagicMock())
+        assert service.model == "gemini-2.0-flash"
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.parametrize("example", SPEC_EXAMPLES, ids=lambda item: f"example_{item['number']}")

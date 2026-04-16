@@ -17,6 +17,7 @@ from api.db.models import AuditLog
 from api.db.models import Memory
 from api.db.models import MemoryCategory
 from api.infra.llm_providers import AnthropicProvider
+from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
 from api.infra.llm_providers import GeminiProvider
 from api.infra.llm_router import ExtractionUnavailableError
 from api.infra.llm_router import LLMRouter
@@ -26,6 +27,7 @@ from api.services.extractor import ExtractedMemory
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
+from api.settings import get_settings
 
 
 PROMPT_PATH = Path(__file__).with_name("prompts") / "conflict_prompt.txt"
@@ -69,7 +71,8 @@ class ConflictResolver:
         self.qdrant_service = qdrant_service
         self.embedder = embedder
         self.client = client
-        self.model = model or "gemini-2.5-flash-lite"
+        configured_model = (get_settings().extraction_model or "").strip()
+        self.model = model or configured_model or DEFAULT_GEMINI_EXTRACT_MODEL
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.default_source_conversation_id = default_source_conversation_id

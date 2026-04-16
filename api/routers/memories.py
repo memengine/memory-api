@@ -67,28 +67,43 @@ def _memory_to_data(memory) -> MemoryData:
     )
 
 
+def _memory_scope(request: Request) -> tuple[str | None, str | None]:
+    tenant_id = getattr(request.state, "tenant_id", None)
+    authenticated_user_id = getattr(request.state, "user_id", None)
+    return (
+        str(tenant_id) if tenant_id else None,
+        str(authenticated_user_id) if authenticated_user_id else None,
+    )
+
+
 @router.get("", response_model=MemoryListResponse)
 async def list_memories(
     request: Request,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
     cursor: str | None = Query(default=None, description="Cursor from the previous page."),
     limit: int = Query(default=10, ge=1, le=50, description="Maximum number of memories to return."),
     categories: list[str] = Query(default_factory=list, description="Optional category filters."),
     agent_id: str | None = Query(default=None, description="Optional agent identifier."),
+    external_user_id: str | None = Query(
+        default=None,
+        description="Optional external user identifier filter for tenant-scoped requests.",
+    ),
 ) -> MemoryListResponse:
     """List memories for the authenticated user.
 
     Parameters: cursor for pagination, limit up to 50, optional category filters, optional agent filter.
     Responses: paginated memory list wrapped in the standard envelope.
     """
+    tenant_id, authenticated_user_id = _memory_scope(request)
     memories, next_cursor, total = await memory_service.list_memories(
         requested_user_id=None,
         authenticated_user_id=authenticated_user_id,
+        tenant_id=tenant_id,
         cursor=cursor,
         limit=limit,
         categories=categories,
         agent_id=agent_id,
+        external_user_id=external_user_id,
     )
     return MemoryListResponse(
         data=[_memory_to_data(memory) for memory in memories],
@@ -250,16 +265,17 @@ async def get_memory(
     request: Request,
     memory_id: str,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
 ) -> MemoryGetResponse:
     """Fetch a single memory by id.
 
     Parameters: memory id from the path.
     Responses: a single memory record with metadata and history pointers.
     """
+    tenant_id, authenticated_user_id = _memory_scope(request)
     memory = await memory_service.get_memory(
         authenticated_user_id=authenticated_user_id,
         memory_id=memory_id,
+        tenant_id=tenant_id,
     )
     return MemoryGetResponse(
         data=_memory_to_data(memory),
@@ -274,19 +290,20 @@ async def update_memory(
     memory_id: str,
     payload: MemoryUpdateRequest,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
 ) -> MemoryMutationResponse:
     """Update memory content or importance.
 
     Parameters: memory id and optional content, importance_score, or archive state updates.
     Responses: the updated memory envelope.
     """
+    tenant_id, authenticated_user_id = _memory_scope(request)
     memory = await memory_service.update_memory(
         authenticated_user_id=authenticated_user_id,
         memory_id=memory_id,
         content=payload.content,
         importance_score=payload.importance_score,
         is_archived=payload.is_archived,
+        tenant_id=tenant_id,
     )
     return MemoryMutationResponse(
         data=_memory_to_data(memory),
@@ -300,7 +317,6 @@ async def delete_memory(
     request: Request,
     memory_id: str,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
-    authenticated_user_id: Annotated[str, Depends(get_authenticated_user_id)],
     hard_delete: bool = Query(default=False, description="Permanently delete instead of archiving."),
 ) -> MemoryDeleteResponse:
     """Delete or archive a memory.
@@ -308,10 +324,12 @@ async def delete_memory(
     Parameters: memory id and optional hard_delete query flag.
     Responses: deletion status wrapped in the standard envelope.
     """
+    tenant_id, authenticated_user_id = _memory_scope(request)
     deleted = await memory_service.delete_memory(
         authenticated_user_id=authenticated_user_id,
         memory_id=memory_id,
         hard_delete=hard_delete,
+        tenant_id=tenant_id,
     )
     return MemoryDeleteResponse(
         data=MemoryDeleteData(deleted=deleted),

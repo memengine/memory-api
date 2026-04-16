@@ -173,22 +173,36 @@ class MemoryService:
         self,
         *,
         requested_user_id: str | None,
-        authenticated_user_id: str,
+        authenticated_user_id: str | None,
+        tenant_id: str | None = None,
         cursor: str | None,
         limit: int,
         categories: list[str],
         agent_id: str | None,
+        external_user_id: str | None = None,
     ) -> tuple[list[Memory], str | None, int]:
-        user = await resolve_authorized_user(
-            self.session,
-            requested_user_id=requested_user_id,
-            authenticated_user_id=authenticated_user_id,
-        )
-        query = (
-            select(Memory)
-            .where(Memory.user_id == user.id)
-            .order_by(Memory.created_at.desc(), Memory.id.desc())
-        )
+        if tenant_id:
+            query = (
+                select(Memory)
+                .join(ProxyUser, Memory.proxy_user_id == ProxyUser.id)
+                .where(ProxyUser.tenant_id == uuid.UUID(tenant_id))
+                .order_by(Memory.created_at.desc(), Memory.id.desc())
+            )
+            if external_user_id:
+                query = query.where(ProxyUser.external_user_id == external_user_id)
+        else:
+            if not authenticated_user_id:
+                raise APIError(status_code=401, code="AUTH_001", error="unauthorized")
+            user = await resolve_authorized_user(
+                self.session,
+                requested_user_id=requested_user_id,
+                authenticated_user_id=authenticated_user_id,
+            )
+            query = (
+                select(Memory)
+                .where(Memory.user_id == user.id)
+                .order_by(Memory.created_at.desc(), Memory.id.desc())
+            )
         if categories:
             query = query.where(Memory.category.in_(categories))
         if agent_id:
@@ -208,27 +222,31 @@ class MemoryService:
     async def get_memory(
         self,
         *,
-        authenticated_user_id: str,
+        authenticated_user_id: str | None,
         memory_id: str,
+        tenant_id: str | None = None,
     ) -> Memory:
         memory = await self._get_authorized_memory(
             authenticated_user_id=authenticated_user_id,
             memory_id=memory_id,
+            tenant_id=tenant_id,
         )
         return memory
 
     async def update_memory(
         self,
         *,
-        authenticated_user_id: str,
+        authenticated_user_id: str | None,
         memory_id: str,
         content: str | None,
         importance_score: float | None,
         is_archived: bool | None,
+        tenant_id: str | None = None,
     ) -> Memory:
         memory = await self._get_authorized_memory(
             authenticated_user_id=authenticated_user_id,
             memory_id=memory_id,
+            tenant_id=tenant_id,
         )
         requires_vector_sync = content is not None or importance_score is not None or is_archived is not None
         next_content = content if content is not None else memory.content
@@ -284,13 +302,15 @@ class MemoryService:
     async def delete_memory(
         self,
         *,
-        authenticated_user_id: str,
+        authenticated_user_id: str | None,
         memory_id: str,
         hard_delete: bool,
+        tenant_id: str | None = None,
     ) -> bool:
         memory = await self._get_authorized_memory(
             authenticated_user_id=authenticated_user_id,
             memory_id=memory_id,
+            tenant_id=tenant_id,
         )
         if hard_delete:
             qdrant_collection = await self._embedding_collection_for_memory(memory)
@@ -400,16 +420,33 @@ class MemoryService:
     async def _get_authorized_memory(
         self,
         *,
-        authenticated_user_id: str,
+        authenticated_user_id: str | None,
         memory_id: str,
+        tenant_id: str | None = None,
     ) -> Memory:
-        user = await resolve_authorized_user(
-            self.session,
-            requested_user_id=None,
-            authenticated_user_id=authenticated_user_id,
-        )
-        memory = await self.session.get(Memory, uuid.UUID(memory_id))
-        if memory is None or memory.user_id != user.id:
+        if tenant_id:
+            statement = (
+                select(Memory)
+                .join(ProxyUser, Memory.proxy_user_id == ProxyUser.id)
+                .where(
+                    Memory.id == uuid.UUID(memory_id),
+                    ProxyUser.tenant_id == uuid.UUID(tenant_id),
+                )
+            )
+            result = await self.session.execute(statement)
+            memory = result.scalar_one_or_none()
+        else:
+            if not authenticated_user_id:
+                raise APIError(status_code=401, code="AUTH_001", error="unauthorized")
+            user = await resolve_authorized_user(
+                self.session,
+                requested_user_id=None,
+                authenticated_user_id=authenticated_user_id,
+            )
+            memory = await self.session.get(Memory, uuid.UUID(memory_id))
+            if memory is not None and memory.user_id != user.id:
+                memory = None
+        if memory is None:
             raise APIError(
                 status_code=404,
                 code="MEM_404",

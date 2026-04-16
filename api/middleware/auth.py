@@ -55,6 +55,16 @@ class ApiKeyAuthResult:
     key_hash: str
 
 
+@dataclass(slots=True)
+class JwtAuthResult:
+    user_id: str | None
+    tenant_id: str | None
+    error: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    org_id: str | None = None
+
+
 class _DirectRedisBreaker:
     async def call(self, fn, *args, fallback=None, **kwargs):
         return await fn(*args, **kwargs)
@@ -133,15 +143,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         scheme_normalized = scheme.lower()
         if scheme_normalized == "bearer":
-            user_id = await self._authenticate_jwt(credentials.strip())
-            if user_id is None:
+            auth_result = await self._authenticate_jwt(credentials.strip())
+            if auth_result is None:
                 return await self._unauthorized(
                     request=request,
                     request_id=request_id,
                     reason="JWT verification failed",
                 )
-            request.state.user_id = user_id
+            requires_tenant_context = request.url.path.startswith("/v1/tenant")
+            if auth_result.error_code and requires_tenant_context:
+                return await self._jwt_auth_error(
+                    request=request,
+                    request_id=request_id,
+                    reason=auth_result.error or "JWT tenant resolution failed",
+                    error=auth_result.error or "unauthorized",
+                    code=auth_result.error_code,
+                    message=auth_result.error_message or "JWT authentication failed.",
+                    org_id=auth_result.org_id,
+                )
+            request.state.user_id = auth_result.user_id
+            request.state.tenant_id = (
+                auth_result.tenant_id if not auth_result.error_code else None
+            )
             request.state.auth_scheme = "bearer"
+            request.state.auth_method = "clerk_jwt"
             return await call_next(request)
 
         if scheme_normalized == "apikey":
@@ -164,7 +189,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             reason="Unsupported authorization scheme",
         )
 
-    async def _authenticate_jwt(self, token: str) -> str | None:
+    async def _authenticate_jwt(self, token: str) -> JwtAuthResult | None:
         if not self.clerk_jwks_url:
             return None
 
@@ -197,9 +222,111 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return None
 
             subject = claims.get("sub")
-            return str(subject) if subject else None
+            if not subject:
+                return None
+
+            tenant_id = self._jwt_tenant_id(claims)
+            if tenant_id is not None:
+                return JwtAuthResult(
+                    user_id=str(subject),
+                    tenant_id=tenant_id,
+                )
+
+            org_id = str(claims.get("org_id", "")).strip() or None
+            if org_id is None:
+                return JwtAuthResult(
+                    user_id=str(subject),
+                    tenant_id=None,
+                    error="org_required",
+                    error_code="AUTH_003",
+                    error_message=(
+                        "Please select your organisation in the dashboard to continue."
+                    ),
+                    org_id=None,
+                )
+
+            tenant_id = await self._resolve_tenant_id_from_clerk_org(org_id)
+            if tenant_id is None:
+                return JwtAuthResult(
+                    user_id=str(subject),
+                    tenant_id=None,
+                    error="tenant_not_found",
+                    error_code="AUTH_002",
+                    error_message=(
+                        "No MemoryOS tenant found for this organisation. Please contact support."
+                    ),
+                    org_id=org_id,
+                )
+
+            return JwtAuthResult(
+                user_id=str(subject),
+                tenant_id=tenant_id,
+                org_id=org_id,
+            )
         except (JWTError, ValueError, TypeError, httpx.HTTPError):
             return None
+
+    def _jwt_tenant_id(self, claims: dict[str, Any]) -> str | None:
+        # Support both direct custom claims and nested metadata if Clerk templates add them later.
+        tenant_id = claims.get("tenant_id")
+        if tenant_id:
+            return str(tenant_id)
+
+        metadata = claims.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("tenant_id"):
+            return str(metadata["tenant_id"])
+
+        public_metadata = claims.get("public_metadata")
+        if isinstance(public_metadata, dict) and public_metadata.get("tenant_id"):
+            return str(public_metadata["tenant_id"])
+
+        return None
+
+    async def _resolve_tenant_id_from_clerk_org(self, org_id: str | None) -> str | None:
+        if not org_id:
+            return None
+
+        cache_key = f"clerk_org:{org_id}:tenant_id"
+        try:
+            cached_value = await self.redis_breaker.call(
+                self.redis_client.get,
+                cache_key,
+                fallback=lambda: on_redis_open(None),
+            )
+        except REDIS_FAILURES:
+            self._mark_redis_unavailable()
+            cached_value = None
+
+        if cached_value:
+            return str(cached_value)
+
+        from api.db.models import Tenant
+
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(Tenant.id).where(
+                    Tenant.clerk_org_id == org_id,
+                    Tenant.is_active.is_(True),
+                )
+            )
+            tenant_id = result.scalar_one_or_none()
+
+        if tenant_id is None:
+            return None
+
+        tenant_id_str = str(tenant_id)
+        try:
+            await self.redis_breaker.call(
+                self.redis_client.set,
+                cache_key,
+                tenant_id_str,
+                ex=AUTH_CACHE_TTL_SECONDS,
+                fallback=lambda: on_redis_open(None),
+            )
+        except REDIS_FAILURES:
+            self._mark_redis_unavailable()
+
+        return tenant_id_str
 
     async def _authenticate_api_key(self, raw_api_key: str) -> ApiKeyAuthResult | None:
         cache_key = self._api_key_cache_key(raw_api_key)
@@ -347,6 +474,43 @@ class AuthMiddleware(BaseHTTPMiddleware):
             content={
                 "error": "unauthorized",
                 "code": "AUTH_001",
+                "request_id": request_id,
+            },
+        )
+
+    async def _jwt_auth_error(
+        self,
+        *,
+        request: Request,
+        request_id: str,
+        reason: str,
+        error: str,
+        code: str,
+        message: str,
+        org_id: str | None,
+    ) -> JSONResponse:
+        attempt_count = await self._record_auth_failure(request)
+        LOGGER.warning(
+            json.dumps(
+                {
+                    "event": "auth_failure",
+                    "code": code,
+                    "reason": reason,
+                    "path": request.url.path,
+                    "method": request.method,
+                    "ip_address": self._client_ip(request),
+                    "attempt_count": attempt_count,
+                    "request_id": request_id,
+                    "org_id": org_id,
+                }
+            )
+        )
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": error,
+                "code": code,
+                "message": message,
                 "request_id": request_id,
             },
         )

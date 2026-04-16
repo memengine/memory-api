@@ -32,10 +32,16 @@ class FakeExecuteResult:
     def all(self):
         return list(self._items)
 
+    def scalar_one_or_none(self):
+        if not self._items:
+            return None
+        return self._items[0]
+
 
 @dataclass
 class FakeSession:
     api_keys: list[ApiKey]
+    clerk_org_to_tenant_id: dict[str, uuid.UUID] | None = None
     execute_calls: int = 0
     commit_calls: int = 0
 
@@ -45,8 +51,19 @@ class FakeSession:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
 
-    async def execute(self, _query):
+    async def execute(self, query):
         self.execute_calls += 1
+        query_text = str(query)
+        if "FROM tenants" in query_text:
+            org_id = None
+            for criterion in getattr(query, "_where_criteria", ()):
+                right = getattr(criterion, "right", None)
+                value = getattr(right, "value", None)
+                if value is not None:
+                    org_id = str(value)
+                    break
+            tenant_id = (self.clerk_org_to_tenant_id or {}).get(org_id or "")
+            return FakeExecuteResult([tenant_id] if tenant_id is not None else [])
         return FakeExecuteResult(self.api_keys)
 
     async def commit(self) -> None:
@@ -54,8 +71,16 @@ class FakeSession:
 
 
 class FakeSessionFactory:
-    def __init__(self, api_keys: list[ApiKey]) -> None:
-        self.session = FakeSession(api_keys=api_keys)
+    def __init__(
+        self,
+        api_keys: list[ApiKey],
+        *,
+        clerk_org_to_tenant_id: dict[str, uuid.UUID] | None = None,
+    ) -> None:
+        self.session = FakeSession(
+            api_keys=api_keys,
+            clerk_org_to_tenant_id=clerk_org_to_tenant_id,
+        )
 
     def __call__(self) -> FakeSession:
         return self.session
@@ -132,6 +157,7 @@ def build_test_app(
     async def private(request: Request) -> dict[str, str | None]:
         return {
             "user_id": getattr(request.state, "user_id", None),
+            "tenant_id": getattr(request.state, "tenant_id", None),
             "auth_scheme": getattr(request.state, "auth_scheme", None),
         }
 
@@ -184,6 +210,91 @@ def test_bearer_token_is_verified_against_clerk_jwks() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "user_id": "user_clerk_123",
+        "tenant_id": None,
+        "auth_scheme": "bearer",
+    }
+
+
+def test_bearer_token_uses_tenant_id_claim_when_present() -> None:
+    private_key, jwks = build_rsa_jwks()
+    issuer = "https://clerk.example.test"
+    tenant_id = str(uuid.uuid4())
+    token = jwt.encode(
+        {
+            "sub": "user_clerk_456",
+            "iss": issuer,
+            "exp": int(time.time()) + 3600,
+            "tenant_id": tenant_id,
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "test-key-id"},
+    )
+
+    async def jwks_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=jwks)
+
+    transport = httpx.MockTransport(jwks_handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    app = build_test_app(
+        session_factory=FakeSessionFactory(api_keys=[]),
+        redis_client=redis_client,
+        http_client=http_client,
+        clerk_issuer=issuer,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/private", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user_clerk_456",
+        "tenant_id": tenant_id,
+        "auth_scheme": "bearer",
+    }
+
+
+def test_bearer_token_maps_clerk_org_id_to_tenant() -> None:
+    private_key, jwks = build_rsa_jwks()
+    issuer = "https://clerk.example.test"
+    tenant_id = uuid.uuid4()
+    org_id = "org_2abc123"
+    token = jwt.encode(
+        {
+            "sub": "user_clerk_789",
+            "iss": issuer,
+            "exp": int(time.time()) + 3600,
+            "org_id": org_id,
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "test-key-id"},
+    )
+
+    async def jwks_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=jwks)
+
+    transport = httpx.MockTransport(jwks_handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    app = build_test_app(
+        session_factory=FakeSessionFactory(
+            api_keys=[],
+            clerk_org_to_tenant_id={org_id: tenant_id},
+        ),
+        redis_client=redis_client,
+        http_client=http_client,
+        clerk_issuer=issuer,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/private", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user_clerk_789",
+        "tenant_id": str(tenant_id),
         "auth_scheme": "bearer",
     }
 

@@ -12,6 +12,7 @@ from api.db.models import Memory
 from api.db.models import MemoryCategory
 from api.db.models import VectorSyncOperation
 from api.db.models import VectorSyncOutbox
+from api.settings import get_settings
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.conflict_resolver import ConflictResolver
 from api.services.extractor import ExtractedMemory
@@ -116,6 +117,22 @@ def make_llm_client(action: str, merged_memory: dict | None = None) -> MagicMock
         )
     )
     return client
+
+
+def test_conflict_resolver_uses_extraction_model_from_settings(monkeypatch) -> None:
+    monkeypatch.setenv("EXTRACTION_MODEL", "gemini-2.0-flash")
+    get_settings.cache_clear()
+    try:
+        resolver = ConflictResolver(
+            session=FakeSession(),
+            qdrant_service=MagicMock(),
+            embedder=lambda _text: [0.1] * 3,
+            client=MagicMock(),
+            default_source_conversation_id=uuid.uuid4(),
+        )
+        assert resolver.model == "gemini-2.0-flash"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_update_resolution_archives_old_and_links_new_version() -> None:
