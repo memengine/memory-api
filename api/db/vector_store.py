@@ -23,6 +23,7 @@ def get_qdrant_url(url: str | None = None) -> str:
 
 class QdrantService:
     COLLECTION_NAME = "memories"
+    UNIVERSAL_COLLECTION_NAME = "universal_memories"
     VECTOR_SIZE = 1536
     MAX_RETRIES = 3
     INITIAL_BACKOFF_SECONDS = 0.5
@@ -41,6 +42,7 @@ class QdrantService:
         if client is not None:
             self.client = client
             self._ensure_collection_if_possible(self.COLLECTION_NAME, self.VECTOR_SIZE)
+            self._ensure_collection_if_possible(self.UNIVERSAL_COLLECTION_NAME, self.VECTOR_SIZE)
             return
 
         if self.__class__._shared_client is None:
@@ -51,6 +53,7 @@ class QdrantService:
             )
         self.client = self.__class__._shared_client
         self._ensure_collection_if_possible(self.COLLECTION_NAME, self.VECTOR_SIZE)
+        self._ensure_collection_if_possible(self.UNIVERSAL_COLLECTION_NAME, self.VECTOR_SIZE)
 
     @classmethod
     def _reset_shared_state(cls) -> None:
@@ -119,15 +122,8 @@ class QdrantService:
                 ),
             )
 
-        for field_name, field_schema in (
-            ("tenant_id", qmodels.PayloadSchemaType.KEYWORD),
-            ("proxy_user_id", qmodels.PayloadSchemaType.KEYWORD),
-            ("agent_id", qmodels.PayloadSchemaType.KEYWORD),
-            ("category", qmodels.PayloadSchemaType.KEYWORD),
-            ("importance_score", qmodels.PayloadSchemaType.FLOAT),
-            ("is_archived", qmodels.PayloadSchemaType.BOOL),
-            ("created_at", qmodels.PayloadSchemaType.DATETIME),
-        ):
+        index_fields = self._payload_indexes_for_collection(collection_name)
+        for field_name, field_schema in index_fields:
             self._with_retries(
                 self.client.create_payload_index,
                 collection_name=collection_name,
@@ -135,6 +131,30 @@ class QdrantService:
                 field_schema=field_schema,
                 wait=True,
             )
+
+    def _payload_indexes_for_collection(
+        self,
+        collection_name: str,
+    ) -> tuple[tuple[str, qmodels.PayloadSchemaType], ...]:
+        if collection_name == self.UNIVERSAL_COLLECTION_NAME:
+            return (
+                ("user_uui_id", qmodels.PayloadSchemaType.KEYWORD),
+                ("source_agent_id", qmodels.PayloadSchemaType.KEYWORD),
+                ("category", qmodels.PayloadSchemaType.KEYWORD),
+                ("importance_score", qmodels.PayloadSchemaType.FLOAT),
+                ("is_archived", qmodels.PayloadSchemaType.BOOL),
+                ("created_at", qmodels.PayloadSchemaType.DATETIME),
+            )
+
+        return (
+            ("tenant_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("proxy_user_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("agent_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("category", qmodels.PayloadSchemaType.KEYWORD),
+            ("importance_score", qmodels.PayloadSchemaType.FLOAT),
+            ("is_archived", qmodels.PayloadSchemaType.BOOL),
+            ("created_at", qmodels.PayloadSchemaType.DATETIME),
+        )
 
     def upsert_memory(
         self,
@@ -329,6 +349,42 @@ class QdrantService:
                 wait=True,
             )
             deleted_count += collection_deleted
+        return deleted_count
+
+    def delete_universal_user_memories(
+        self,
+        user_uui_id: str,
+        *,
+        collection_name: str = "universal_memories",
+    ) -> int:
+        target_collection = collection_name
+        self._ensure_collection_if_possible(target_collection)
+        user_filter = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="user_uui_id",
+                    match=qmodels.MatchValue(value=str(user_uui_id)),
+                )
+            ]
+        )
+
+        count_result = self._with_retries(
+            self.client.count,
+            collection_name=target_collection,
+            count_filter=user_filter,
+            exact=True,
+        )
+        deleted_count = int(count_result.count)
+
+        if deleted_count == 0:
+            return 0
+
+        self._with_retries(
+            self.client.delete,
+            collection_name=target_collection,
+            points_selector=qmodels.FilterSelector(filter=user_filter),
+            wait=True,
+        )
         return deleted_count
 
     def get_collection_stats(self, collection_name: str | None = None) -> dict[str, Any]:

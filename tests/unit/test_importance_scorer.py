@@ -154,7 +154,7 @@ def test_increment_access_caps_total_importance_boost_at_half_point_after_100_ca
     assert memory.importance_score == starting_score + 0.5
 
 
-def test_decay_cycle_archives_memory_accessed_40_days_ago_with_importance_two() -> None:
+def test_decay_cycle_keeps_recent_or_moderate_importance_memories() -> None:
     now = datetime.now(UTC)
     stale_memory = make_memory(
         importance_score=2.0,
@@ -164,26 +164,31 @@ def test_decay_cycle_archives_memory_accessed_40_days_ago_with_importance_two() 
 
     archived_count = run_decay_cycle(session_factory=lambda: session, now=now)
 
-    assert archived_count == 1
-    assert stale_memory.is_archived is True
+    assert archived_count == 0
+    assert stale_memory.is_archived is False
 
 
-def test_decay_cycle_archives_only_stale_low_importance_memories() -> None:
+def test_decay_cycle_archives_only_very_old_low_importance_never_accessed_memories() -> None:
     now = datetime.now(UTC)
     stale_low_importance = make_memory(
-        importance_score=2.4,
-        last_accessed_at=now - timedelta(days=31),
+        importance_score=1.2,
+        last_accessed_at=now - timedelta(days=91),
     )
     recent_low_importance = make_memory(
-        importance_score=2.1,
+        importance_score=1.2,
         last_accessed_at=now - timedelta(days=10),
     )
     stale_high_importance = make_memory(
         importance_score=4.5,
-        last_accessed_at=now - timedelta(days=45),
+        last_accessed_at=now - timedelta(days=120),
+    )
+    accessed_low_importance = make_memory(
+        importance_score=1.2,
+        access_count=1,
+        last_accessed_at=now - timedelta(days=120),
     )
     session = FakeSession(
-        [stale_low_importance, recent_low_importance, stale_high_importance]
+        [stale_low_importance, recent_low_importance, stale_high_importance, accessed_low_importance]
     )
 
     archived_count = run_decay_cycle(session_factory=lambda: session, now=now)
@@ -192,6 +197,7 @@ def test_decay_cycle_archives_only_stale_low_importance_memories() -> None:
     assert stale_low_importance.is_archived is True
     assert recent_low_importance.is_archived is False
     assert stale_high_importance.is_archived is False
+    assert accessed_low_importance.is_archived is False
     assert session.commits == 1
     assert session.closed is True
     assert any(

@@ -3,7 +3,8 @@ x-app-env: &app-env
   REDIS_URL: redis://redis:6379/0
   CELERY_BROKER_URL: redis://redis:6379/0
   CELERY_RESULT_BACKEND: redis://redis:6379/1
-  QDRANT_URL: http://qdrant:6333
+  QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
   AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://localstack:4566}
   APP_ENV: ${APP_ENV:-development}
   APP_VERSION: ${APP_VERSION:-dev}

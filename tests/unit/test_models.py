@@ -16,6 +16,7 @@ from api.db.models import User
 
 def test_expected_tables_are_registered() -> None:
     assert sorted(Base.metadata.tables.keys()) == [
+        "agent_api_keys",
         "agents",
         "api_deprecated_fields",
         "api_keys",
@@ -25,14 +26,20 @@ def test_expected_tables_are_registered() -> None:
         "dead_letter_jobs",
         "embedding_models",
         "extraction_jobs",
+        "global_agents",
         "llm_provider_config",
         "memories",
+        "memory_versions",
+        "permission_grants",
         "proxy_users",
         "regions",
         "tenant_budgets",
         "tenant_deprecation_usage",
         "tenants",
+        "universal_memories",
+        "universal_users",
         "users",
+        "uui_proxy_link",
         "vector_sync_outbox",
     ]
 
@@ -141,6 +148,7 @@ def test_enums_expose_requested_values() -> None:
         "deleted",
         "retrieved",
         "proxy_user_deleted",
+        "job_discarded",
     ]
 
 

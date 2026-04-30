@@ -16,6 +16,9 @@ from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_redis_open
 from api.settings import get_settings
 HOT_MEMORIES_SUFFIX = "hot_memories"
+HOT_TIER_PREFIX = "hot_memory"
+LIFECYCLE_REPORT_PREFIX = "lifecycle_report"
+LIFECYCLE_REPORT_INDEX = "lifecycle_report:index"
 RATE_LIMIT_PREFIX = "rate"
 JOB_STATUS_PREFIX = "job"
 IDEMPOTENCY_PREFIX = "idempotency"
@@ -69,6 +72,18 @@ class CacheService:
     @staticmethod
     def _hot_memories_key(user_id: str) -> str:
         return f"user:{user_id}:{HOT_MEMORIES_SUFFIX}"
+
+    @staticmethod
+    def _hot_tier_memory_key(proxy_user_id: str, memory_id: str) -> str:
+        return f"{HOT_TIER_PREFIX}:{proxy_user_id}:{memory_id}"
+
+    @staticmethod
+    def _hot_tier_memory_pattern(proxy_user_id: str) -> str:
+        return f"{HOT_TIER_PREFIX}:{proxy_user_id}:*"
+
+    @staticmethod
+    def _lifecycle_report_key(tenant_id: str) -> str:
+        return f"{LIFECYCLE_REPORT_PREFIX}:{tenant_id}"
 
     @staticmethod
     def _rate_limit_key(key_hash: str, window_seconds: int) -> str:
@@ -134,6 +149,92 @@ class CacheService:
         except REDIS_FAILURES:
             self._mark_redis_unavailable()
             return None
+
+    async def set_hot_tier_memory(
+        self,
+        proxy_user_id: str,
+        memory_id: str,
+        memory: dict[str, Any],
+        ttl: int = 86400,
+    ) -> None:
+        if ttl <= 0:
+            raise ValueError("TTL must be greater than zero.")
+        try:
+            await self.breaker.call(
+                self.client.set,
+                self._hot_tier_memory_key(proxy_user_id, memory_id),
+                json.dumps(memory, default=str),
+                ex=ttl,
+                fallback=lambda: on_redis_open(None),
+            )
+        except Exception:
+            self._mark_redis_unavailable()
+            return None
+
+    async def get_hot_tier_memories(self, proxy_user_id: str) -> list[dict[str, Any]]:
+        memories: list[dict[str, Any]] = []
+        try:
+            keys = []
+            async for key in self.client.scan_iter(self._hot_tier_memory_pattern(proxy_user_id)):
+                keys.append(key)
+            if not keys:
+                return []
+            raw_values = await self.breaker.call(
+                self.client.mget,
+                keys,
+                fallback=lambda: on_redis_open([]),
+            )
+        except Exception:
+            self._mark_redis_unavailable()
+            return []
+
+        for raw_value in raw_values or []:
+            if raw_value is None:
+                continue
+            try:
+                payload = json.loads(raw_value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                memories.append(payload)
+        return memories
+
+    async def set_lifecycle_report(
+        self,
+        tenant_id: str,
+        report: dict[str, Any],
+        ttl: int = 604800,
+    ) -> None:
+        key = self._lifecycle_report_key(tenant_id)
+        try:
+            await self._set_json(key, report, ttl=ttl)
+            await self.breaker.call(
+                self.client.sadd,
+                LIFECYCLE_REPORT_INDEX,
+                str(tenant_id),
+                fallback=lambda: on_redis_open(None),
+            )
+        except Exception:
+            self._mark_redis_unavailable()
+            return None
+
+    async def get_lifecycle_reports(self) -> list[dict[str, Any]]:
+        try:
+            tenant_ids = await self.breaker.call(
+                self.client.smembers,
+                LIFECYCLE_REPORT_INDEX,
+                fallback=lambda: on_redis_open([]),
+            )
+        except Exception:
+            self._mark_redis_unavailable()
+            return []
+
+        reports: list[dict[str, Any]] = []
+        for tenant_id in sorted(tenant_ids or []):
+            report = await self._get_json(self._lifecycle_report_key(str(tenant_id)))
+            if report is not None:
+                reports.append(report)
+        return reports
 
     async def increment_rate_counter(self, api_key: str, window_seconds: int = 60) -> int:
         key = self._rate_limit_key(api_key, window_seconds)

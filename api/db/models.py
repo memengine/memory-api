@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import Boolean
 from sqlalchemy import BigInteger
+from sqlalchemy import CheckConstraint
 from sqlalchemy import DateTime
 from sqlalchemy import Enum
 from sqlalchemy import Float
@@ -16,6 +17,7 @@ from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Text
+from sqlalchemy import UniqueConstraint
 from sqlalchemy import func
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -274,6 +276,14 @@ class Tenant(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    global_agents: Mapped[list[GlobalAgent]] = relationship(
+        back_populates="owner_tenant",
+        cascade="all, delete-orphan",
+    )
+    uui_proxy_links: Mapped[list[UUIProxyLink]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
 
 
 class ApiKey(Base):
@@ -484,6 +494,51 @@ class Memory(Base):
     )
     next_versions: Mapped[list[Memory]] = relationship(back_populates="previous_version")
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="memory")
+    versions: Mapped[list[MemoryVersion]] = relationship(
+        back_populates="memory",
+        cascade="all, delete-orphan",
+    )
+
+
+class MemoryVersion(Base):
+    __tablename__ = "memory_versions"
+    __table_args__ = (
+        UniqueConstraint("memory_id", "version_number", name="uq_memory_versions_memory_version"),
+        CheckConstraint(
+            "change_type IN ('created', 'conflict_update', 'manual_edit', 'importance_decay', 'importance_boost', 'archived')",
+            name="ck_memory_versions_change_type",
+        ),
+        CheckConstraint(
+            "changed_by IN ('system', 'user', 'operator')",
+            name="ck_memory_versions_changed_by",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    memory_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    change_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    change_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(50), nullable=False, server_default=text("'system'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    memory: Mapped[Memory] = relationship(back_populates="versions")
 
 
 class AuditLog(Base):
@@ -582,6 +637,295 @@ class ProxyUser(Base):
         back_populates="proxy_user",
         cascade="all, delete-orphan",
     )
+    uui_proxy_link: Mapped[UUIProxyLink | None] = relationship(
+        back_populates="proxy_user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class UniversalUser(Base):
+    __tablename__ = "universal_users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    uui_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    otp_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
+    otp_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    memory_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+
+    permission_grants: Mapped[list[PermissionGrant]] = relationship(
+        back_populates="universal_user",
+        cascade="all, delete-orphan",
+    )
+    universal_memories: Mapped[list[UniversalMemory]] = relationship(
+        back_populates="universal_user",
+        cascade="all, delete-orphan",
+    )
+    proxy_links: Mapped[list[UUIProxyLink]] = relationship(
+        back_populates="universal_user",
+        cascade="all, delete-orphan",
+    )
+
+
+class GlobalAgent(Base):
+    __tablename__ = "global_agents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    owner_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    website_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    default_categories_requested: Mapped[list[str]] = mapped_column(
+        ARRAY(String()),
+        nullable=False,
+        server_default=EMPTY_TEXT_ARRAY,
+    )
+    redirect_uri: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        server_default=text("''"),
+    )
+    is_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    is_public: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+
+    owner_tenant: Mapped[Tenant] = relationship(back_populates="global_agents")
+    api_keys: Mapped[list[AgentApiKey]] = relationship(
+        back_populates="global_agent",
+        cascade="all, delete-orphan",
+    )
+    permission_grants: Mapped[list[PermissionGrant]] = relationship(
+        back_populates="global_agent",
+        cascade="all, delete-orphan",
+    )
+    universal_memories: Mapped[list[UniversalMemory]] = relationship(
+        back_populates="source_agent",
+        cascade="all, delete-orphan",
+    )
+
+
+class PermissionGrant(Base):
+    __tablename__ = "permission_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "access_type IN ('read_only', 'read_write')",
+            name="ck_permission_grants_access_type",
+        ),
+        UniqueConstraint("user_uui_id", "agent_id", name="uq_permission_grants_user_agent"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    user_uui_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("global_agents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    categories_allowed: Mapped[list[str]] = mapped_column(
+        ARRAY(String()),
+        nullable=False,
+        server_default=EMPTY_TEXT_ARRAY,
+    )
+    access_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'read_only'"),
+    )
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    universal_user: Mapped[UniversalUser] = relationship(back_populates="permission_grants")
+    global_agent: Mapped[GlobalAgent] = relationship(back_populates="permission_grants")
+
+
+class UniversalMemory(Base):
+    __tablename__ = "universal_memories"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('preference','fact','goal','procedure','relationship','expertise')",
+            name="ck_universal_memories_category",
+        ),
+        CheckConstraint("importance_score > 0 AND importance_score <= 10", name="ck_universal_memories_importance"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_universal_memories_confidence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    user_uui_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("global_agents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    embedding_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+
+    universal_user: Mapped[UniversalUser] = relationship(back_populates="universal_memories")
+    source_agent: Mapped[GlobalAgent] = relationship(back_populates="universal_memories")
+
+
+class UUIProxyLink(Base):
+    __tablename__ = "uui_proxy_link"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "proxy_user_id", name="uq_uui_proxy_link_tenant_proxy_user"),
+        UniqueConstraint("proxy_user_id", name="uq_uui_proxy_link_proxy_user"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_uui_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="uui_proxy_links")
+    proxy_user: Mapped[ProxyUser] = relationship(back_populates="uui_proxy_link")
+    universal_user: Mapped[UniversalUser] = relationship(back_populates="proxy_links")
+
+
+class AgentApiKey(Base):
+    __tablename__ = "agent_api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    global_agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("global_agents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key_hash: Mapped[str] = mapped_column(String(60), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    global_agent: Mapped[GlobalAgent] = relationship(back_populates="api_keys")
 
 
 class TenantBudget(Base):
@@ -940,6 +1284,7 @@ Index("ix_memories_user_category", Memory.user_id, Memory.category)
 Index("ix_memories_user_importance_score_desc", Memory.user_id, Memory.importance_score.desc())
 Index("ix_memories_user_last_accessed_at_desc", Memory.user_id, Memory.last_accessed_at.desc())
 Index("ix_memories_user_is_archived", Memory.user_id, Memory.is_archived)
+Index("ix_memory_versions_memory_id", MemoryVersion.memory_id)
 Index("ix_memories_proxy_user_category", Memory.proxy_user_id, Memory.category)
 Index("ix_memories_proxy_user_importance_score_desc", Memory.proxy_user_id, Memory.importance_score.desc())
 Index("ix_memories_proxy_user_last_accessed_at_desc", Memory.proxy_user_id, Memory.last_accessed_at.desc())
@@ -949,6 +1294,24 @@ Index("ix_memories_metadata_gin", Memory.__table__.c.metadata, postgresql_using=
 Index("ix_api_keys_key_prefix", ApiKey.key_prefix)
 Index("ix_proxy_users_tenant_hash", ProxyUser.tenant_id, ProxyUser.external_user_id_hash, unique=True)
 Index("ix_proxy_users_tenant_active", ProxyUser.tenant_id, ProxyUser.last_active_at.desc())
+Index("ix_universal_users_uui_token", UniversalUser.uui_token, unique=True)
+Index("ix_universal_users_email", UniversalUser.email, unique=True)
+Index("ix_permission_grants_user_active", PermissionGrant.user_uui_id, PermissionGrant.is_active)
+Index("ix_permission_grants_agent_active", PermissionGrant.agent_id, PermissionGrant.is_active)
+Index(
+    "ix_universal_memories_user_category_archived",
+    UniversalMemory.user_uui_id,
+    UniversalMemory.category,
+    UniversalMemory.is_archived,
+)
+Index(
+    "ix_universal_memories_user_importance_desc",
+    UniversalMemory.user_uui_id,
+    UniversalMemory.importance_score.desc(),
+)
+Index("ix_universal_memories_source_agent_id", UniversalMemory.source_agent_id)
+Index("ix_agent_api_keys_key_prefix", AgentApiKey.key_prefix)
+Index("ix_agent_api_keys_global_agent_active", AgentApiKey.global_agent_id, AgentApiKey.is_active)
 Index("ix_tenants_region_id", Tenant.region_id)
 Index(
     "ix_api_deprecated_fields_version_path",
@@ -986,6 +1349,7 @@ Index(
 
 __all__ = [
     "Agent",
+    "AgentApiKey",
     "AgentMemoryScope",
     "ApiKey",
     "ApiDeprecatedField",
@@ -1002,19 +1366,25 @@ __all__ = [
     "ExtractionJobStatus",
     "EmbeddingModel",
     "EmbeddingProvider",
+    "GlobalAgent",
     "LLMProviderConfig",
     "LLMProviderName",
     "Memory",
     "MemoryCategory",
+    "MemoryVersion",
     "OveragePolicy",
     "PlanTier",
+    "PermissionGrant",
     "ProxyUser",
     "QuotaMode",
     "Region",
     "Tenant",
     "TenantBudget",
     "TenantDeprecationUsage",
+    "UUIProxyLink",
     "User",
+    "UniversalMemory",
+    "UniversalUser",
     "VectorSyncOperation",
     "VectorSyncOutbox",
     "VectorSyncStatus",

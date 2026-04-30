@@ -10,13 +10,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from api.infra.llm_providers import AnthropicProvider
 from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
-from api.infra.llm_providers import GeminiProvider
-from api.infra.llm_router import ExtractionUnavailableError
-from api.infra.llm_router import LLMRouter
 from api.schemas.memory_schemas import ExtractedMemory
 from api.schemas.memory_schemas import ExtractionResponseSchema
+from api.services.llm_service import LLMProvider
+from api.services.llm_service import LLMService
 from api.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -32,7 +30,7 @@ class ExtractionService:
         client: Any | None = None,
         model: str | None = None,
         prompt_path: Path | None = None,
-        llm_router: LLMRouter | None = None,
+        llm_service: LLMService | None = None,
     ) -> None:
         self.client = client
         configured_model = (get_settings().extraction_model or "").strip()
@@ -40,18 +38,10 @@ class ExtractionService:
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.last_usage_events: list[dict[str, Any]] = []
-        self.llm_router = llm_router or LLMRouter(
-            provider_factories={
-                "gemini": lambda **overrides: GeminiProvider(
-                    client=overrides.pop("client", None) or self.client,
-                    extract_model=overrides.pop("extract_model", self.model),
-                    **overrides,
-                ),
-                "anthropic": lambda **overrides: AnthropicProvider(
-                    extract_model=overrides.pop("extract_model", "claude-haiku-4-5-20251001"),
-                    **overrides,
-                ),
-            }
+        self.llm_service = llm_service or LLMService(
+            provider_clients={LLMProvider.GEMINI: self.client} if self.client is not None else None,
+            require_provider=self.client is None,
+            use_state_store=self.client is None,
         )
 
     def extract(self, messages: list[dict[str, Any]], user_id: str) -> list[ExtractedMemory]:
@@ -81,21 +71,26 @@ class ExtractionService:
                 retry_feedback=retry_feedback,
             )
 
-            try:
-                provider = self.llm_router.get_extract_provider()
-            except ExtractionUnavailableError:
-                logger.warning("Extraction providers unavailable for user %s chunk %s", user_id, chunk_index)
-                return []
-
-            raw_content = provider.extract(
-                [{"role": "user", "content": user_prompt}],
-                self.system_prompt,
-            ) or "{}"
+            response = self.llm_service.complete_sync(
+                system_prompt=self.system_prompt,
+                user_message=user_prompt,
+                temperature=0.1,
+                max_tokens=2000,
+                response_format="json",
+            )
+            raw_content = response.content or "{}"
             self._log_usage(
-                provider_name=provider.provider_name,
+                provider_name=response.provider_used,
                 user_id=user_id,
                 chunk_index=chunk_index,
                 response_text=raw_content,
+                usage={
+                    "model": response.model_used,
+                    "prompt_tokens": response.input_tokens,
+                    "completion_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                    "latency_ms": response.latency_ms,
+                },
             )
 
             try:
@@ -582,15 +577,21 @@ class ExtractionService:
         user_id: str,
         chunk_index: int,
         response_text: str,
+        usage: dict[str, Any] | None = None,
     ) -> None:
+        usage = usage or {}
         event = {
             "event": "extraction_usage",
             "user_id": user_id,
             "chunk_index": chunk_index,
             "provider": provider_name,
-            "prompt_tokens": None,
-            "completion_tokens": None,
-            "total_tokens": max(1, math.ceil(len(response_text) / 4)),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens") or max(1, math.ceil(len(response_text) / 4)),
         }
+        if usage.get("model"):
+            event["model"] = usage["model"]
+        if usage.get("latency_ms") is not None:
+            event["latency_ms"] = usage["latency_ms"]
         self.last_usage_events.append(event)
         logger.info(json.dumps(event))

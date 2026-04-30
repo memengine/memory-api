@@ -13,6 +13,7 @@ from api.db.models import AuditAction
 from api.db.models import AuditLog
 from api.db.models import Memory
 from api.services.importance_scorer import ImportanceScorer
+from api.services.version_service import VersionService
 
 
 RETRIEVAL_TASK_NAME = "api.tasks.retrieval_tasks.update_memory_accesses"
@@ -43,7 +44,15 @@ def run_access_update(memory_ids: list[str]) -> int:
 
         for memory in memories:
             previous_count = int(memory.access_count or 0)
+            previous_score = float(memory.importance_score)
             scorer.increment_access(memory)
+            if abs(float(memory.importance_score) - previous_score) > 1.0:
+                VersionService(session).safe_record_version(
+                    memory,
+                    "importance_boost",
+                    f"Score changed from {previous_score:g} to {float(memory.importance_score):g}",
+                    "system",
+                )
             session.add(memory)
             session.add(
                 AuditLog(

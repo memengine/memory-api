@@ -49,6 +49,7 @@ class MemoryRetrieveRequest(BaseModel):
     categories: list[MemoryCategory] = Field(default_factory=list)
     agent_id: str | None = None
     format: MemoryFormat = "bullets"
+    context_max_tokens: int = Field(default=500, ge=50, le=4000)
 
 
 class MemoryUpdateRequest(BaseModel):

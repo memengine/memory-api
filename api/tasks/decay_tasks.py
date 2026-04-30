@@ -40,7 +40,6 @@ def run_decay_cycle(
     now: datetime | None = None,
 ) -> int:
     reference_time = now or datetime.now(UTC)
-    stale_before = reference_time - timedelta(days=30)
     factory = session_factory or build_decay_session_factory()
     session = factory()
 
@@ -49,8 +48,9 @@ def run_decay_cycle(
             session.execute(
                 select(Memory).where(
                     Memory.is_archived.is_(False),
-                    Memory.importance_score < 3,
-                    Memory.last_accessed_at < stale_before,
+                    Memory.importance_score < 1.5,
+                    Memory.last_accessed_at < reference_time - timedelta(days=90),
+                    Memory.access_count == 0,
                 )
             )
             .scalars()
@@ -60,8 +60,9 @@ def run_decay_cycle(
             memory
             for memory in stale_memories
             if not memory.is_archived
-            and float(memory.importance_score) < 3
-            and memory.last_accessed_at < stale_before
+            and float(memory.importance_score) < 1.5
+            and int(memory.access_count or 0) == 0
+            and memory.last_accessed_at < reference_time - timedelta(days=90)
         ]
 
         archived_count = 0
@@ -89,7 +90,7 @@ def run_decay_cycle(
                     },
                     new_value={
                         "is_archived": True,
-                        "reason": "daily_decay_low_importance_stale_memory",
+                        "reason": "legacy_auto_archive_low_importance_inactive_memory",
                     },
                     ip_address=None,
                 )

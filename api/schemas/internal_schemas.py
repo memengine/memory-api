@@ -27,6 +27,12 @@ class CircuitStatus(BaseModel):
     failure_count: int = 0
 
 
+class LLMProviderStatus(BaseModel):
+    name: str
+    state: CircuitStateValue
+    failures: int = 0
+
+
 class QueueStatus(BaseModel):
     name: str
     depth: int
@@ -37,6 +43,7 @@ class QueueStatus(BaseModel):
 
 class SystemHealthResponse(BaseModel):
     circuits: list[CircuitStatus]
+    llm_providers: list[LLMProviderStatus] = Field(default_factory=list)
     queues: list[QueueStatus]
     overall_status: OverallHealthValue
     generated_at: datetime

@@ -6,11 +6,18 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Request
 from fastapi import Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.db.cache import CacheService
+from api.db.models import ProxyUser
+from api.dependencies import get_cache_service
 from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_authenticated_user_id
+from api.dependencies import get_db_session
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_user_service
+from api.errors import APIError
 from api.schemas.requests import UserSettingsUpdateRequest
 from api.schemas.responses import ApiKeyData
 from api.schemas.responses import AgentData
@@ -31,6 +38,7 @@ from api.schemas.responses import UserSettingsData
 from api.schemas.responses import UserSettingsResponse
 from api.services.proxy_user_service import ProxyUserService
 from api.services.user_service import UserService
+from api.services.version_service import VersionService
 from api.middleware.versioning import register_deprecated_field
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
@@ -198,6 +206,53 @@ async def get_proxy_user_stats(
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
+
+
+@router.get("/{external_user_id}/export")
+async def export_proxy_user_data(
+    request: Request,
+    response: Response,
+    external_user_id: str,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+) -> dict[str, object]:
+    """Export a tenant user's memories and full version history for GDPR access requests."""
+    rate_key = f"user_export:{tenant_id}:{external_user_id}"
+    if await cache_service.increment_rate_counter(rate_key, window_seconds=86400) > 1:
+        raise APIError(
+            status_code=429,
+            code="EXP_429",
+            error="export_rate_limited",
+            details={"retry_after_seconds": 86400},
+        )
+
+    external_user_id_hash = ProxyUserService.hash_external_user_id(tenant_id, external_user_id)
+    result = await session.execute(
+        select(ProxyUser).where(
+            ProxyUser.tenant_id == ProxyUserService._as_uuid(tenant_id),
+            ProxyUser.external_user_id_hash == external_user_id_hash,
+        )
+    )
+    proxy_user = result.scalar_one_or_none()
+    if proxy_user is None:
+        raise APIError(
+            status_code=404,
+            code="PRX_404",
+            error="proxy_user_not_found",
+            details={"external_user_id": external_user_id},
+        )
+
+    export = await VersionService(session).get_user_data_export(
+        proxy_user_id=str(proxy_user.id),
+        tenant_id=tenant_id,
+    )
+    response.headers["content-disposition"] = f'attachment; filename="memoryos-{external_user_id}-export.json"'
+    return {
+        "data": export.to_dict(),
+        "request_id": get_request_id(request),
+        "timestamp": utc_now(),
+    }
 
 
 @router.delete("/{external_user_id}", response_model=ProxyUserDeleteResponse)

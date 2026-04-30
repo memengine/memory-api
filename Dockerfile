@@ -31,6 +31,8 @@ RUN groupadd --gid 1000 memoryos \
     && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin memoryos
 
 COPY --from=builder /dist/*.whl /tmp/
+COPY alembic.ini ${APP_HOME}/alembic.ini
+COPY api/db/migrations ${APP_HOME}/api/db/migrations
 
 RUN python -m pip install --no-cache-dir /tmp/*.whl \
     && rm -rf /tmp/*.whl

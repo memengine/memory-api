@@ -144,6 +144,7 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     data: list[MemorySearchResult]
     cached: bool
     system_prompt_addition: str
+    context_token_count: int = 0
 
 
 class UserProfileData(BaseModel):

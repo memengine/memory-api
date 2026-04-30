@@ -588,3 +588,6 @@ export class MemoryOS {
     }
   }
 }
+
+export { UniversalMemoryOS } from "./universal";
+export type { UniversalRetrieveResult } from "./universal";

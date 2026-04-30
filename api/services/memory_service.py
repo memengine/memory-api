@@ -27,6 +27,7 @@ from api.services.quota_manager import QuotaManager
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
+from api.services.version_service import VersionService
 from api.tasks.queue_router import QueueRouter
 
 
@@ -110,7 +111,7 @@ class MemoryService:
                 resolved_proxy_user_id = str(proxy_user.id)
 
         user = None
-        if authenticated_user_id:
+        if authenticated_user_id and not tenant_id:
             user = await resolve_authorized_user(
                 self.session,
                 requested_user_id=requested_user_id,
@@ -262,6 +263,20 @@ class MemoryService:
         if is_archived is not None:
             memory.is_archived = is_archived
         memory.updated_at = datetime.now(UTC)
+        if content is not None or importance_score is not None:
+            await VersionService(self.session).asafe_record_version(
+                memory,
+                "manual_edit",
+                "Edited by tenant admin",
+                "user",
+            )
+        elif is_archived:
+            await VersionService(self.session).asafe_record_version(
+                memory,
+                "archived",
+                "Archived by tenant admin",
+                "user",
+            )
         if requires_vector_sync:
             if memory.is_archived:
                 qdrant_collection = await self._embedding_collection_for_memory(memory)
@@ -313,6 +328,12 @@ class MemoryService:
             tenant_id=tenant_id,
         )
         if hard_delete:
+            await VersionService(self.session).asafe_record_version(
+                memory,
+                "archived",
+                "Deleted by tenant admin",
+                "user",
+            )
             qdrant_collection = await self._embedding_collection_for_memory(memory)
             enqueue_vector_delete(
                 self.session,
@@ -326,6 +347,12 @@ class MemoryService:
             await self.session.delete(memory)
         else:
             memory.is_archived = True
+            await VersionService(self.session).asafe_record_version(
+                memory,
+                "archived",
+                "Deleted by tenant admin",
+                "user",
+            )
             qdrant_collection = await self._embedding_collection_for_memory(memory)
             enqueue_vector_delete(
                 self.session,

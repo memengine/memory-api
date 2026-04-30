@@ -59,6 +59,49 @@ class ImportanceScorer:
     def increment_access(self, memory: Memory) -> float:
         return self.record_access(memory)
 
+    def compute_decay(
+        self,
+        memory: Memory,
+        *,
+        now: datetime | None = None,
+        grace_days: int = 30,
+        decay_per_30_days: float = 0.5,
+    ) -> float:
+        """Return an idempotently decayed score for inactive memories.
+
+        The production schema may not have a dedicated original_importance_score
+        column yet, so we preserve the first observed baseline in metadata.
+        """
+        reference_time = now or datetime.now(UTC)
+        last_accessed_at = memory.last_accessed_at
+        if last_accessed_at is None:
+            last_accessed_at = memory.created_at or reference_time
+        if last_accessed_at.tzinfo is None:
+            last_accessed_at = last_accessed_at.replace(tzinfo=UTC)
+
+        metadata = dict(memory.metadata_json or {})
+        baseline = metadata.get("original_importance_score")
+        if baseline is None:
+            baseline = getattr(memory, "original_importance_score", None)
+        if baseline is None:
+            baseline = float(memory.importance_score)
+            metadata["original_importance_score"] = baseline
+            memory.metadata_json = metadata
+
+        inactive_days = max(0, (reference_time - last_accessed_at).days - grace_days)
+        decay_steps = inactive_days / 30.0
+        access_rescue = self._access_boost_for_count(int(memory.access_count or 0))
+        decayed_score = float(baseline) - (decay_steps * decay_per_30_days) + access_rescue
+        return self.normalize_score(round(decayed_score, 6))
+
+    def recompute_baseline(self, memory: Memory) -> float:
+        """Refresh baseline metadata without undoing lifecycle decay."""
+        metadata = dict(memory.metadata_json or {})
+        metadata.setdefault("original_importance_score", float(memory.importance_score))
+        metadata["last_baseline_rescored_at"] = datetime.now(UTC).isoformat()
+        memory.metadata_json = metadata
+        return float(memory.importance_score)
+
     @staticmethod
     def normalize_score(score: float) -> float:
         return max(1.0, min(10.0, float(score)))

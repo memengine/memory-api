@@ -26,6 +26,7 @@ dependencies = [
  
     # AI / Gemini
     "google-genai>=1.30.0",
+    "tiktoken>=0.7.0",
  
     # Background tasks
     "celery>=5.3.0",

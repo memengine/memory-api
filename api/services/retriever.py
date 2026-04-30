@@ -120,15 +120,23 @@ class RetrieverService:
             elif user_id is not None:
                 cache_identity = user_id
 
+        hot_tier_results = await self._get_hot_tier_results(
+            proxy_user_id=str(proxy_user.id) if proxy_user is not None else None,
+            categories=normalized_categories,
+            agent_id=agent_id,
+        )
+
         cached_results = await self._get_cached_results(user_id=cache_identity, cache_context=cache_context)
         if cached_results is not None:
             self.last_cache_hit = True
-            self._queue_access_update([result.id for result in cached_results])
-            return cached_results
+            merged_results = self._merge_hot_tier_results(hot_tier_results, cached_results, limit)
+            self._queue_access_update([result.id for result in merged_results])
+            return merged_results
         self.last_cache_hit = False
 
         if quota_mode == QuotaMode.degraded_retrieve:
-            return []
+            self._queue_access_update([result.id for result in hot_tier_results])
+            return hot_tier_results[:limit]
 
         if proxy_user is not None:
             scoped_identity = str(proxy_user.id)
@@ -140,28 +148,36 @@ class RetrieverService:
             if proxy_user is not None:
                 cold_start_results = await self._retrieve_cold_start_memories(
                     proxy_user_id=scoped_identity,
-                    limit=limit,
+                    limit=max(0, limit - len(hot_tier_results)),
                     categories=normalized_categories,
                     agent_id=agent_id,
                 )
             else:
                 cold_start_results = await self._retrieve_cold_start_memories_for_user(
                     user_id=scoped_identity,
-                    limit=limit,
+                    limit=max(0, limit - len(hot_tier_results)),
                     categories=normalized_categories,
                     agent_id=agent_id,
                 )
-            self._queue_access_update([result.id for result in cold_start_results])
-            await self._cache_results(user_id=cache_identity, results=cold_start_results, cache_context=cache_context)
-            return cold_start_results
+            final_results = self._merge_hot_tier_results(hot_tier_results, cold_start_results, limit)
+            self._queue_access_update([result.id for result in final_results])
+            await self._cache_results(user_id=cache_identity, results=final_results, cache_context=cache_context)
+            return final_results
 
+        if len(hot_tier_results) >= limit:
+            self._queue_access_update([result.id for result in hot_tier_results[:limit]])
+            await self._cache_results(user_id=cache_identity, results=hot_tier_results[:limit], cache_context=cache_context)
+            return hot_tier_results[:limit]
+
+        remaining_limit = max(0, limit - len(hot_tier_results))
         if self.qdrant_service.breaker.current_state() == "OPEN":
             logger.warning(
                 "Qdrant circuit already open; skipping embeddings and vector search. tenant_id=%s proxy_user_id=%s",
                 tenant_id,
                 scoped_identity if proxy_user is not None else None,
             )
-            return []
+            self._queue_access_update([result.id for result in hot_tier_results])
+            return hot_tier_results[:limit]
 
         model_ids = await self._candidate_embedding_model_ids(
             proxy_user_id=str(proxy_user.id) if proxy_user is not None else None,
@@ -180,7 +196,8 @@ class RetrieverService:
                 scoped_identity if proxy_user is not None else None,
                 exc,
             )
-            return []
+            self._queue_access_update([result.id for result in hot_tier_results])
+            return hot_tier_results[:limit]
         if proxy_user is not None:
             scored_points = []
             for query_embedding in query_embeddings:
@@ -189,7 +206,7 @@ class RetrieverService:
                         query_embedding=query_embedding.vector,
                         tenant_id=tenant_id,
                         proxy_user_id=scoped_identity,
-                        limit=max(limit * 4, limit),
+                        limit=max(remaining_limit * 4, remaining_limit),
                         categories=normalized_categories,
                         collection_name=query_embedding.qdrant_collection,
                     )
@@ -201,14 +218,15 @@ class RetrieverService:
                     self._search_qdrant_legacy(
                         query_embedding=query_embedding.vector,
                         user_id=scoped_identity,
-                        limit=max(limit * 4, limit),
+                        limit=max(remaining_limit * 4, remaining_limit),
                         categories=normalized_categories,
                         collection_name=query_embedding.qdrant_collection,
                     )
                 )
 
         if not scored_points:
-            return []
+            self._queue_access_update([result.id for result in hot_tier_results])
+            return hot_tier_results[:limit]
 
         top_memory_ids = [self._point_memory_id(point) for point in scored_points]
         if proxy_user is not None:
@@ -266,11 +284,12 @@ class RetrieverService:
             )
 
         deduplicated_results = self._deduplicate_results(scored_results)
-        final_results = sorted(
+        ranked_results = sorted(
             deduplicated_results,
             key=lambda item: item.final_score,
             reverse=True,
-        )[:limit]
+        )
+        final_results = self._merge_hot_tier_results(hot_tier_results, ranked_results, limit)
 
         self._queue_access_update([result.id for result in final_results])
         await self._cache_results(user_id=cache_identity, results=final_results, cache_context=cache_context)
@@ -318,6 +337,50 @@ class RetrieverService:
             item["_cache_context"] = cache_context
             payload.append(item)
         await self.cache_service.set_hot_memories(user_id, payload, ttl=CACHE_TTL_SECONDS)
+
+    async def _get_hot_tier_results(
+        self,
+        *,
+        proxy_user_id: str | None,
+        categories: list[str],
+        agent_id: str | None,
+    ) -> list[MemoryResult]:
+        if proxy_user_id is None:
+            return []
+        try:
+            cached_memories = await self.cache_service.get_hot_tier_memories(proxy_user_id)
+        except Exception:
+            return []
+
+        results: list[MemoryResult] = []
+        for item in cached_memories:
+            category = str(item.get("category", ""))
+            if categories and category not in categories:
+                continue
+            if agent_id is not None and item.get("agent_id") not in {None, agent_id}:
+                continue
+            try:
+                results.append(self._memory_result_from_cache(item))
+            except Exception:
+                continue
+        return sorted(results, key=lambda item: item.final_score, reverse=True)
+
+    @staticmethod
+    def _merge_hot_tier_results(
+        hot_results: list[MemoryResult],
+        other_results: list[MemoryResult],
+        limit: int,
+    ) -> list[MemoryResult]:
+        merged: list[MemoryResult] = []
+        seen_ids: set[str] = set()
+        for result in [*hot_results, *other_results]:
+            if result.id in seen_ids:
+                continue
+            merged.append(result)
+            seen_ids.add(result.id)
+            if len(merged) >= limit:
+                break
+        return merged
 
     async def _count_proxy_user_memories(self, proxy_user_id: str) -> int:
         query = select(func.count(Memory.id)).where(

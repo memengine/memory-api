@@ -69,6 +69,7 @@ from api.schemas.internal_schemas import TenantBudgetRecord
 from api.schemas.internal_schemas import TenantSummary
 from api.schemas.tenant_schemas import TenantUsageData
 from api.services.embedding_service import EmbeddingService
+from api.services.llm_service import get_llm_provider_health
 from api.services.quota_manager import QuotaManager
 from api.tasks.backfill_tasks import run_backfill_proxy_user_ids
 from api.tasks.extraction_tasks import EXTRACTION_TASK_NAME
@@ -295,19 +296,22 @@ async def _get_system_health(cache_service: CacheService) -> SystemHealthRespons
             )
         )
 
+    llm_providers = get_llm_provider_health()
     postgres_open = any(item.name == "postgres" and item.state == "OPEN" for item in circuits)
     any_non_closed_circuit = any(item.state != "CLOSED" for item in circuits)
+    any_non_closed_llm = any(str(item.get("state")) != "CLOSED" for item in llm_providers)
     any_critical_queue = any(item.status == "CRITICAL" for item in queues)
     any_backlog_queue = any(item.status == "BACKLOG" for item in queues)
 
     overall_status = "HEALTHY"
     if postgres_open or any_critical_queue:
         overall_status = "CRITICAL"
-    elif any_non_closed_circuit or any_backlog_queue:
+    elif any_non_closed_circuit or any_non_closed_llm or any_backlog_queue:
         overall_status = "DEGRADED"
 
     return SystemHealthResponse(
         circuits=circuits,
+        llm_providers=llm_providers,
         queues=queues,
         overall_status=overall_status,
         generated_at=_utc_now(),
@@ -987,6 +991,19 @@ async def reembedding_status(
 
     return {
         "data": rows,
+        "request_id": get_request_id(request),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/lifecycle-report")
+async def lifecycle_report(
+    request: Request,
+    cache_service: CacheService = Depends(get_cache_service),
+) -> dict[str, object]:
+    reports = await cache_service.get_lifecycle_reports()
+    return {
+        "data": reports,
         "request_id": get_request_id(request),
         "timestamp": datetime.now(UTC).isoformat(),
     }

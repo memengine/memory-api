@@ -33,64 +33,112 @@ def make_memory_result(
     )
 
 
-def test_build_context_bullets_includes_required_metadata() -> None:
+def test_build_bullets_groups_by_category_without_internal_metrics() -> None:
     builder = ContextBuilder()
-    context = builder.build_context(
+    result = builder.build(
         [
             make_memory_result(
-                content="User prefers Python for backend work",
+                content="Prefers concise technical explanations over theory",
                 category="preference",
                 confidence_score=0.92,
-            )
+            ),
+            make_memory_result(
+                content="Has 3 years of FastAPI experience",
+                category="expertise",
+            ),
         ]
     )
 
-    assert "User prefers Python for backend work" in context
-    assert "category: preference" in context
-    assert "confidence: high [0.92]" in context
-    assert "learned: 2026-03-24T10:00:00+00:00" in context
+    assert result.system_prompt_addition.startswith("What you know about this user:")
+    assert "Skills & expertise:" in result.system_prompt_addition
+    assert "Preferences:" in result.system_prompt_addition
+    assert "- Has 3 years of FastAPI experience" in result.system_prompt_addition
+    assert "- Prefers concise technical explanations over theory" in result.system_prompt_addition
+    assert "confidence" not in result.system_prompt_addition
+    assert "importance" not in result.system_prompt_addition
+    assert result.memory_count == 2
+    assert result.token_count > 0
 
 
-def test_build_context_json_returns_memory_array() -> None:
+def test_build_json_returns_grouped_memory_object_without_scores() -> None:
     builder = ContextBuilder()
-    context = builder.build_context(
+    result = builder.build(
         [make_memory_result(content="User works in healthcare", category="fact")],
         format="json",
     )
-    payload = json.loads(context)
+    payload = json.loads(result.system_prompt_addition)
 
-    assert isinstance(payload, list)
-    assert payload[0]["content"] == "User works in healthcare"
-    assert payload[0]["category"] == "fact"
-    assert payload[0]["confidence_level"] == "high"
-    assert payload[0]["learned_at"] == "2026-03-24T10:00:00+00:00"
+    assert payload == {"memories": {"fact": ["User works in healthcare"]}}
+    assert "importance_score" not in result.system_prompt_addition
+    assert "confidence_score" not in result.system_prompt_addition
 
 
-def test_build_context_xml_wraps_memories_in_tags() -> None:
+def test_build_xml_uses_memory_category_attributes() -> None:
     builder = ContextBuilder()
-    context = builder.build_context(
+    result = builder.build(
         [make_memory_result(content="User is launching soon", category="goal")],
         format="xml",
     )
 
-    assert context.startswith("<memory_context>")
-    assert "<category>goal</category>" in context
-    assert "<learned_at>2026-03-24T10:00:00+00:00</learned_at>" in context
-    assert "</memory_context>" in context
+    assert result.system_prompt_addition.startswith("<memory_context>")
+    assert '<memory category="goal">User is launching soon</memory>' in result.system_prompt_addition
+    assert "</memory_context>" in result.system_prompt_addition
 
 
-def test_token_budget_drops_lowest_scored_memories_first() -> None:
+def test_filters_low_importance_memories() -> None:
+    builder = ContextBuilder()
+    result = builder.build(
+        [
+            make_memory_result(content="Low value note", importance_score=2.0, final_score=0.99),
+            make_memory_result(content="Important note", importance_score=6.0, final_score=0.7),
+        ],
+    )
+
+    assert "Important note" in result.system_prompt_addition
+    assert "Low value note" not in result.system_prompt_addition
+    assert result.memory_count == 1
+
+
+def test_deduplicates_near_duplicate_memories_at_build_time() -> None:
+    builder = ContextBuilder()
+    result = builder.build(
+        [
+            make_memory_result(content="User prefers Python examples", final_score=0.95),
+            make_memory_result(content="User prefers Python examples.", final_score=0.90),
+        ],
+    )
+
+    assert result.system_prompt_addition.count("User prefers Python examples") == 1
+    assert result.memory_count == 1
+
+
+def test_token_budget_drops_lowest_importance_memories_after_top_three() -> None:
     builder = ContextBuilder()
     memories = [
-        make_memory_result(content="Top memory", final_score=0.95),
-        make_memory_result(content="Middle memory", final_score=0.60),
-        make_memory_result(content="Lowest memory", final_score=0.20),
+        make_memory_result(content="Top memory one " * 10, importance_score=9.0, final_score=0.99),
+        make_memory_result(content="Top memory two " * 10, importance_score=8.0, final_score=0.98),
+        make_memory_result(content="Top memory three " * 10, importance_score=7.0, final_score=0.97),
+        make_memory_result(content="Lowest importance extra memory " * 10, importance_score=3.1, final_score=0.96),
+        make_memory_result(content="Higher importance extra memory " * 10, importance_score=6.0, final_score=0.95),
     ]
 
-    context = builder.build_context(memories, format="bullets", max_tokens=30)
+    result = builder.build(memories, format="bullets", max_tokens=80)
 
-    assert "Top memory" in context
-    assert "Lowest memory" not in context
+    assert "Top memory one" in result.system_prompt_addition
+    assert "Top memory two" in result.system_prompt_addition
+    assert "Top memory three" in result.system_prompt_addition
+    assert "Lowest importance extra memory" not in result.system_prompt_addition
+    assert result.memories_dropped >= 1
+
+
+def test_truncates_very_long_memory_content() -> None:
+    builder = ContextBuilder()
+    long_content = "User prefers " + ("very detailed " * 30) + "answers"
+
+    result = builder.build([make_memory_result(content=long_content, category="preference")])
+
+    assert "..." in result.system_prompt_addition
+    assert len(result.system_prompt_addition) < len(long_content) + 80
 
 
 def test_build_system_prompt_wraps_base_prompt_with_memory_section() -> None:
@@ -102,11 +150,12 @@ def test_build_system_prompt_wraps_base_prompt_with_memory_section() -> None:
 
     assert prompt.startswith("You are a helpful assistant.")
     assert "Relevant memory context:" in prompt
+    assert "What you know about this user:" in prompt
     assert "User prefers concise responses" in prompt
 
 
-def test_build_context_rejects_unknown_format() -> None:
+def test_build_rejects_unknown_format() -> None:
     builder = ContextBuilder()
 
     with pytest.raises(ValueError):
-        builder.build_context([make_memory_result(content="User uses FastAPI")], format="yaml")
+        builder.build([make_memory_result(content="User uses FastAPI")], format="yaml")

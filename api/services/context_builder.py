@@ -2,40 +2,87 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from html import escape
-from typing import Any
 
 from api.services.retriever import MemoryResult
 
 
-DEFAULT_MAX_TOKENS = 800
+DEFAULT_MAX_TOKENS = 500
+MIN_CONTEXT_IMPORTANCE = 3.0
+MIN_MEMORIES_TO_KEEP = 3
+NEAR_DUPLICATE_THRESHOLD = 0.90
 SUPPORTED_FORMATS = {"bullets", "json", "xml"}
+TRUNCATE_CONTENT_CHARS = 150
+
+CATEGORY_ORDER = [
+    "expertise",
+    "preference",
+    "goal",
+    "fact",
+    "procedure",
+    "relationship",
+]
+
+CATEGORY_LABELS = {
+    "expertise": "Skills & expertise",
+    "preference": "Preferences",
+    "goal": "Goals",
+    "fact": "Facts",
+    "procedure": "Workflows & habits",
+    "relationship": "Relationships & context",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ContextResult:
+    system_prompt_addition: str
+    token_count: int
+    memory_count: int
+    memories_dropped: int
+    format: str
 
 
 class ContextBuilder:
+    def build(
+        self,
+        memories: list[MemoryResult],
+        format: str = "bullets",
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> ContextResult:
+        normalized_format = format.lower().strip()
+        if normalized_format not in SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported context format: {format}")
+
+        if max_tokens <= 0 or not memories:
+            return self._empty_result(normalized_format)
+
+        eligible = self._prepare_memories(memories)
+        if not eligible:
+            return self._empty_result(normalized_format)
+
+        selected, dropped_for_budget = self._select_memories_within_budget(
+            eligible,
+            format=normalized_format,
+            max_tokens=max_tokens,
+        )
+        rendered = self._render(selected, normalized_format)
+        return ContextResult(
+            system_prompt_addition=rendered,
+            token_count=self._count_tokens(rendered),
+            memory_count=len(selected),
+            memories_dropped=dropped_for_budget,
+            format=normalized_format,
+        )
+
     def build_context(
         self,
         memories: list[MemoryResult],
         format: str = "bullets",
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> str:
-        normalized_format = format.lower().strip()
-        if normalized_format not in SUPPORTED_FORMATS:
-            raise ValueError(f"Unsupported context format: {format}")
-
-        if max_tokens <= 0 or not memories:
-            return ""
-
-        selected_memories = self._select_memories_within_budget(
-            memories=memories,
-            format=normalized_format,
-            max_tokens=max_tokens,
-        )
-        if not selected_memories:
-            return ""
-
-        return self._render(selected_memories, normalized_format)
+        return self.build(memories, format=format, max_tokens=max_tokens).system_prompt_addition
 
     def build_system_prompt(
         self,
@@ -55,20 +102,45 @@ class ContextBuilder:
             f"{memory_context}"
         )
 
+    @staticmethod
+    def _empty_result(format: str) -> ContextResult:
+        return ContextResult(
+            system_prompt_addition="",
+            token_count=0,
+            memory_count=0,
+            memories_dropped=0,
+            format=format,
+        )
+
+    def _prepare_memories(self, memories: list[MemoryResult]) -> list[MemoryResult]:
+        prepared: list[MemoryResult] = []
+        for memory in sorted(memories, key=lambda item: item.final_score, reverse=True):
+            if float(memory.importance_score) < MIN_CONTEXT_IMPORTANCE:
+                continue
+            is_duplicate = any(
+                self._content_similarity(memory.content, existing.content) > NEAR_DUPLICATE_THRESHOLD
+                for existing in prepared
+            )
+            if is_duplicate:
+                continue
+            prepared.append(memory)
+        return prepared
+
     def _select_memories_within_budget(
         self,
-        *,
         memories: list[MemoryResult],
+        *,
         format: str,
         max_tokens: int,
-    ) -> list[MemoryResult]:
-        selected = sorted(memories, key=lambda item: item.final_score, reverse=True)
-        while selected:
-            rendered = self._render(selected, format)
-            if self._estimate_tokens(rendered) <= max_tokens:
-                return selected
-            selected.pop()
-        return []
+    ) -> tuple[list[MemoryResult], int]:
+        selected = list(memories)
+        dropped = 0
+        while len(selected) > MIN_MEMORIES_TO_KEEP and self._count_tokens(self._render(selected, format)) > max_tokens:
+            removable = selected[MIN_MEMORIES_TO_KEEP:]
+            lowest = min(removable, key=lambda item: (float(item.importance_score), float(item.final_score)))
+            selected.remove(lowest)
+            dropped += 1
+        return selected, dropped
 
     def _render(self, memories: list[MemoryResult], format: str) -> str:
         if format == "bullets":
@@ -78,59 +150,77 @@ class ContextBuilder:
         return self._render_xml(memories)
 
     def _render_bullets(self, memories: list[MemoryResult]) -> str:
-        return "\n".join(
-            (
-                f"- {memory.content} "
-                f"(category: {memory.category}; "
-                f"confidence: {self._confidence_label(memory.confidence_score)} "
-                f"[{memory.confidence_score:.2f}]; "
-                f"learned: {self._learned_at(memory)}; "
-                f"importance: {memory.importance_score:.1f})"
-            )
-            for memory in memories
-        )
+        lines = ["What you know about this user:"]
+        grouped = self._group_by_category(memories)
+        multi_category = sum(1 for items in grouped.values() if items) > 1
+
+        for category in CATEGORY_ORDER:
+            category_memories = grouped.get(category, [])
+            if not category_memories:
+                continue
+            if multi_category:
+                lines.append(f"{CATEGORY_LABELS[category]}:")
+            lines.extend(f"- {self._content_for_prompt(memory)}" for memory in category_memories)
+
+        return "\n".join(lines)
 
     def _render_json(self, memories: list[MemoryResult]) -> str:
-        payload = [self._memory_payload(memory) for memory in memories]
-        return json.dumps(payload, indent=2, ensure_ascii=True)
+        grouped = {
+            category: [self._content_for_prompt(memory) for memory in category_memories]
+            for category, category_memories in self._group_by_category(memories).items()
+            if category_memories
+        }
+        return json.dumps({"memories": grouped}, indent=2, ensure_ascii=True)
 
     def _render_xml(self, memories: list[MemoryResult]) -> str:
         lines = ["<memory_context>"]
-        for memory in memories:
-            payload = self._memory_payload(memory)
-            lines.extend(
-                [
-                    "  <memory>",
-                    f"    <content>{escape(str(payload['content']))}</content>",
-                    f"    <category>{escape(str(payload['category']))}</category>",
-                    f"    <confidence level=\"{escape(str(payload['confidence_level']))}\">{payload['confidence_score']:.2f}</confidence>",
-                    f"    <learned_at>{escape(str(payload['learned_at']))}</learned_at>",
-                    f"    <importance_score>{payload['importance_score']:.1f}</importance_score>",
-                    f"    <final_score>{payload['final_score']:.6f}</final_score>",
-                    "  </memory>",
-                ]
-            )
+        grouped = self._group_by_category(memories)
+        for category in CATEGORY_ORDER:
+            for memory in grouped.get(category, []):
+                lines.append(
+                    f'  <memory category="{escape(category)}">{escape(self._content_for_prompt(memory))}</memory>'
+                )
         lines.append("</memory_context>")
         return "\n".join(lines)
 
-    @staticmethod
-    def _estimate_tokens(text: str) -> int:
-        return math.ceil(len(text) / 4)
-
-    def _memory_payload(self, memory: MemoryResult) -> dict[str, Any]:
-        payload = asdict(memory)
-        payload["confidence_level"] = self._confidence_label(memory.confidence_score)
-        payload["learned_at"] = self._learned_at(memory)
-        return payload
+    def _group_by_category(self, memories: list[MemoryResult]) -> dict[str, list[MemoryResult]]:
+        grouped = {category: [] for category in CATEGORY_ORDER}
+        for memory in memories:
+            category = str(memory.category)
+            if category in grouped:
+                grouped[category].append(memory)
+        return grouped
 
     @staticmethod
-    def _learned_at(memory: MemoryResult) -> str:
-        return memory.created_at or "unknown"
+    def _content_for_prompt(memory: MemoryResult) -> str:
+        content = " ".join(str(memory.content).split())
+        if len(content) <= TRUNCATE_CONTENT_CHARS:
+            return content
+        cutoff = content.rfind(" ", 0, TRUNCATE_CONTENT_CHARS - 1)
+        if cutoff < 80:
+            cutoff = TRUNCATE_CONTENT_CHARS - 1
+        return f"{content[:cutoff].rstrip()}..."
+
+    @classmethod
+    def _count_tokens(cls, text: str) -> int:
+        if not text:
+            return 0
+        try:
+            import tiktoken
+
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception:
+            return math.ceil(len(text) / 4)
 
     @staticmethod
-    def _confidence_label(score: float) -> str:
-        if score >= 0.85:
-            return "high"
-        if score >= 0.65:
-            return "medium"
-        return "low"
+    def _content_similarity(left: str, right: str) -> float:
+        normalized_left = " ".join(left.lower().split())
+        normalized_right = " ".join(right.lower().split())
+        left_tokens = set(normalized_left.rstrip(".,;:!?").split())
+        right_tokens = set(normalized_right.rstrip(".,;:!?").split())
+        if not left_tokens or not right_tokens:
+            return 0.0
+        token_overlap = len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+        sequence_ratio = SequenceMatcher(None, normalized_left, normalized_right).ratio()
+        return min(token_overlap, sequence_ratio)

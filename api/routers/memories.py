@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from api.dependencies import get_authenticated_user_id
 from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_context_builder
+from api.dependencies import get_db_session
 from api.dependencies import get_memory_service
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_quality_gate_service
@@ -40,9 +41,11 @@ from api.services.memory_service import MemoryService
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quality_gate import QualityGateService
 from api.services.retriever import RetrieverService
+from api.services.version_service import VersionService
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
 from api.tasks.queue_router import get_processing_eta
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 router = APIRouter(prefix="/v1/memories", tags=["memories"])
@@ -129,7 +132,6 @@ async def add_memories(
     Parameters: external_user_id, optional agent_id, conversation messages, optional metadata, optional Idempotency-Key header.
     Responses: queued job metadata or a blocked response with gate metadata for B2B callers.
     """
-    authenticated_user_id = getattr(request.state, "user_id", None)
     gate_result = await quality_gate_service.check(
         [message.model_dump() for message in payload.messages],
         tenant_id,
@@ -158,7 +160,7 @@ async def add_memories(
 
     job = await memory_service.queue_memory_add(
         requested_user_id=None,
-        authenticated_user_id=str(authenticated_user_id) if authenticated_user_id else None,
+        authenticated_user_id=None,
         agent_id=payload.agent_id,
         messages=[message.model_dump() for message in payload.messages],
         metadata=payload.metadata,
@@ -243,21 +245,53 @@ async def retrieve_memories(
         )
         for result in results
     ]
-    memory_context = context_builder.build_context(
+    context = context_builder.build(
         results,
         format=payload.format,
-        max_tokens=800,
-    )
-    system_prompt_addition = (
-        f"What you know about this user:\n{memory_context}" if memory_context else ""
+        max_tokens=payload.context_max_tokens,
     )
     return MemoryRetrieveResponse(
         data=data,
         cached=bool(retriever_service.last_cache_hit),
-        system_prompt_addition=system_prompt_addition,
+        system_prompt_addition=context.system_prompt_addition,
+        context_token_count=context.token_count,
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
+
+
+@router.get("/{memory_id}/history")
+async def get_memory_history(
+    request: Request,
+    memory_id: str,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+) -> dict[str, object]:
+    """Fetch append-only version history for a tenant-owned memory."""
+    try:
+        versions = await VersionService(session).get_history(memory_id=memory_id, tenant_id=tenant_id)
+    except PermissionError as exc:
+        raise APIError(
+            status_code=404,
+            code="MEM_404",
+            error="memory_not_found",
+            details={"memory_id": memory_id},
+        ) from exc
+
+    return {
+        "data": [
+            {
+                "version_number": version.version_number,
+                "content": version.content,
+                "change_type": version.change_type,
+                "change_reason": version.change_reason,
+                "created_at": version.created_at,
+            }
+            for version in versions
+        ],
+        "request_id": get_request_id(request),
+        "timestamp": utc_now(),
+    }
 
 
 @router.get("/{memory_id}", response_model=MemoryGetResponse)

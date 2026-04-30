@@ -16,17 +16,18 @@ from api.db.models import AuditAction
 from api.db.models import AuditLog
 from api.db.models import Memory
 from api.db.models import MemoryCategory
-from api.infra.llm_providers import AnthropicProvider
 from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
-from api.infra.llm_providers import GeminiProvider
-from api.infra.llm_router import ExtractionUnavailableError
 from api.infra.llm_router import LLMRouter
+from api.services.llm_service import AllProvidersFailedError
+from api.services.llm_service import LLMProvider
+from api.services.llm_service import LLMService
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.embedding_service import EmbeddingResult
 from api.services.extractor import ExtractedMemory
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
+from api.services.version_service import VersionService
 from api.settings import get_settings
 
 
@@ -66,6 +67,7 @@ class ConflictResolver:
         prompt_path: Path | None = None,
         default_source_conversation_id: uuid.UUID | None = None,
         llm_router: LLMRouter | None = None,
+        llm_service: LLMService | None = None,
     ) -> None:
         self.session = session
         self.qdrant_service = qdrant_service
@@ -76,18 +78,11 @@ class ConflictResolver:
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.default_source_conversation_id = default_source_conversation_id
-        self.llm_router = llm_router or LLMRouter(
-            provider_factories={
-                "gemini": lambda **overrides: GeminiProvider(
-                    client=overrides.pop("client", None) or self.client,
-                    extract_model=overrides.pop("extract_model", self.model),
-                    **overrides,
-                ),
-                "anthropic": lambda **overrides: AnthropicProvider(
-                    extract_model=overrides.pop("extract_model", "claude-haiku-4-5-20251001"),
-                    **overrides,
-                ),
-            }
+        self.llm_router = llm_router
+        self.llm_service = llm_service or LLMService(
+            provider_clients={LLMProvider.GEMINI: self.client} if self.client is not None else None,
+            require_provider=False,
+            use_state_store=self.client is None,
         )
 
     def check_and_store(
@@ -139,7 +134,10 @@ class ConflictResolver:
                     decision = self._classify_conflict(new_memory, existing_memory)
 
                 if decision.action == "UPDATE":
-                    self._archive_memory(existing_memory)
+                    self._archive_memory(
+                        existing_memory,
+                        change_reason=f"Superseded by: {new_memory.content[:100]}",
+                    )
                     stored_memories.append(
                         self._store_new_memory(
                             extracted_memory=new_memory,
@@ -174,7 +172,10 @@ class ConflictResolver:
                         new_memory=new_memory,
                         merged_memory=decision.merged_memory,
                     )
-                    self._archive_memory(existing_memory)
+                    self._archive_memory(
+                        existing_memory,
+                        change_reason=f"Superseded by: {merged_memory.content[:100]}",
+                    )
                     stored_memories.append(
                         self._store_new_memory(
                             extracted_memory=merged_memory,
@@ -275,12 +276,15 @@ class ConflictResolver:
         )
 
         try:
-            provider = self.llm_router.get_extract_provider()
-            raw_content = provider.extract(
-                [{"role": "user", "content": content}],
-                self.system_prompt,
+            response = self.llm_service.complete_sync(
+                system_prompt=self.system_prompt,
+                user_message=content,
+                temperature=0.0,
+                max_tokens=200,
+                response_format="json",
             )
-        except ExtractionUnavailableError:
+            raw_content = response.content
+        except AllProvidersFailedError:
             raw_content = "{}"
 
         payload = json.loads(raw_content or "{}")
@@ -390,6 +394,13 @@ class ConflictResolver:
         if hasattr(self.session, "flush"):
             self.session.flush()
 
+        VersionService(self.session).safe_record_version(
+            memory,
+            "created",
+            "Extracted from conversation",
+            "system",
+        )
+
         enqueue_vector_upsert(
             self.session,
             memory_id=memory_id,
@@ -416,7 +427,13 @@ class ConflictResolver:
             resolution=resolution,
         )
 
-    def _archive_memory(self, memory: Memory) -> None:
+    def _archive_memory(self, memory: Memory, change_reason: str | None = None) -> None:
+        VersionService(self.session).safe_record_version(
+            memory,
+            "conflict_update",
+            change_reason or "Superseded by a newer extracted memory",
+            "system",
+        )
         memory.is_archived = True
         qdrant_collection = None
         try:
