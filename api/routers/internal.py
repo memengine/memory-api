@@ -1048,6 +1048,7 @@ async def dead_letter_jobs(
                 "attempts": int(job.attempts or 0),
                 "queue_name": job.queue_name,
                 "error": (dead_letter.error if dead_letter is not None else None) or job.error,
+                "error_type": (dead_letter.error_type if dead_letter is not None else None) or job.error_type,
                 "payload": (dead_letter.payload if dead_letter is not None else None) or job.payload,
                 "queued_at": None
                 if getattr(job, "created_at", None) is None and getattr(job, "queued_at", None) is None
@@ -1103,6 +1104,7 @@ async def retry_dead_letter_job(
     job.attempts = 0
     job.memories_created = 0
     job.error = None
+    job.error_type = None
     job.stale_after = None
     job.processing_started_at = None
     job.started_at = None

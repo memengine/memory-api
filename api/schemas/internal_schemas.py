@@ -31,6 +31,8 @@ class LLMProviderStatus(BaseModel):
     name: str
     state: CircuitStateValue
     failures: int = 0
+    configured: bool = True
+    last_failure_at: datetime | None = None
 
 
 class QueueStatus(BaseModel):
@@ -168,6 +170,7 @@ class DeadLetterJob(BaseModel):
     attempts: int = 0
     queue_name: str | None = None
     error: str | None = None
+    error_type: str | None = None
     payload: dict | None = None
     queued_at: datetime | None = None
     started_at: datetime | None = None
