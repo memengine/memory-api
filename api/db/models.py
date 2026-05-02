@@ -1208,6 +1208,7 @@ class ExtractionJob(Base):
         server_default=text("0"),
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(60), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1270,6 +1271,7 @@ class DeadLetterJob(Base):
         server_default=EMPTY_JSONB_OBJECT,
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(60), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
