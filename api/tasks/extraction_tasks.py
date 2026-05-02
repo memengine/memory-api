@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import traceback
@@ -88,6 +89,26 @@ def _invalidate_proxy_user_cache(proxy_user_id: str) -> None:
     )
 
 
+def classify_error(exc: Exception | str) -> str:
+    message = str(exc or "")
+    normalized = message.lower()
+    if "503" in message or "Service Unavailable" in message:
+        return "llm_provider_unavailable_503"
+    if "429" in message or "rate limit" in normalized or "quota" in normalized:
+        return "llm_rate_limited_429"
+    if "401" in message or "403" in message or "invalid api key" in normalized:
+        return "llm_auth_failed"
+    if "timeout" in normalized or isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+    if "connection" in normalized:
+        return "connection_error"
+    if "json" in normalized or isinstance(exc, (json.JSONDecodeError, ValueError)):
+        return "llm_invalid_response"
+    if "extraction_spec" in normalized:
+        return "missing_extraction_spec"
+    return "unknown_error"
+
+
 def _sanitize_job_error(exc: Exception | str) -> tuple[str, str]:
     if isinstance(exc, Exception):
         error_type = type(exc).__name__
@@ -107,8 +128,12 @@ def _sanitize_job_error(exc: Exception | str) -> tuple[str, str]:
 
 def _capture_error_detail() -> str:
     error_detail = traceback.format_exc()
-    if len(error_detail) > 2000:
-        error_detail = error_detail[-2000:]
+    if len(error_detail) > 3000:
+        error_detail = (
+            error_detail[:1500]
+            + "\n\n... [truncated] ...\n\n"
+            + error_detail[-1500:]
+        )
     return error_detail
 
 
@@ -119,7 +144,7 @@ def _normalize_stored_error(error: str) -> str:
     return sanitized_error
 
 
-def _upsert_dead_letter_job(session: Session, *, job: ExtractionJob, error: str) -> None:
+def _upsert_dead_letter_job(session: Session, *, job: ExtractionJob, error: str, error_type: str | None) -> None:
     dead_letter = session.query(DeadLetterJob).filter(DeadLetterJob.job_id == job.id).one_or_none()
     if dead_letter is None:
         dead_letter = DeadLetterJob(
@@ -131,6 +156,7 @@ def _upsert_dead_letter_job(session: Session, *, job: ExtractionJob, error: str)
     dead_letter.attempts = int(job.attempts or 0)
     dead_letter.payload = dict(job.payload or {})
     dead_letter.error = error
+    dead_letter.error_type = error_type
     session.add(dead_letter)
 
 
@@ -150,6 +176,7 @@ def _set_db_job_processing(*, job_id: str, celery_task_id: str | None) -> int:
         job.completed_at = None
         job.updated_at = datetime.now(UTC)
         job.error = None
+        job.error_type = None
         session.add(job)
         session.commit()
         return int(job.attempts or 0)
@@ -171,13 +198,14 @@ def _set_db_job_completed(*, job_id: str, payload: dict[str, Any]) -> None:
         job.stale_after = None
         job.updated_at = datetime.now(UTC)
         job.error = None
+        job.error_type = None
         session.add(job)
         session.commit()
     finally:
         session.close()
 
 
-def _set_db_job_failure(*, job_id: str, error: str) -> tuple[ExtractionJobStatus, int, int]:
+def _set_db_job_failure(*, job_id: str, error: str, error_type: str | None = None) -> tuple[ExtractionJobStatus, int, int]:
     session_factory = build_extraction_session_factory()
     session = session_factory()
     try:
@@ -187,19 +215,22 @@ def _set_db_job_failure(*, job_id: str, error: str) -> tuple[ExtractionJobStatus
         max_attempts = int(job.max_attempts or 3)
         next_attempts = int(job.attempts or 0) + 1
         next_status = ExtractionJobStatus.dead if next_attempts >= max_attempts else ExtractionJobStatus.failed
-        error_type, _sanitized_error = _sanitize_job_error(error)
+        stored_error_type = error_type or classify_error(error)
         stored_error = _normalize_stored_error(error)
         job.status = next_status
         job.attempts = next_attempts
         job.error = stored_error
+        job.error_type = stored_error_type
         job.stale_after = None
         job.celery_task_id = None
         job.updated_at = datetime.now(UTC)
         if next_status == ExtractionJobStatus.dead:
-            job.dead_lettered_at = datetime.now(UTC)
-            _upsert_dead_letter_job(session, job=job, error=stored_error)
+            finished_at = datetime.now(UTC)
+            job.completed_at = finished_at
+            job.dead_lettered_at = finished_at
+            _upsert_dead_letter_job(session, job=job, error=stored_error, error_type=stored_error_type)
             sentry_sdk.capture_message(
-                f"Extraction job dead-lettered job_id={job_id} tenant_id={job.tenant_id} error_type={error_type}",
+                f"Extraction job dead-lettered job_id={job_id} tenant_id={job.tenant_id} error_type={stored_error_type}",
                 level="error",
             )
         session.add(job)
@@ -209,26 +240,29 @@ def _set_db_job_failure(*, job_id: str, error: str) -> tuple[ExtractionJobStatus
         session.close()
 
 
-def _force_dead_letter_job(*, job_id: str, error: str) -> ExtractionJobStatus:
+def _force_dead_letter_job(*, job_id: str, error: str, error_type: str | None = None) -> ExtractionJobStatus:
     session_factory = build_extraction_session_factory()
     session = session_factory()
     try:
         job = session.get(ExtractionJob, uuid.UUID(job_id))
         if job is None:
             return ExtractionJobStatus.dead
-        error_type, _sanitized_error = _sanitize_job_error(error)
+        stored_error_type = error_type or classify_error(error)
         stored_error = _normalize_stored_error(error)
         job.status = ExtractionJobStatus.dead
         job.error = stored_error
+        job.error_type = stored_error_type
         job.stale_after = None
         job.celery_task_id = None
-        job.dead_lettered_at = datetime.now(UTC)
-        job.updated_at = datetime.now(UTC)
-        _upsert_dead_letter_job(session, job=job, error=stored_error)
+        finished_at = datetime.now(UTC)
+        job.completed_at = finished_at
+        job.dead_lettered_at = finished_at
+        job.updated_at = finished_at
+        _upsert_dead_letter_job(session, job=job, error=stored_error, error_type=stored_error_type)
         session.add(job)
         session.commit()
         sentry_sdk.capture_message(
-            f"Extraction job dead-lettered job_id={job_id} tenant_id={job.tenant_id} error_type={error_type}",
+            f"Extraction job dead-lettered job_id={job_id} tenant_id={job.tenant_id} error_type={stored_error_type}",
             level="error",
         )
         return ExtractionJobStatus.dead
@@ -422,12 +456,18 @@ def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
         return completed_payload
     except Exception as exc:
         error_detail = _capture_error_detail()
-        next_status, attempts, _max_attempts = _set_db_job_failure(job_id=job_id, error=error_detail)
+        error_type = classify_error(exc)
+        next_status, attempts, _max_attempts = _set_db_job_failure(
+            job_id=job_id,
+            error=error_detail,
+            error_type=error_type,
+        )
         failed_payload = {
             **job_payload,
             "status": next_status.value,
             "attempts": attempts,
             "error": error_detail,
+            "error_type": error_type,
             "memories_created": 0,
         }
         _set_job_status(job_id, failed_payload)
@@ -447,12 +487,18 @@ def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception as retry_exc:
             retry_error_detail = _capture_error_detail()
-            forced_status = _force_dead_letter_job(job_id=job_id, error=retry_error_detail)
+            retry_error_type = classify_error(retry_exc)
+            forced_status = _force_dead_letter_job(
+                job_id=job_id,
+                error=retry_error_detail,
+                error_type=retry_error_type,
+            )
             dead_payload = {
                 **job_payload,
                 "status": forced_status.value,
                 "attempts": attempts,
                 "error": retry_error_detail,
+                "error_type": retry_error_type,
                 "memories_created": 0,
             }
             _set_job_status(job_id, dead_payload)
