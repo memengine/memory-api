@@ -159,6 +159,7 @@ class MemoryService:
             await self._mark_extraction_job_failed(
                 job_id=job["job_id"],
                 error=dispatch_error,
+                error_type=self._classify_job_error(dispatch_error),
                 status=ExtractionJobStatus.failed,
             )
             if tenant_id and job.get("queue_name"):
@@ -422,6 +423,7 @@ class MemoryService:
         *,
         job_id: str,
         error: str,
+        error_type: str | None = None,
         status: ExtractionJobStatus,
     ) -> None:
         row = await self.session.get(ExtractionJob, uuid.UUID(job_id))
@@ -429,9 +431,29 @@ class MemoryService:
             return
         row.status = status
         row.error = error
+        row.error_type = error_type
         if status == ExtractionJobStatus.dead:
             row.dead_lettered_at = datetime.now(UTC)
         await self.session.commit()
+
+    @staticmethod
+    def _classify_job_error(error: str) -> str:
+        normalized = str(error or "").lower()
+        if "503" in str(error) or "service unavailable" in normalized:
+            return "llm_provider_unavailable_503"
+        if "429" in str(error) or "rate limit" in normalized or "quota" in normalized:
+            return "llm_rate_limited_429"
+        if "401" in str(error) or "403" in str(error) or "invalid api key" in normalized:
+            return "llm_auth_failed"
+        if "timeout" in normalized:
+            return "timeout"
+        if "connection" in normalized:
+            return "connection_error"
+        if "json" in normalized:
+            return "llm_invalid_response"
+        if "extraction_spec" in normalized:
+            return "missing_extraction_spec"
+        return "unknown_error"
 
     @staticmethod
     def _job_error_summary(status: ExtractionJobStatus | str, error: str | None) -> str | None:
