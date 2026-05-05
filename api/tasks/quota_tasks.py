@@ -3,25 +3,33 @@ from __future__ import annotations
 import calendar
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 
 from celery import shared_task
 from celery.schedules import crontab
 from sqlalchemy import select
+from sqlalchemy import delete
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 
 from api.db.database import get_sync_database_url
 from api.db.models import QuotaMode
+from api.db.models import SharedContextSignal
 from api.db.models import TenantBudget
 from api.services.webhook_event_service import WebhookEventService
 from api.services.webhook_event_service import WEBHOOK_EVENT_TASK_NAME
 
 
 MONTHLY_QUOTA_RESET_TASK_NAME = "api.tasks.quota_tasks.monthly_quota_reset_task"
+SHARED_CONTEXT_SIGNAL_CLEANUP_TASK_NAME = "api.tasks.quota_tasks.cleanup_superseded_shared_context_signals"
 QUOTA_TASK_BEAT_SCHEDULE = {
     "monthly-quota-reset": {
         "task": MONTHLY_QUOTA_RESET_TASK_NAME,
         "schedule": crontab(minute=0),
+    },
+    "cleanup-superseded-shared-context-signals": {
+        "task": SHARED_CONTEXT_SIGNAL_CLEANUP_TASK_NAME,
+        "schedule": crontab(hour=2, minute=30),
     }
 }
 
@@ -74,6 +82,24 @@ def monthly_quota_reset_task() -> dict[str, int]:
             reset_count += 1
 
     return {"checked": checked, "reset": reset_count}
+
+
+@shared_task(name=SHARED_CONTEXT_SIGNAL_CLEANUP_TASK_NAME)
+def cleanup_superseded_shared_context_signals() -> dict[str, int]:
+    engine = create_engine(get_sync_database_url(), pool_pre_ping=True)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    cutoff = datetime.now(UTC) - timedelta(days=90)
+
+    with session_factory() as session:
+        result = session.execute(
+            delete(SharedContextSignal).where(
+                SharedContextSignal.is_superseded.is_(True),
+                SharedContextSignal.created_at < cutoff,
+            )
+        )
+        deleted = int(result.rowcount or 0)
+        session.commit()
+    return {"deleted": deleted}
 
 
 def _next_month_reset_at(value: datetime) -> datetime:
