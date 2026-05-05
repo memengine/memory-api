@@ -37,6 +37,8 @@ from api.db.models import ApiKey
 from api.db.models import AuditAction
 from api.db.models import AuditLog
 from api.db.models import CallQualityLog
+from api.db.models import CrossUserConflict
+from api.db.models import CrossUserConflictStatus
 from api.db.models import DeadLetterJob
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
@@ -51,6 +53,8 @@ from api.config.plan_limits import apply_plan_limits
 from api.dependencies import get_cache_service
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.routers.common import get_request_id
+from api.schemas.conflict_schemas import CrossUserConflictData
+from api.schemas.conflict_schemas import CrossUserConflictsResponse
 from api.schemas.internal_schemas import AllTenantsResponse
 from api.schemas.internal_schemas import AuditLogsResponse
 from api.schemas.internal_schemas import BackfillJobResponse
@@ -846,6 +850,20 @@ def _tenant_budget_to_record(tenant_budget: TenantBudget) -> TenantBudgetRecord:
     )
 
 
+def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConflictData:
+    return CrossUserConflictData(
+        id=str(conflict.id),
+        tenant_id=str(conflict.tenant_id),
+        entity_type=conflict.entity_type.value,
+        entity_value_a=conflict.entity_value_a,
+        entity_value_b=conflict.entity_value_b,
+        user_a_memory_id=str(conflict.user_a_memory_id) if conflict.user_a_memory_id else None,
+        user_b_memory_id=str(conflict.user_b_memory_id) if conflict.user_b_memory_id else None,
+        detected_at=conflict.detected_at,
+        status=conflict.status.value,
+    )
+
+
 @router.get("/system-health", response_model=SystemHealthResponse)
 async def system_health(
     cache_service: CacheService = Depends(get_cache_service),
@@ -944,6 +962,31 @@ async def audit_logs(
         end_date=end_date,
         cursor=cursor,
         limit=limit,
+    )
+
+
+@router.get("/cross-user-conflicts", response_model=CrossUserConflictsResponse)
+async def cross_user_conflicts(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+    tenant_id: str | None = None,
+    limit: int = 100,
+) -> CrossUserConflictsResponse:
+    limit = max(1, min(limit, 500))
+    stmt = (
+        select(CrossUserConflict)
+        .where(CrossUserConflict.status == CrossUserConflictStatus.pending)
+        .order_by(CrossUserConflict.detected_at.desc())
+        .limit(limit)
+    )
+    if tenant_id:
+        stmt = stmt.where(CrossUserConflict.tenant_id == uuid.UUID(tenant_id))
+
+    conflicts = (await session.execute(stmt)).scalars().all()
+    return CrossUserConflictsResponse(
+        data=[_cross_user_conflict_to_data(conflict) for conflict in conflicts],
+        request_id=get_request_id(request),
+        timestamp=datetime.now(UTC),
     )
 
 
