@@ -25,6 +25,9 @@ class TenantUsageData(BaseModel):
     budget_remaining_pct: float
     reset_at: datetime | None = None
     plan_tier: PlanTierValue
+    conflicts_resolved_mtd: int = 0
+    cross_user_conflicts_pending: int = 0
+    conflict_types_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
 class TenantUsageResponse(ResponseEnvelope):
