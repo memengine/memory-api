@@ -23,6 +23,7 @@ from sqlalchemy import literal
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.dependencies import DbSession
 from api.dependencies import get_authenticated_tenant_id
@@ -31,6 +32,8 @@ from api.dependencies import get_quota_manager
 from api.db.models import ApiDeprecatedField
 from api.db.models import CallQualityBlockedLayer
 from api.db.models import CallQualityLog
+from api.db.models import CrossUserConflict
+from api.db.models import CrossUserConflictStatus
 from api.db.models import Memory
 from api.db.models import OveragePolicy
 from api.db.models import ProxyUser
@@ -39,6 +42,9 @@ from api.db.models import TenantDeprecationUsage
 from api.errors import APIError
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
+from api.schemas.conflict_schemas import CrossUserConflictData
+from api.schemas.conflict_schemas import CrossUserConflictUpdateRequest
+from api.schemas.conflict_schemas import CrossUserConflictsResponse
 from api.schemas.responses import CursorPage
 from api.schemas.responses import ProxyUserBlockData
 from api.schemas.responses import ProxyUserBlockResponse
@@ -446,6 +452,30 @@ async def _get_tenant_memory_additions(
     ]
 
 
+def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConflictData:
+    memory_a = conflict.user_a_memory
+    memory_b = conflict.user_b_memory
+    proxy_a = memory_a.proxy_user if memory_a is not None else None
+    proxy_b = memory_b.proxy_user if memory_b is not None else None
+    return CrossUserConflictData(
+        id=str(conflict.id),
+        tenant_id=str(conflict.tenant_id),
+        entity_type=conflict.entity_type.value,
+        entity_value_a=conflict.entity_value_a,
+        entity_value_b=conflict.entity_value_b,
+        user_a_memory_id=str(conflict.user_a_memory_id) if conflict.user_a_memory_id else None,
+        user_b_memory_id=str(conflict.user_b_memory_id) if conflict.user_b_memory_id else None,
+        user_a_id=(proxy_a.external_user_id if proxy_a is not None else None),
+        user_b_id=(proxy_b.external_user_id if proxy_b is not None else None),
+        memory_a_content=(memory_a.content if memory_a is not None else None),
+        memory_b_content=(memory_b.content if memory_b is not None else None),
+        memory_a_created_at=(memory_a.created_at if memory_a is not None else None),
+        memory_b_created_at=(memory_b.created_at if memory_b is not None else None),
+        detected_at=conflict.detected_at,
+        status=conflict.status.value,
+    )
+
+
 @router.get("/usage", response_model=TenantUsageResponse)
 async def get_tenant_usage(
     request: Request,
@@ -465,6 +495,37 @@ async def get_tenant_usage(
     if tenant_budget is None:
         raise APIError(status_code=404, code="TEN_404", error="tenant_budget_not_found")
 
+    tenant_uuid = uuid.UUID(tenant_id)
+    month_start = utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    cross_user_pending = int(
+        (
+            await session.execute(
+                select(func.count(CrossUserConflict.id)).where(
+                    CrossUserConflict.tenant_id == tenant_uuid,
+                    CrossUserConflict.status == CrossUserConflictStatus.pending,
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
+    conflicts_resolved_mtd = int(
+        (
+            await session.execute(
+                select(func.count(CrossUserConflict.id)).where(
+                    CrossUserConflict.tenant_id == tenant_uuid,
+                    CrossUserConflict.status.in_(
+                        [
+                            CrossUserConflictStatus.resolved,
+                            CrossUserConflictStatus.ignored,
+                        ]
+                    ),
+                    CrossUserConflict.detected_at >= month_start,
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
+
     return TenantUsageResponse(
         data=TenantUsageData(
             calls_used=int(tenant_budget.current_month_calls or 0),
@@ -475,6 +536,16 @@ async def get_tenant_usage(
             budget_remaining_pct=envelope.budget_remaining_pct,
             reset_at=envelope.reset_at,
             plan_tier=tenant_budget.plan_tier.value,
+            conflicts_resolved_mtd=conflicts_resolved_mtd,
+            cross_user_conflicts_pending=cross_user_pending,
+            conflict_types_breakdown={
+                "FACT_UPDATE": 0,
+                "PREFERENCE_CHANGE": 0,
+                "NEGATION": 0,
+                "SKILL_PROGRESSION": 0,
+                "NUMERIC_UPDATE": 0,
+                "TEMPORAL_SHIFT": 0,
+            },
         ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
@@ -640,6 +711,90 @@ async def get_tenant_memory_additions(
     """List tenant memory additions grouped by day for dashboard trends."""
     return TenantMemoryAdditionsResponse(
         data=await _get_tenant_memory_additions(session, tenant_id=tenant_id, limit=limit),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/shared-context-conflicts", response_model=CrossUserConflictsResponse)
+async def get_tenant_shared_context_conflicts(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    include_resolved: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> CrossUserConflictsResponse:
+    status_filter = (
+        [CrossUserConflictStatus.pending]
+        if not include_resolved
+        else [
+            CrossUserConflictStatus.pending,
+            CrossUserConflictStatus.resolved,
+            CrossUserConflictStatus.ignored,
+        ]
+    )
+    conflicts = (
+        await session.execute(
+            select(CrossUserConflict)
+            .options(
+                selectinload(CrossUserConflict.user_a_memory).selectinload(Memory.proxy_user),
+                selectinload(CrossUserConflict.user_b_memory).selectinload(Memory.proxy_user),
+            )
+            .where(
+                CrossUserConflict.tenant_id == uuid.UUID(tenant_id),
+                CrossUserConflict.status.in_(status_filter),
+            )
+            .order_by(CrossUserConflict.detected_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return CrossUserConflictsResponse(
+        data=[_cross_user_conflict_to_data(conflict) for conflict in conflicts],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.patch("/shared-context-conflicts/{conflict_id}", response_model=CrossUserConflictsResponse)
+async def update_tenant_shared_context_conflict(
+    request: Request,
+    conflict_id: str,
+    payload: CrossUserConflictUpdateRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> CrossUserConflictsResponse:
+    conflict = (
+        await session.execute(
+            select(CrossUserConflict)
+            .options(
+                selectinload(CrossUserConflict.user_a_memory).selectinload(Memory.proxy_user),
+                selectinload(CrossUserConflict.user_b_memory).selectinload(Memory.proxy_user),
+            )
+            .where(
+                CrossUserConflict.id == uuid.UUID(conflict_id),
+                CrossUserConflict.tenant_id == uuid.UUID(tenant_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if conflict is None:
+        raise APIError(status_code=404, code="CONFLICT_404", error="conflict_not_found")
+
+    status = payload.status.lower()
+    correct_user = (payload.correct_user or "").upper()
+    if status == "ignored":
+        conflict.status = CrossUserConflictStatus.ignored
+    elif status == "resolved" and correct_user in {"A", "B"}:
+        conflict.status = CrossUserConflictStatus.resolved
+        memory_to_archive = conflict.user_b_memory if correct_user == "A" else conflict.user_a_memory
+        if memory_to_archive is not None:
+            memory_to_archive.is_archived = True
+            memory_to_archive.updated_at = utc_now()
+    else:
+        raise APIError(status_code=400, code="CONFLICT_400", error="invalid_conflict_resolution")
+
+    await session.commit()
+    return CrossUserConflictsResponse(
+        data=[_cross_user_conflict_to_data(conflict)],
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
