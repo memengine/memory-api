@@ -47,6 +47,20 @@ class MemoryCategory(str, enum.Enum):
     expertise = "expertise"
 
 
+class SharedContextEntityType(str, enum.Enum):
+    tech_stack = "tech_stack"
+    company_fact = "company_fact"
+    product_feature = "product_feature"
+    team_process = "team_process"
+    shared_goal = "shared_goal"
+
+
+class CrossUserConflictStatus(str, enum.Enum):
+    pending = "pending"
+    resolved = "resolved"
+    ignored = "ignored"
+
+
 class ConversationProcessingStatus(str, enum.Enum):
     queued = "queued"
     processing = "processing"
@@ -284,6 +298,14 @@ class Tenant(Base):
         back_populates="tenant",
         cascade="all, delete-orphan",
     )
+    shared_context_signals: Mapped[list[SharedContextSignal]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    cross_user_conflicts: Mapped[list[CrossUserConflict]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
 
 
 class ApiKey(Base):
@@ -498,6 +520,18 @@ class Memory(Base):
         back_populates="memory",
         cascade="all, delete-orphan",
     )
+    shared_context_signals: Mapped[list[SharedContextSignal]] = relationship(
+        back_populates="source_memory",
+        foreign_keys="SharedContextSignal.source_memory_id",
+    )
+    cross_user_conflicts_as_a: Mapped[list[CrossUserConflict]] = relationship(
+        back_populates="user_a_memory",
+        foreign_keys="CrossUserConflict.user_a_memory_id",
+    )
+    cross_user_conflicts_as_b: Mapped[list[CrossUserConflict]] = relationship(
+        back_populates="user_b_memory",
+        foreign_keys="CrossUserConflict.user_b_memory_id",
+    )
 
 
 class MemoryVersion(Base):
@@ -641,6 +675,133 @@ class ProxyUser(Base):
         back_populates="proxy_user",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+    shared_context_signals: Mapped[list[SharedContextSignal]] = relationship(
+        back_populates="source_proxy_user",
+        cascade="all, delete-orphan",
+    )
+
+
+class SharedContextSignal(Base):
+    __tablename__ = "shared_context_signals"
+    __table_args__ = (
+        Index(
+            "ix_shared_context_signals_tenant_type_value",
+            "tenant_id",
+            "entity_type",
+            "entity_value",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_type: Mapped[SharedContextEntityType] = mapped_column(
+        Enum(SharedContextEntityType, name="shared_context_entity_type_enum"),
+        nullable=False,
+    )
+    entity_value: Mapped[str] = mapped_column(Text, nullable=False)
+    source_proxy_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    source_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0.75"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    is_superseded: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    superseded_by_signal_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("shared_context_signals.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="shared_context_signals")
+    source_proxy_user: Mapped[ProxyUser | None] = relationship(back_populates="shared_context_signals")
+    source_memory: Mapped[Memory | None] = relationship(
+        back_populates="shared_context_signals",
+        foreign_keys=[source_memory_id],
+    )
+    superseded_by_signal: Mapped[SharedContextSignal | None] = relationship(
+        remote_side="SharedContextSignal.id",
+        foreign_keys=[superseded_by_signal_id],
+    )
+
+
+class CrossUserConflict(Base):
+    __tablename__ = "cross_user_conflicts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'resolved', 'ignored')",
+            name="ck_cross_user_conflicts_status",
+        ),
+        Index("ix_cross_user_conflicts_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_a_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    user_b_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    entity_type: Mapped[SharedContextEntityType] = mapped_column(
+        Enum(SharedContextEntityType, name="shared_context_entity_type_enum"),
+        nullable=False,
+    )
+    entity_value_a: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_value_b: Mapped[str] = mapped_column(Text, nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    status: Mapped[CrossUserConflictStatus] = mapped_column(
+        Enum(CrossUserConflictStatus, name="cross_user_conflict_status_enum"),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="cross_user_conflicts")
+    user_a_memory: Mapped[Memory | None] = relationship(
+        back_populates="cross_user_conflicts_as_a",
+        foreign_keys=[user_a_memory_id],
+    )
+    user_b_memory: Mapped[Memory | None] = relationship(
+        back_populates="cross_user_conflicts_as_b",
+        foreign_keys=[user_b_memory_id],
     )
 
 
