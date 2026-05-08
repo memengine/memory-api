@@ -33,6 +33,7 @@ RUN groupadd --gid 1000 memoryos \
 COPY --from=builder /dist/*.whl /tmp/
 COPY alembic.ini ${APP_HOME}/alembic.ini
 COPY api/db/migrations ${APP_HOME}/api/db/migrations
+COPY docs ${APP_HOME}/docs
 
 RUN python -m pip install --no-cache-dir /tmp/*.whl \
     && rm -rf /tmp/*.whl
