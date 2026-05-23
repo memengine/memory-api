@@ -3,20 +3,24 @@ from __future__ import annotations
 import os
 
 from celery import Celery
+from celery.schedules import crontab
 
 from api.settings import get_settings
 from api.tasks.decay_tasks import DECAY_TASK_BEAT_SCHEDULE
 from api.tasks.backfill_tasks import BACKFILL_STATUS_TASK_NAME
 from api.tasks.deprecation_tasks import DEPRECATION_ALERT_BEAT_SCHEDULE
+from api.tasks.edtech_tasks import EDTECH_FORGETTING_BEAT_SCHEDULE
 from api.tasks.quota_tasks import QUOTA_TASK_BEAT_SCHEDULE
 from api.tasks.reconciliation_tasks import RECONCILIATION_TASK_BEAT_SCHEDULE
 from api.tasks.reembedding_tasks import REEMBED_TASK_NAME
 from api.tasks.scoring_tasks import LIFECYCLE_TASK_BEAT_SCHEDULE
+from api.tasks.lifecycle_tasks import DAILY_FORGETTING_TASK_NAME
 from api.tasks.vector_sync_tasks import VECTOR_SYNC_TASK_BEAT_SCHEDULE
 from api.tasks.watchdog_tasks import WATCHDOG_BEAT_SCHEDULE
 
 CELERY_IMPORTS = (
     "api.tasks.decay_tasks",
+    "api.tasks.edtech_tasks",
     "api.tasks.backfill_tasks",
     "api.tasks.deprecation_tasks",
     "api.tasks.watchdog_tasks",
@@ -27,7 +31,9 @@ CELERY_IMPORTS = (
     "api.tasks.reembedding_tasks",
     "api.tasks.reconciliation_tasks",
     "api.tasks.retrieval_tasks",
+    "api.tasks.access_tasks",
     "api.tasks.scoring_tasks",
+    "api.tasks.lifecycle_tasks",
     "api.tasks.vector_sync_tasks",
 )
 
@@ -49,6 +55,11 @@ def create_celery_app() -> Celery:
             **VECTOR_SYNC_TASK_BEAT_SCHEDULE,
             **RECONCILIATION_TASK_BEAT_SCHEDULE,
             **LIFECYCLE_TASK_BEAT_SCHEDULE,
+            **EDTECH_FORGETTING_BEAT_SCHEDULE,
+            "daily-forgetting": {
+                "task": DAILY_FORGETTING_TASK_NAME,
+                "schedule": crontab(hour=4, minute=0),
+            },
         },
         task_serializer="json",
         result_serializer="json",
