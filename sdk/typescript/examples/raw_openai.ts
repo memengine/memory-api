@@ -1,10 +1,26 @@
+import { memoryOSApiKey, memoryOSBaseUrl } from "./env.js";
 import { MemoryOS } from "../src/index.js";
 
 async function main(): Promise<void> {
-  const client = new MemoryOS("mem_live_xxx", "http://127.0.0.1:8000");
-  const memories = await client.get("product preferences", "student_44821", 5);
-  const promptAddition = memories.quotaMode === "PASSTHROUGH" ? "" : memories.systemPromptAddition;
-  console.log("Use this before your LLM chat request:");
+  const client = new MemoryOS(memoryOSApiKey(), memoryOSBaseUrl());
+  const externalUserId = "student_44821";
+
+  await client.add(
+    [
+      { role: "user", content: "I prefer concise answers with TypeScript examples." },
+      { role: "assistant", content: "Got it, I will keep examples TypeScript-first." },
+    ],
+    externalUserId,
+  );
+
+  const memories = await client.get({
+    query: "how should I explain this coding concept?",
+    externalUserId,
+    limit: 5,
+    contextMaxTokens: 300,
+  });
+  const promptAddition = memories.hasContext ? memories.systemPromptAddition : "";
+  console.log("Prepend this to your OpenAI system prompt:");
   console.log(promptAddition);
 }
 
