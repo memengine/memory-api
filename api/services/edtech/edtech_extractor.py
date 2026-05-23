@@ -407,11 +407,23 @@ def _extract_grade_level(lower: str) -> str | None:
     match = re.search(r"\b(?:class|grade)\s*[-:]?\s*(\d{1,2})\b", lower)
     if not match:
         match = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:class|grade)\b", lower)
-    if not match:
-        return None
-    grade = int(match.group(1))
-    if 1 <= grade <= 12:
-        return f"Class {grade}"
+    if match:
+        grade = int(match.group(1))
+        if 1 <= grade <= 12:
+            return f"Class {grade}"
+
+    year_match = re.search(
+        r"\b(?:i am|i'm|im)?\s*(?:a\s+)?"
+        r"(?P<year>\d{1,2}|first|second|third|fourth|final)"
+        r"(?:st|nd|rd|th)?\s+year"
+        r"(?:\s+(?P<program>[a-z][a-z0-9&.+ -]{1,40}?))?"
+        r"\s+student\b",
+        lower,
+    )
+    if year_match:
+        year = _format_academic_year(year_match.group("year"))
+        program = _clean_program_name(year_match.group("program") or "")
+        return f"{year} Year {program}".strip()
     return None
 
 
@@ -436,8 +448,8 @@ def _extract_board_or_curriculum(lower: str) -> str | None:
 def _extract_exam_name(lower: str) -> str | None:
     candidates: list[str] = []
     patterns = (
-        r"\b(?:preparing for|target(?:ing)?|crack(?:ing)?|appearing for|focusing on)\s+(.{2,80}?\bexam(?:s)?\b)",
-        r"\b(?:my|our|the)\s+(.{2,80}?\bexam(?:s)?\b)\s+(?:is|are)\b",
+        r"\b(?:prepar(?:e|ing|eing) for|target(?:ing)?|crack(?:ing)?|appearing for|focusing on)\s+([^.;!?]{2,80}?\bexam(?:s)?\b)",
+        r"\b(?:my|our|the)\s+([^.;!?]{2,80}?\bexam(?:s)?\b)\s+(?:is|are|on|in|starts?|scheduled)\b",
         r"\bexam(?:s)?\s+(?:is|are|called|named)\s+([^.;]+)",
     )
     for pattern in patterns:
@@ -550,6 +562,42 @@ def _clean_topic(raw_topic: str) -> str:
     if not topic or len(topic) > 80 or _is_low_value_topic(topic) or _looks_like_conversation_fragment(topic):
         return ""
     return _title_topic(topic)
+
+
+def _format_academic_year(raw_year: str) -> str:
+    normalized = raw_year.lower()
+    word_to_number = {
+        "first": 1,
+        "second": 2,
+        "third": 3,
+        "fourth": 4,
+        "final": None,
+    }
+    if normalized == "final":
+        return "Final"
+    year_number = word_to_number.get(normalized)
+    if year_number is None:
+        year_number = int(normalized)
+    suffix = "th"
+    if year_number % 10 == 1 and year_number % 100 != 11:
+        suffix = "st"
+    elif year_number % 10 == 2 and year_number % 100 != 12:
+        suffix = "nd"
+    elif year_number % 10 == 3 and year_number % 100 != 13:
+        suffix = "rd"
+    return f"{year_number}{suffix}"
+
+
+def _clean_program_name(raw_program: str) -> str:
+    program = raw_program.strip(" .,:;-")
+    if not program:
+        return ""
+    program = re.sub(r"\b(?:and|who|with|from|at)\b.*$", "", program, flags=re.I).strip(" .,:;-")
+    if not program or _looks_like_conversation_fragment(program):
+        return ""
+    if len(program) <= 6 and re.fullmatch(r"[a-z0-9&.+ -]+", program):
+        return program.upper()
+    return _title_topic(program)
 
 
 def _split_learning_list(raw: str) -> list[str]:

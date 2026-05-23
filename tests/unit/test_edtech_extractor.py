@@ -218,6 +218,50 @@ def test_fallback_rejects_vague_short_answer_as_last_topic() -> None:
     assert "last_topic_studied" not in extracted
 
 
+def test_fallback_extracts_higher_ed_profile_and_exam_context() -> None:
+    extractor = EdTechExtractor.__new__(EdTechExtractor)
+
+    extracted = extractor._fallback_extract_from_user_text(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "I am a 2nd year ECE student. "
+                    "My semester exam is on 10 July, and I am preparing for GATE exam."
+                ),
+            }
+        ]
+    )
+
+    assert extracted["grade_level"] == "2nd Year ECE"
+    assert "Semester" in extracted["exam_name"]
+    assert "Gate" in extracted["exam_name"]
+    assert "10" not in extracted["exam_name"]
+    assert "July" not in extracted["exam_name"]
+
+
+def test_fallback_exam_name_does_not_cross_sentence_boundaries() -> None:
+    extractor = EdTechExtractor.__new__(EdTechExtractor)
+
+    extracted = extractor._fallback_extract_from_user_text(
+        [
+            {
+                "role": "user",
+                "content": "My portfolio is on github.com/example/project. My semester exam is on 10 July.",
+            },
+            {
+                "role": "user",
+                "content": "I am preparing for GATE exam.",
+            },
+        ]
+    )
+
+    assert "Semester" in extracted["exam_name"]
+    assert "Gate" in extracted["exam_name"]
+    assert "Github" not in extracted["exam_name"]
+    assert "Example" not in extracted["exam_name"]
+
+
 def test_fallback_extracts_problem_topic_and_one_word_chapter_choice() -> None:
     extractor = EdTechExtractor.__new__(EdTechExtractor)
 
