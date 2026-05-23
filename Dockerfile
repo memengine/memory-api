@@ -21,6 +21,8 @@ RUN python -m pip install --upgrade pip build \
 
 FROM python:${PYTHON_VERSION} AS production
 
+ARG INSTALL_DEV_DEPS=false
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_HOME=/app
@@ -34,8 +36,14 @@ COPY --from=builder /dist/*.whl /tmp/
 COPY alembic.ini ${APP_HOME}/alembic.ini
 COPY api/db/migrations ${APP_HOME}/api/db/migrations
 COPY docs ${APP_HOME}/docs
+COPY tests ${APP_HOME}/tests
 
-RUN python -m pip install --no-cache-dir /tmp/*.whl \
+RUN WHEEL_PATH="$(ls /tmp/*.whl)" \
+    && if [ "${INSTALL_DEV_DEPS}" = "true" ]; then \
+        python -m pip install --no-cache-dir "${WHEEL_PATH}[dev]"; \
+    else \
+        python -m pip install --no-cache-dir "${WHEEL_PATH}"; \
+    fi \
     && rm -rf /tmp/*.whl
 
 USER 1000:1000
