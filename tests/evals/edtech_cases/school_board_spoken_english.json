@@ -1,0 +1,44 @@
+{
+  "id": "school_board_spoken_english",
+  "learner_type": "school_student",
+  "messages": [
+    {
+      "role": "user",
+      "content": "hi i am Adity studying in class 12, preparing for board exam, and parallely focusing on MBA"
+    },
+    {
+      "role": "user",
+      "content": "our board is UP board so mostly easy except English"
+    },
+    {
+      "role": "user",
+      "content": "only spoken English, our board exam is on 20 August"
+    },
+    {
+      "role": "user",
+      "content": "I follow YouTube videos to improve my English"
+    }
+  ],
+  "expected_safe_fallback": {
+    "grade_level": "Class 12",
+    "board_or_curriculum": "Up Board",
+    "primary_deadline_date": "2026-08-20"
+  },
+  "expected_model_extracted": {
+    "grade_level": "Class 12",
+    "board_or_curriculum": "Up Board",
+    "primary_goal": "Improve spoken English for MBA preparation",
+    "primary_deadline_event": "Board",
+    "primary_deadline_date": "2026-08-20",
+    "weak_topics": [
+      {
+        "topic": "Spoken English",
+        "severity": "moderate"
+      }
+    ],
+    "language_profile": {
+      "primary": "English",
+      "comfort": "low"
+    }
+  }
+}

@@ -69,12 +69,27 @@ async def test_job_status_and_idempotency_responses_use_ttl_backed_json_keys(fak
     response_payload = {"job_id": "job-1", "status": "queued"}
 
     await service.set_job_status("job-1", job_payload, ttl=3600)
-    await service.set_idempotent_response("idem-1", response_payload, ttl=86400)
+    await service.set_idempotent_response(
+        "idem-1",
+        response_payload,
+        ttl=86400,
+        scope="tenant:tenant-1",
+    )
 
     assert await service.get_job_status("job-1") == job_payload
-    assert await service.get_idempotent_response("idem-1") == response_payload
+    assert (
+        await service.get_idempotent_response("idem-1", scope="tenant:tenant-1")
+        == response_payload
+    )
+    assert await service.get_idempotent_response("idem-1", scope="tenant:tenant-2") is None
     assert 0 < await fake_redis.ttl(service._job_status_key("job-1")) <= 3600
-    assert 0 < await fake_redis.ttl(service._idempotency_key("idem-1")) <= 86400
+    assert (
+        0
+        < await fake_redis.ttl(
+            service._idempotency_key("idem-1", scope="tenant:tenant-1")
+        )
+        <= 86400
+    )
 
 
 def test_redis_key_patterns_follow_contract_shape() -> None:
@@ -83,7 +98,12 @@ def test_redis_key_patterns_follow_contract_shape() -> None:
     assert CacheService._rate_limit_key("hashed-key", 60).startswith("rate:")
     assert CacheService._rate_limit_key("hashed-key", 60).endswith(":60")
     assert CacheService._job_status_key("job-123") == "job:job-123:status"
-    assert CacheService._idempotency_key("idem-123") == "idempotency:idem-123"
+    first = CacheService._idempotency_key("idem-123", scope="tenant:one")
+    second = CacheService._idempotency_key("idem-123", scope="tenant:two")
+    assert first.startswith("idempotency:")
+    assert ":memory_add:" in first
+    assert "idem-123" not in first
+    assert first != second
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,43 @@
+{
+  "id": "school_jee_chemistry_strategy",
+  "learner_type": "school_student",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am in class 12 and preparing for board exams and JEE Main."
+    },
+    {
+      "role": "user",
+      "content": "Organic chemistry feels impossible, especially chemical tests for distinction."
+    },
+    {
+      "role": "assistant",
+      "content": "Do you know GOC?"
+    },
+    {
+      "role": "user",
+      "content": "I know GOC but difficulty in chemical tests for distinction."
+    }
+  ],
+  "expected_safe_fallback": {
+    "grade_level": "Class 12"
+  },
+  "expected_model_extracted": {
+    "grade_level": "Class 12",
+    "exam_name": "Board exams + JEE Main",
+    "weak_topics": [
+      {
+        "topic": "Chemical tests for distinction",
+        "severity": "moderate",
+        "subject": "Chemistry"
+      }
+    ],
+    "strong_topics": [
+      {
+        "topic": "GOC",
+        "subject": "Chemistry"
+      }
+    ],
+    "last_topic_studied": "Chemical tests for distinction"
+  }
+}

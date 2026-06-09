@@ -1,0 +1,51 @@
+{
+  "id": "skill_learner_project",
+  "learner_type": "skill_learner",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am learning Python and machine learning."
+    },
+    {
+      "role": "user",
+      "content": "I built an end to end ML pipeline on GitHub using Docker, AWS, and PostgreSQL."
+    },
+    {
+      "role": "user",
+      "content": "My goal is to become a data scientist at Google in 2 years."
+    },
+    {
+      "role": "user",
+      "content": "I struggle with explaining the project clearly in interviews."
+    }
+  ],
+  "expected_safe_fallback": {},
+  "expected_model_extracted": {
+    "learner_type": "skill_learner",
+    "primary_goal": "Become a data scientist at Google in 2 years",
+    "strong_topics": [
+      {
+        "topic": "Python"
+      },
+      {
+        "topic": "Machine learning pipeline"
+      }
+    ],
+    "weak_topics": [
+      {
+        "topic": "Interview project explanation",
+        "severity": "moderate"
+      }
+    ],
+    "skill_learner_context": {
+      "current_project": {
+        "project": "End to end ML pipeline",
+        "tech_stack": ["Docker", "AWS", "PostgreSQL"]
+      },
+      "job_target": {
+        "role": "Data scientist",
+        "company_type": "Google"
+      }
+    }
+  }
+}

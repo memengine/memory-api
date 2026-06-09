@@ -1,0 +1,46 @@
+{
+  "id": "higher_ed_cpi_gate",
+  "learner_type": "higher_education",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hi, I am doing B.Tech from IIIT Manipur."
+    },
+    {
+      "role": "user",
+      "content": "I am currently in 3rd semester and my exam is on 10 July."
+    },
+    {
+      "role": "user",
+      "content": "I want to increase my CPI, but I am poor in English."
+    },
+    {
+      "role": "user",
+      "content": "I am also preparing for GATE."
+    }
+  ],
+  "expected_safe_fallback": {
+    "grade_level": "Semester 3",
+    "exam_date": "2026-07-10"
+  },
+  "expected_model_extracted": {
+    "learner_type": "higher_education",
+    "grade_level": "Semester 3",
+    "primary_goal": "Improve CPI while preparing for GATE",
+    "primary_deadline_event": "Semester",
+    "primary_deadline_date": "2026-07-10",
+    "weak_topics": [
+      {
+        "topic": "English",
+        "severity": "moderate"
+      }
+    ],
+    "higher_education_context": {
+      "academic_context": {
+        "degree": "B.Tech",
+        "college": "IIIT Manipur",
+        "semester": 3
+      }
+    }
+  }
+}

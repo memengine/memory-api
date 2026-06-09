@@ -236,6 +236,71 @@ async def test_quality_gate_blocks_duplicate_query_on_l3_with_existing_embedding
 
 
 @pytest.mark.asyncio
+async def test_quality_gate_allows_same_intent_with_different_exam_entity() -> None:
+    tenant_id = str(uuid.uuid4())
+    external_user_id = "student-1"
+    budget = make_tenant_budget()
+    redis_client = FakeRedis()
+    existing_key = f"user_recent_queries:{tenant_id}:{external_user_id}"
+    redis_client.lists[existing_key] = [
+        json.dumps(
+            {
+                "query": "User is preparing for the JEE Main entrance examination.",
+                "embedding": [1.0, 0.0],
+            }
+        )
+    ]
+    service, session, _redis, _dispatch = build_service(
+        tenant_budget=budget,
+        redis_client=redis_client,
+        embedding=[1.0, 0.0],
+    )
+
+    result = await service.check(
+        [{"role": "user", "content": "I want to crack UPSC in 2 years."}],
+        tenant_id,
+        external_user_id,
+    )
+
+    assert result.passed is True
+    logged = session.add.call_args.args[0]
+    assert logged.layer_blocked_at.value == "NONE"
+    assert logged.semantic_similarity == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_quality_gate_still_blocks_same_exam_duplicate() -> None:
+    tenant_id = str(uuid.uuid4())
+    external_user_id = "student-2"
+    budget = make_tenant_budget()
+    redis_client = FakeRedis()
+    existing_key = f"user_recent_queries:{tenant_id}:{external_user_id}"
+    redis_client.lists[existing_key] = [
+        json.dumps(
+            {
+                "query": "I want to crack UPSC in 2 years.",
+                "embedding": [1.0, 0.0],
+            }
+        )
+    ]
+    service, _session, _redis, _dispatch = build_service(
+        tenant_budget=budget,
+        redis_client=redis_client,
+        embedding=[1.0, 0.0],
+    )
+
+    result = await service.check(
+        [{"role": "user", "content": "I am preparing for UPSC."}],
+        tenant_id,
+        external_user_id,
+    )
+
+    assert result.passed is False
+    assert result.blocked_layer == "L3"
+    assert result.reason == "duplicate_query"
+
+
+@pytest.mark.asyncio
 async def test_quality_gate_blocks_on_11th_call_for_same_tenant_and_user() -> None:
     tenant_id = str(uuid.uuid4())
     external_user_id = "user-11"

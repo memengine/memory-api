@@ -132,6 +132,7 @@ class FakeEmbeddingService:
 
 @pytest.mark.asyncio
 async def test_retrieve_returns_cached_results_immediately(monkeypatch) -> None:
+    monkeypatch.setattr("api.services.retriever.REDIS_CACHE_READ_ENABLED", True)
     cache_service = MagicMock()
     cache_service.get_hot_memories = AsyncMock(
         return_value=[

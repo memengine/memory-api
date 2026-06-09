@@ -12,6 +12,7 @@ from api import dependencies
 from api.db.database import get_db_session
 from api.main import create_app
 from api.middleware.auth import AuthMiddleware
+from api.settings import get_settings
 from api.services.quality_gate import GateResult
 from api.services.retriever import MemoryResult
 from api.schemas.tenant_schemas import CostSummary
@@ -49,7 +50,7 @@ class StubMemoryService:
             make_memory(content="User prefers FastAPI"),
             make_memory(content="User prefers PostgreSQL"),
         ]
-        self.idempotency_jobs: dict[str, dict[str, str]] = {}
+        self.idempotency_jobs: dict[tuple[str, str], dict[str, str]] = {}
 
     async def list_memories(self, **kwargs):
         cursor = kwargs.get("cursor")
@@ -59,13 +60,21 @@ class StubMemoryService:
     async def queue_memory_add(self, **kwargs):
         idempotency_key = kwargs.get("idempotency_key")
         if idempotency_key:
-            if idempotency_key not in self.idempotency_jobs:
-                self.idempotency_jobs[idempotency_key] = {
+            scoped_key = (str(kwargs.get("tenant_id") or ""), str(idempotency_key))
+            if scoped_key not in self.idempotency_jobs:
+                self.idempotency_jobs[scoped_key] = {
                     "job_id": f"job_{len(self.idempotency_jobs) + 1}",
                     "status": "queued",
                 }
-            return self.idempotency_jobs[idempotency_key]
+            return self.idempotency_jobs[scoped_key]
         return {"job_id": f"job_{uuid.uuid4().hex[:8]}", "status": "queued"}
+
+    async def get_idempotent_memory_add(self, **kwargs):
+        scoped_key = (
+            str(kwargs.get("tenant_id") or ""),
+            str(kwargs.get("idempotency_key") or ""),
+        )
+        return self.idempotency_jobs.get(scoped_key)
 
     async def get_memory(self, **kwargs):
         return self.memories[0]
@@ -290,6 +299,9 @@ class StubInternalSession:
     async def execute(self, _statement):
         return StubExecuteResult([])
 
+    async def get(self, _model, _identifier):
+        return None
+
 
 class StubBreaker:
     async def call(self, fn, *args, fallback=None, **kwargs):
@@ -345,7 +357,7 @@ def _slice_with_cursor(items: list, *, cursor: str | None, limit: int):
 
 async def bypass_auth(self, request, call_next):
     request.state.user_id = "user_abc123"
-    request.state.tenant_id = "tenant_abc123"
+    request.state.tenant_id = "11111111-1111-1111-1111-111111111111"
     request.state.auth_scheme = "bearer"
     return await call_next(request)
 
@@ -431,7 +443,7 @@ def test_health_docs_idempotency_and_core_endpoints(monkeypatch) -> None:
         "qdrant": "ok",
         "postgres": "ok",
         "redis": "ok",
-        "version": "v1",
+        "version": get_settings().app_version,
     }
     assert health_response.headers["X-MemoryOS-Quota-Mode"] == "FULL"
     assert health_response.headers["X-MemoryOS-Budget-Remaining"] == "1.0000"

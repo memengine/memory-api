@@ -22,7 +22,9 @@ def test_expected_tables_are_registered() -> None:
         "api_keys",
         "audit_logs",
         "call_quality_log",
+        "clarification_queue",
         "conversations",
+        "cross_user_conflicts",
         "dead_letter_jobs",
         "embedding_models",
         "extraction_jobs",
@@ -33,11 +35,14 @@ def test_expected_tables_are_registered() -> None:
         "permission_grants",
         "proxy_users",
         "regions",
+        "shared_context_signals",
         "tenant_budgets",
         "tenant_deprecation_usage",
         "tenants",
         "universal_memories",
+        "universal_memory_versions",
         "universal_users",
+        "user_memory_flags",
         "users",
         "uui_proxy_link",
         "vector_sync_outbox",
@@ -149,6 +154,7 @@ def test_enums_expose_requested_values() -> None:
         "retrieved",
         "proxy_user_deleted",
         "job_discarded",
+        "conflict_resolved_by_tenant",
     ]
 
 

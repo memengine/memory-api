@@ -33,6 +33,36 @@ def test_consent_url_encodes_redirect_uri_and_state() -> None:
     assert params["state"] == ["session-abc"]
 
 
+def test_consent_url_can_use_hosted_completion_page_without_redirect_uri() -> None:
+    url = UniversalMemory.consent_url(
+        agent_id="agent-123",
+        state="session-abc",
+    )
+
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "consent.memoryos.io"
+    assert parsed.path == "/consent"
+    assert params["agent_id"] == ["agent-123"]
+    assert "redirect_uri" not in params
+    assert params["state"] == ["session-abc"]
+
+
+def test_consent_url_can_preselect_categories() -> None:
+    url = UniversalMemory.consent_url(
+        agent_id="agent-123",
+        categories=["preference", "goal", "preference", " "],
+    )
+
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+
+    assert params["agent_id"] == ["agent-123"]
+    assert params["categories"] == ["preference,goal"]
+
+
 def test_add_uses_universal_auth_headers_and_returns_add_result() -> None:
     captured_headers: dict[str, str] = {}
 

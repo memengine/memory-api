@@ -3,12 +3,13 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from uuid import uuid4
+from datetime import UTC
+from datetime import datetime
 
 import pytest
 
 from api.db.models import Memory
 from api.db.models import MemoryCategory
-from api.db.models import ProxyUser
 from api.db.models import QuotaMode
 from api.services.memory_service import MemoryService
 from api.services.quota_manager import QuotaEnvelope
@@ -52,6 +53,11 @@ class FakeExecuteResult:
     def scalar_one_or_none(self):
         if not self._items:
             return None
+        return self._items[0]
+
+    def scalar_one(self):
+        if len(self._items) != 1:
+            raise AssertionError(f"Expected one scalar, got {len(self._items)}")
         return self._items[0]
 
 
@@ -182,7 +188,12 @@ async def test_list_memories_uses_tenant_scope_without_user_lookup() -> None:
     )
 
     session = MagicMock()
-    session.execute = AsyncMock(return_value=FakeExecuteResult([memory]))
+    session.execute = AsyncMock(
+        side_effect=[
+            FakeExecuteResult([1]),
+            FakeExecuteResult([memory]),
+        ]
+    )
     cache_service = MagicMock()
     service = MemoryService(
         session=session,
@@ -205,7 +216,139 @@ async def test_list_memories_uses_tenant_scope_without_user_lookup() -> None:
     assert [item.id for item in memories] == [memory.id]
     assert next_cursor is None
     assert total == 1
-    session.execute.assert_awaited_once()
+    assert session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_queue_memory_add_scopes_idempotency_to_tenant() -> None:
+    tenant_id = str(uuid4())
+    proxy_user_id = str(uuid4())
+    quota_manager = FakeQuotaManager(
+        QuotaEnvelope(mode=QuotaMode.full, budget_remaining_pct=0.88, reset_at=None)
+    )
+    cache_service = MagicMock()
+    cache_service.get_idempotent_response = AsyncMock(
+        return_value={"job_id": "existing", "status": "queued"}
+    )
+    cache_service.set_job_status = AsyncMock()
+    cache_service.set_idempotent_response = AsyncMock()
+
+    service = MemoryService(
+        session=MagicMock(),
+        cache_service=cache_service,
+        qdrant_service=MagicMock(),
+        quota_manager=quota_manager,
+    )
+
+    result = await service.queue_memory_add(
+        requested_user_id=None,
+        authenticated_user_id=None,
+        agent_id=None,
+        messages=[{"role": "user", "content": "remember this"}],
+        metadata={},
+        idempotency_key="request-1",
+        tenant_id=tenant_id,
+        external_user_id="customer-1",
+        proxy_user_id=proxy_user_id,
+    )
+
+    assert result["job_id"] == "existing"
+    cache_service.get_idempotent_response.assert_awaited_once_with(
+        "request-1",
+        scope=f"tenant:{tenant_id}",
+        operation="memory_add",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
+    cache_service = MagicMock()
+    cache_service.get_idempotent_response = AsyncMock(
+        return_value={"job_id": "job-1", "status": "queued"}
+    )
+    service = MemoryService(
+        session=MagicMock(),
+        cache_service=cache_service,
+        qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+    )
+
+    cached = await service.get_idempotent_memory_add(
+        tenant_id="tenant-1",
+        idempotency_key="same-key",
+    )
+
+    assert cached == {"job_id": "job-1", "status": "queued"}
+    cache_service.get_idempotent_response.assert_awaited_once_with(
+        "same-key",
+        scope="tenant:tenant-1",
+        operation="memory_add",
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_memories_applies_cursor_in_database() -> None:
+    tenant_id = str(uuid4())
+    created_at = datetime.now(UTC)
+    cursor_memory = Memory(
+        id=uuid4(),
+        user_id=uuid4(),
+        proxy_user_id=uuid4(),
+        content="Cursor memory",
+        category=MemoryCategory.fact,
+        importance_score=7.0,
+        confidence_score=0.9,
+        embedding_id="cursor-embedding",
+        embedding_model_id="openai-text-embedding-3-small-v1",
+        source_conversation_id=uuid4(),
+        metadata_json={},
+        is_archived=False,
+        created_at=created_at,
+    )
+    next_memory = Memory(
+        id=uuid4(),
+        user_id=uuid4(),
+        proxy_user_id=uuid4(),
+        content="Older memory",
+        category=MemoryCategory.fact,
+        importance_score=6.0,
+        confidence_score=0.8,
+        embedding_id="next-embedding",
+        embedding_model_id="openai-text-embedding-3-small-v1",
+        source_conversation_id=uuid4(),
+        metadata_json={},
+        is_archived=False,
+        created_at=created_at,
+    )
+    session = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=[
+            FakeExecuteResult([2]),
+            FakeExecuteResult([cursor_memory]),
+            FakeExecuteResult([next_memory]),
+        ]
+    )
+    service = MemoryService(
+        session=session,
+        cache_service=MagicMock(),
+        qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+    )
+
+    memories, next_cursor, total = await service.list_memories(
+        requested_user_id=None,
+        authenticated_user_id=None,
+        tenant_id=tenant_id,
+        cursor=str(cursor_memory.id),
+        limit=10,
+        categories=[],
+        agent_id=None,
+    )
+
+    assert [memory.id for memory in memories] == [next_memory.id]
+    assert next_cursor is None
+    assert total == 2
+    assert session.execute.await_count == 3
 
 
 @pytest.mark.asyncio

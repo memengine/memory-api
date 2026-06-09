@@ -1,0 +1,45 @@
+{
+  "id": "competitive_upsc_strategy",
+  "learner_type": "competitive_exam",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am preparing for UPSC prelims. This is my second attempt."
+    },
+    {
+      "role": "user",
+      "content": "Polity is okay but economics is weak. I waste too much time on history."
+    },
+    {
+      "role": "user",
+      "content": "My target is to clear prelims this year."
+    }
+  ],
+  "expected_safe_fallback": {},
+  "expected_model_extracted": {
+    "learner_type": "competitive_exam",
+    "primary_goal": "Clear UPSC prelims this year",
+    "exam_name": "UPSC Prelims",
+    "weak_topics": [
+      {
+        "topic": "Economics",
+        "severity": "moderate"
+      }
+    ],
+    "strong_topics": [
+      {
+        "topic": "Polity"
+      }
+    ],
+    "competitive_exam_context": {
+      "exam_details": {
+        "exam_name": "UPSC prelims",
+        "attempt_number": 2
+      },
+      "subject_strategy": {
+        "high_time": "Economics",
+        "skip": "Excess history time"
+      }
+    }
+  }
+}

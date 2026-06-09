@@ -30,6 +30,7 @@ class FakeExecuteResult:
 @dataclass
 class FakeSession:
     clerk_org_to_tenant_id: dict[str, uuid.UUID]
+    created_orgs: dict[str, uuid.UUID] | None = None
 
     async def __aenter__(self) -> FakeSession:
         return self
@@ -37,7 +38,18 @@ class FakeSession:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
 
-    async def execute(self, query):
+    async def execute(self, query, params=None):
+        sql_text = str(query).lower()
+        if "insert into tenants" in sql_text:
+            org_id = str((params or {}).get("clerk_org_id") or "")
+            tenant_id = uuid.uuid4()
+            self.clerk_org_to_tenant_id[org_id] = tenant_id
+            if self.created_orgs is not None:
+                self.created_orgs[org_id] = tenant_id
+            return FakeExecuteResult([tenant_id])
+        if "insert into tenant_budgets" in sql_text:
+            return FakeExecuteResult([])
+
         org_id = None
         for criterion in getattr(query, "_where_criteria", ()):
             right = getattr(criterion, "right", None)
@@ -49,10 +61,20 @@ class FakeSession:
         tenant_id = self.clerk_org_to_tenant_id.get(org_id or "")
         return FakeExecuteResult([tenant_id] if tenant_id is not None else [])
 
+    async def commit(self) -> None:
+        return None
+
+    async def run_sync(self, fn) -> None:
+        return None
+
 
 class FakeSessionFactory:
     def __init__(self, clerk_org_to_tenant_id: dict[str, uuid.UUID] | None = None) -> None:
-        self.session = FakeSession(clerk_org_to_tenant_id=clerk_org_to_tenant_id or {})
+        self.created_orgs: dict[str, uuid.UUID] = {}
+        self.session = FakeSession(
+            clerk_org_to_tenant_id=clerk_org_to_tenant_id or {},
+            created_orgs=self.created_orgs,
+        )
 
     def __call__(self) -> FakeSession:
         return self.session
@@ -181,15 +203,17 @@ def test_jwt_with_valid_org_id_maps_to_tenant_and_sets_request_state() -> None:
     }
 
 
-def test_jwt_with_unmapped_org_id_returns_auth_002() -> None:
+def test_jwt_with_unmapped_org_id_provisions_tenant_and_sets_request_state() -> None:
     private_key, jwks = build_rsa_jwks()
+    org_id = "org_missing_123"
     token = build_token(
         private_key,
         issuer="https://clerk.example.test",
-        org_id="org_missing_123",
+        org_id=org_id,
     )
+    session_factory = FakeSessionFactory()
     app = build_test_app(
-        session_factory=FakeSessionFactory(),
+        session_factory=session_factory,
         redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
         http_client=build_http_client(jwks),
     )
@@ -200,9 +224,9 @@ def test_jwt_with_unmapped_org_id_returns_auth_002() -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
 
-    assert response.status_code == 401
-    assert response.json()["error"] == "tenant_not_found"
-    assert response.json()["code"] == "AUTH_002"
+    assert response.status_code == 200
+    assert response.json()["tenant_id"] == str(session_factory.created_orgs[org_id])
+    assert response.json()["auth_method"] == "clerk_jwt"
 
 
 def test_jwt_without_org_id_returns_auth_003() -> None:
