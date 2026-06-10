@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import enum
 import uuid
+from datetime import date
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Boolean
 from sqlalchemy import BigInteger
 from sqlalchemy import CheckConstraint
+from sqlalchemy import Date
 from sqlalchemy import DateTime
 from sqlalchemy import Enum
 from sqlalchemy import Float
@@ -31,7 +33,9 @@ from sqlalchemy.orm import relationship
 
 UUID_SERVER_DEFAULT = text("gen_random_uuid()")
 EMPTY_JSONB_OBJECT = text("'{}'::jsonb")
+EMPTY_JSONB_ARRAY = text("'[]'::jsonb")
 EMPTY_TEXT_ARRAY = text("'{}'::varchar[]")
+EMPTY_UUID_ARRAY = text("'{}'::uuid[]")
 
 
 class Base(DeclarativeBase):
@@ -53,12 +57,32 @@ class SharedContextEntityType(str, enum.Enum):
     product_feature = "product_feature"
     team_process = "team_process"
     shared_goal = "shared_goal"
+    organisation_policy = "organisation_policy"
+    team_language = "team_language"
+    shared_resource = "shared_resource"
+    exam_date = "exam_date"
+    grade_level = "grade_level"
+    personal_skill = "personal_skill"
+    personal_preference = "personal_preference"
+    individual_goal = "individual_goal"
+    learning_style = "learning_style"
+    personal_fact = "personal_fact"
+    marks_target = "marks_target"
+    study_schedule = "study_schedule"
 
 
 class CrossUserConflictStatus(str, enum.Enum):
     pending = "pending"
+    clarification_queued = "clarification_queued"
     resolved = "resolved"
     ignored = "ignored"
+
+
+class ClarificationQueueStatus(str, enum.Enum):
+    pending = "pending"
+    triggered = "triggered"
+    resolved = "resolved"
+    expired = "expired"
 
 
 class ConversationProcessingStatus(str, enum.Enum):
@@ -76,6 +100,7 @@ class AuditAction(str, enum.Enum):
     retrieved = "retrieved"
     proxy_user_deleted = "proxy_user_deleted"
     job_discarded = "job_discarded"
+    conflict_resolved_by_tenant = "conflict_resolved_by_tenant"
 
 
 class AgentMemoryScope(str, enum.Enum):
@@ -272,6 +297,13 @@ class Tenant(Base):
         nullable=False,
         server_default=EMPTY_JSONB_OBJECT,
     )
+    support_type_configured: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    support_type_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'single'"))
+    support_types_allowed: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_ARRAY,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -303,6 +335,18 @@ class Tenant(Base):
         cascade="all, delete-orphan",
     )
     cross_user_conflicts: Mapped[list[CrossUserConflict]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    clarification_queue: Mapped[list[ClarificationQueue]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    edtech_memories: Mapped[list[EdTechMemory]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    support_memories: Mapped[list[SupportMemory]] = relationship(
         back_populates="tenant",
         cascade="all, delete-orphan",
     )
@@ -539,7 +583,7 @@ class MemoryVersion(Base):
     __table_args__ = (
         UniqueConstraint("memory_id", "version_number", name="uq_memory_versions_memory_version"),
         CheckConstraint(
-            "change_type IN ('created', 'conflict_update', 'manual_edit', 'importance_decay', 'importance_boost', 'archived')",
+            "change_type IN ('created', 'conflict_update', 'manual_edit', 'importance_decay', 'importance_boost', 'archived', 'conflict_resolved')",
             name="ck_memory_versions_change_type",
         ),
         CheckConstraint(
@@ -680,6 +724,184 @@ class ProxyUser(Base):
         back_populates="source_proxy_user",
         cascade="all, delete-orphan",
     )
+    clarification_queue: Mapped[list[ClarificationQueue]] = relationship(
+        back_populates="proxy_user",
+        cascade="all, delete-orphan",
+    )
+    edtech_memory: Mapped[EdTechMemory | None] = relationship(
+        back_populates="proxy_user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    support_memory: Mapped[SupportMemory | None] = relationship(
+        back_populates="proxy_user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class EdTechMemory(Base):
+    __tablename__ = "edtech_memories"
+    __table_args__ = (
+        UniqueConstraint("proxy_user_id", "tenant_id", name="uq_edtech_memories_proxy_tenant"),
+        CheckConstraint(
+            "learner_type IS NULL OR learner_type IN ('school_student','competitive_exam','higher_education','professional_cert','skill_learner','medical_student')",
+            name="ck_edtech_memories_learner_type",
+        ),
+        CheckConstraint(
+            "learner_type_confidence IN ('high','low')",
+            name="ck_edtech_memories_learner_type_confidence",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    learner_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    learner_type_confidence: Mapped[str] = mapped_column(String(10), nullable=False, server_default=text("'high'"))
+    primary_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    primary_deadline_event: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    primary_deadline_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    grade_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    board_or_curriculum: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    subjects: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    syllabus_stage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+
+    strong_topics: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    weak_topics: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    concept_gaps: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    misconceptions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+
+    explanation_style: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    session_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    language_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    peak_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    exam_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    exam_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    marks_target: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    mock_scores: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+
+    progress_trend: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    competitive_exam_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    higher_education_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    professional_cert_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    skill_learner_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    medical_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+
+    forgetting_stages: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    improvement_velocity: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    streak: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    last_topic_studied: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    last_extraction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extraction_source_job_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)),
+        nullable=False,
+        server_default=EMPTY_UUID_ARRAY,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    proxy_user: Mapped[ProxyUser] = relationship(back_populates="edtech_memory")
+    tenant: Mapped[Tenant] = relationship(back_populates="edtech_memories")
+
+
+class SupportMemory(Base):
+    __tablename__ = "support_memories"
+    __table_args__ = (
+        UniqueConstraint("proxy_user_id", "tenant_id", name="uq_support_memories_proxy_tenant"),
+        CheckConstraint(
+            "support_type IS NULL OR support_type IN ('saas','ecommerce','banking_fintech','travel','telecom','edtech_support','general_info')",
+            name="ck_support_memories_support_type",
+        ),
+        CheckConstraint(
+            "support_type_source IN ('detected','tenant_configured')",
+            name="ck_support_memories_support_type_source",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    support_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    support_type_source: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'detected'"))
+    customer_identity: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    communication_preference: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+    language_profile: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    current_open_issue: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    issue_history: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    resolution_preference: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+    sentiment_pattern: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    risk_signals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    support_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    last_extraction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extraction_source_job_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)),
+        nullable=False,
+        server_default=EMPTY_UUID_ARRAY,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    proxy_user: Mapped[ProxyUser] = relationship(back_populates="support_memory")
+    tenant: Mapped[Tenant] = relationship(back_populates="support_memories")
 
 
 class SharedContextSignal(Base):
@@ -751,7 +973,7 @@ class CrossUserConflict(Base):
     __tablename__ = "cross_user_conflicts"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'resolved', 'ignored')",
+            "status IN ('pending', 'clarification_queued', 'resolved', 'ignored')",
             name="ck_cross_user_conflicts_status",
         ),
         Index("ix_cross_user_conflicts_tenant_status", "tenant_id", "status"),
@@ -793,6 +1015,18 @@ class CrossUserConflict(Base):
         nullable=False,
         server_default=text("'pending'"),
     )
+    auto_resolution: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    auto_resolution_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_path: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requires_attention: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
 
     tenant: Mapped[Tenant] = relationship(back_populates="cross_user_conflicts")
     user_a_memory: Mapped[Memory | None] = relationship(
@@ -803,6 +1037,68 @@ class CrossUserConflict(Base):
         back_populates="cross_user_conflicts_as_b",
         foreign_keys=[user_b_memory_id],
     )
+    clarification_queue: Mapped[list[ClarificationQueue]] = relationship(
+        back_populates="conflict",
+        cascade="all, delete-orphan",
+    )
+
+
+class ClarificationQueue(Base):
+    __tablename__ = "clarification_queue"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'triggered', 'resolved', 'expired')",
+            name="ck_clarification_queue_status",
+        ),
+        Index("ix_clarification_queue_proxy_status", "proxy_user_id", "status"),
+        Index("ix_clarification_queue_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    question_context: Mapped[str] = mapped_column(Text, nullable=False)
+    conflict_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("cross_user_conflicts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    trigger_on: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'next_session'"),
+    )
+    status: Mapped[ClarificationQueueStatus] = mapped_column(
+        Enum(ClarificationQueueStatus, name="clarification_queue_status_enum"),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now() + interval '30 days'"),
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="clarification_queue")
+    proxy_user: Mapped[ProxyUser] = relationship(back_populates="clarification_queue")
+    conflict: Mapped[CrossUserConflict | None] = relationship(back_populates="clarification_queue")
 
 
 class UniversalUser(Base):
@@ -839,6 +1135,10 @@ class UniversalUser(Base):
         cascade="all, delete-orphan",
     )
     universal_memories: Mapped[list[UniversalMemory]] = relationship(
+        back_populates="universal_user",
+        cascade="all, delete-orphan",
+    )
+    memory_flags: Mapped[list[UserMemoryFlag]] = relationship(
         back_populates="universal_user",
         cascade="all, delete-orphan",
     )
@@ -1009,6 +1309,11 @@ class UniversalMemory(Base):
         nullable=False,
         server_default=text("false"),
     )
+    is_flagged: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
         JSONB,
@@ -1018,6 +1323,107 @@ class UniversalMemory(Base):
 
     universal_user: Mapped[UniversalUser] = relationship(back_populates="universal_memories")
     source_agent: Mapped[GlobalAgent] = relationship(back_populates="universal_memories")
+    flags: Mapped[list[UserMemoryFlag]] = relationship(
+        back_populates="memory",
+        cascade="all, delete-orphan",
+    )
+    versions: Mapped[list[UniversalMemoryVersion]] = relationship(
+        back_populates="universal_memory",
+        cascade="all, delete-orphan",
+    )
+
+
+class UniversalMemoryVersion(Base):
+    __tablename__ = "universal_memory_versions"
+    __table_args__ = (
+        UniqueConstraint("universal_memory_id", "version_number", name="uq_universal_memory_versions_memory_version"),
+        CheckConstraint(
+            "change_type IN ('created','user_corrected','user_removed','conflict_resolved','agent_updated','importance_decay','importance_boost','archived')",
+            name="ck_universal_memory_versions_change_type",
+        ),
+        CheckConstraint(
+            "changed_by IN ('user','system','agent')",
+            name="ck_universal_memory_versions_changed_by",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    universal_memory_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_memories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    change_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    change_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(50), nullable=False)
+    changed_by_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("global_agents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    universal_memory: Mapped[UniversalMemory] = relationship(back_populates="versions")
+    changed_by_agent: Mapped[GlobalAgent | None] = relationship()
+
+
+class UserMemoryFlag(Base):
+    __tablename__ = "user_memory_flags"
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('incorrect','outdated','never_said_this')",
+            name="ck_user_memory_flags_reason",
+        ),
+        CheckConstraint(
+            "status IN ('pending','resolved','dismissed')",
+            name="ck_user_memory_flags_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    memory_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_memories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_uui_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(String(50), nullable=False)
+    correction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flagged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    memory: Mapped[UniversalMemory] = relationship(back_populates="flags")
+    universal_user: Mapped[UniversalUser] = relationship(back_populates="memory_flags")
 
 
 class UUIProxyLink(Base):
@@ -1473,6 +1879,12 @@ Index(
     UniversalMemory.importance_score.desc(),
 )
 Index("ix_universal_memories_source_agent_id", UniversalMemory.source_agent_id)
+Index("ix_user_memory_flags_user_status", UserMemoryFlag.user_uui_id, UserMemoryFlag.status)
+Index(
+    "ix_universal_memory_versions_memory_created",
+    UniversalMemoryVersion.universal_memory_id,
+    UniversalMemoryVersion.created_at.desc(),
+)
 Index("ix_agent_api_keys_key_prefix", AgentApiKey.key_prefix)
 Index("ix_agent_api_keys_global_agent_active", AgentApiKey.global_agent_id, AgentApiKey.is_active)
 Index("ix_tenants_region_id", Tenant.region_id)
@@ -1502,6 +1914,12 @@ Index("ix_extraction_jobs_tenant_status", ExtractionJob.tenant_id, ExtractionJob
 Index("ix_extraction_jobs_proxy_user", ExtractionJob.proxy_user_id)
 Index("ix_extraction_jobs_status_stale_after", ExtractionJob.status, ExtractionJob.stale_after)
 Index("ix_dead_letter_jobs_tenant_created", DeadLetterJob.tenant_id, DeadLetterJob.created_at.desc())
+Index("ix_edtech_memories_tenant_exam_date", EdTechMemory.tenant_id, EdTechMemory.exam_date)
+Index("ix_edtech_memories_tenant_primary_deadline_date", EdTechMemory.tenant_id, EdTechMemory.primary_deadline_date)
+Index("ix_edtech_memories_tenant_last_extraction", EdTechMemory.tenant_id, EdTechMemory.last_extraction_at)
+Index("ix_support_memories_tenant_type", SupportMemory.tenant_id, SupportMemory.support_type)
+Index("ix_support_memories_tenant_sentiment", SupportMemory.tenant_id, SupportMemory.sentiment_pattern)
+Index("ix_support_memories_tenant_updated", SupportMemory.tenant_id, SupportMemory.updated_at.desc())
 Index(
     "ix_embedding_models_single_active",
     EmbeddingModel.is_active,
@@ -1522,9 +1940,14 @@ __all__ = [
     "Base",
     "CallQualityBlockedLayer",
     "CallQualityLog",
+    "ClarificationQueue",
+    "ClarificationQueueStatus",
     "Conversation",
     "ConversationProcessingStatus",
+    "CrossUserConflict",
+    "CrossUserConflictStatus",
     "DeadLetterJob",
+    "EdTechMemory",
     "ExtractionJob",
     "ExtractionJobStatus",
     "EmbeddingModel",
@@ -1541,12 +1964,17 @@ __all__ = [
     "ProxyUser",
     "QuotaMode",
     "Region",
+    "SharedContextEntityType",
+    "SharedContextSignal",
+    "SupportMemory",
     "Tenant",
     "TenantBudget",
     "TenantDeprecationUsage",
     "UUIProxyLink",
+    "UserMemoryFlag",
     "User",
     "UniversalMemory",
+    "UniversalMemoryVersion",
     "UniversalUser",
     "VectorSyncOperation",
     "VectorSyncOutbox",
