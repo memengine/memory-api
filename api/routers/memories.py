@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -11,15 +12,23 @@ from fastapi import Query
 from fastapi import Request
 from fastapi import Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_authenticated_user_id
 from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_context_builder
+from api.dependencies import get_cache_service
 from api.dependencies import get_db_session
 from api.dependencies import get_memory_service
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_quality_gate_service
 from api.dependencies import get_retriever_service
+from api.db.models import ClarificationQueue
+from api.db.models import ClarificationQueueStatus
+from api.db.models import EdTechMemory
+from api.db.models import Tenant
+from api.db.cache import CacheService
 from api.schemas.requests import MemoryAddRequest
 from api.schemas.requests import MemoryRetrieveRequest
 from api.schemas.requests import MemoryUpdateRequest
@@ -35,8 +44,11 @@ from api.schemas.responses import MemoryListResponse
 from api.schemas.responses import MemoryMutationResponse
 from api.schemas.responses import MemoryRetrieveResponse
 from api.schemas.responses import MemorySearchResult
+from api.schemas.edtech_schemas import EdTechMemoryView
+from api.schemas.edtech_schemas import EdTechProfileResponse
 from api.errors import APIError
 from api.services.context_builder import ContextBuilder
+from api.services.domain_schemas.registry import get_domain_schema
 from api.services.memory_service import MemoryService
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quality_gate import QualityGateService
@@ -45,7 +57,6 @@ from api.services.version_service import VersionService
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
 from api.tasks.queue_router import get_processing_eta
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 router = APIRouter(prefix="/v1/memories", tags=["memories"])
@@ -76,6 +87,60 @@ def _memory_scope(request: Request) -> tuple[str | None, str | None]:
     return (
         str(tenant_id) if tenant_id else None,
         str(authenticated_user_id) if authenticated_user_id else None,
+    )
+
+
+async def _tenant_domain_schema(session: AsyncSession, tenant_id: str) -> str | None:
+    tenant = await session.get(Tenant, uuid.UUID(str(tenant_id)))
+    if tenant is None:
+        return None
+    metadata = tenant.metadata_json or {}
+    if metadata.get("edtech_schema_enabled") and not metadata.get("domain_schema"):
+        return "edtech"
+    return metadata.get("domain_schema") or metadata.get("memory_domain")
+
+
+def _edtech_memory_to_view(memory: EdTechMemory) -> EdTechMemoryView:
+    return EdTechMemoryView(
+        id=str(memory.id),
+        proxy_user_id=str(memory.proxy_user_id),
+        tenant_id=str(memory.tenant_id),
+        learner_type=memory.learner_type,
+        learner_type_confidence=memory.learner_type_confidence or "high",
+        primary_goal=memory.primary_goal,
+        primary_deadline_event=memory.primary_deadline_event,
+        primary_deadline_date=memory.primary_deadline_date,
+        grade_level=memory.grade_level,
+        board_or_curriculum=memory.board_or_curriculum,
+        subjects=list(memory.subjects or []),
+        syllabus_stage=dict(memory.syllabus_stage or {}),
+        strong_topics=list(memory.strong_topics or []),
+        weak_topics=list(memory.weak_topics or []),
+        concept_gaps=list(memory.concept_gaps or []),
+        misconceptions=list(memory.misconceptions or []),
+        explanation_style=memory.explanation_style,
+        session_profile=memory.session_profile,
+        language_profile=memory.language_profile,
+        peak_hours=memory.peak_hours,
+        exam_name=memory.exam_name,
+        exam_date=memory.exam_date,
+        marks_target=memory.marks_target,
+        mock_scores=list(memory.mock_scores or []),
+        progress_trend=dict(memory.progress_trend or {}),
+        competitive_exam_context=dict(memory.competitive_exam_context or {}),
+        higher_education_context=dict(memory.higher_education_context or {}),
+        professional_cert_context=dict(memory.professional_cert_context or {}),
+        skill_learner_context=dict(memory.skill_learner_context or {}),
+        medical_context=dict(memory.medical_context or {}),
+        forgetting_stages=dict(memory.forgetting_stages or {}),
+        improvement_velocity=dict(memory.improvement_velocity or {}),
+        streak=memory.streak,
+        last_topic_studied=memory.last_topic_studied,
+        schema_version=int(memory.schema_version or 1),
+        last_extraction_at=memory.last_extraction_at,
+        extraction_source_job_ids=[str(item) for item in memory.extraction_source_job_ids or []],
+        created_at=memory.created_at,
+        updated_at=memory.updated_at,
     )
 
 
@@ -132,6 +197,24 @@ async def add_memories(
     Parameters: external_user_id, optional agent_id, conversation messages, optional metadata, optional Idempotency-Key header.
     Responses: queued job metadata or a blocked response with gate metadata for B2B callers.
     """
+    if idempotency_key:
+        cached_job = await memory_service.get_idempotent_memory_add(
+            tenant_id=tenant_id,
+            idempotency_key=idempotency_key,
+        )
+        if cached_job is not None:
+            return MemoryAddResponse(
+                job_id=cached_job.get("job_id"),
+                status=str(cached_job.get("status") or "queued"),
+                blocked_reason=cached_job.get("blocked_reason"),
+                retry_after_seconds=cached_job.get("retry_after_seconds"),
+                budget_remaining_pct=cached_job.get("budget_remaining_pct"),
+                processing_eta_seconds=cached_job.get("processing_eta_seconds"),
+                processing_status=cached_job.get("processing_status") or "normal",
+                request_id=get_request_id(request),
+                timestamp=utc_now(),
+            )
+
     gate_result = await quality_gate_service.check(
         [message.model_dump() for message in payload.messages],
         tenant_id,
@@ -212,6 +295,8 @@ async def retrieve_memories(
     retriever_service: Annotated[RetrieverService, Depends(get_retriever_service)],
     proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
     context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     tenant_id: str = Depends(get_authenticated_tenant_id),
 ) -> MemoryRetrieveResponse:
     """Retrieve semantically relevant memories for a query.
@@ -232,6 +317,9 @@ async def retrieve_memories(
         categories=list(payload.categories),
         agent_id=payload.agent_id,
         tenant_id=tenant_id,
+        time_filter_days=payload.time_filter_days,
+        quota_mode=getattr(getattr(request.state, "quota_envelope", None), "mode", None)
+        or getattr(request.state, "quota_mode", None),
     )
     data = [
         MemorySearchResult(
@@ -250,14 +338,96 @@ async def retrieve_memories(
         format=payload.format,
         max_tokens=payload.context_max_tokens,
     )
+    system_prompt_addition = context.system_prompt_addition
+    context_token_count = context.token_count
+    domain_schema_name = await _tenant_domain_schema(session, tenant_id)
+    domain_schema = get_domain_schema(domain_schema_name)
+    if domain_schema is not None:
+        domain_prompt, domain_token_count = await domain_schema.build_retrieve_context(
+            session=session,
+            cache_service=cache_service,
+            proxy_user_id=str(proxy_user.id),
+            tenant_id=tenant_id,
+            query=payload.query,
+            max_tokens=min(600, payload.context_max_tokens),
+        )
+        if domain_prompt:
+            system_prompt_addition = (
+                domain_prompt
+                + ("\n\n" + system_prompt_addition if system_prompt_addition else "")
+            )
+            context_token_count += domain_token_count
+    clarification_question = await _pop_next_clarification_question(
+        session=session,
+        proxy_user_id=str(proxy_user.id),
+    )
     return MemoryRetrieveResponse(
         data=data,
         cached=bool(retriever_service.last_cache_hit),
-        system_prompt_addition=context.system_prompt_addition,
-        context_token_count=context.token_count,
+        system_prompt_addition=system_prompt_addition,
+        context_token_count=context_token_count,
+        clarification_question=clarification_question,
+        quota_mode=getattr(retriever_service, "last_quota_mode", None),
+        is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
+        is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
+
+
+@router.get("/edtech-profile", response_model=EdTechProfileResponse)
+async def get_edtech_profile(
+    request: Request,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+    external_user_id: str = Query(min_length=1),
+) -> EdTechProfileResponse:
+    proxy_user = await proxy_user_service.resolve(
+        tenant_id=tenant_id,
+        external_user_id=external_user_id,
+    )
+    memory = (
+        await session.execute(
+            select(EdTechMemory).where(
+                EdTechMemory.proxy_user_id == proxy_user.id,
+                EdTechMemory.tenant_id == uuid.UUID(str(tenant_id)),
+            )
+        )
+    ).scalar_one_or_none()
+    return EdTechProfileResponse(
+        data=_edtech_memory_to_view(memory) if memory is not None else None,
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+async def _pop_next_clarification_question(
+    *,
+    session: AsyncSession,
+    proxy_user_id: str,
+) -> str | None:
+    result = await session.execute(
+        select(ClarificationQueue)
+        .where(
+            ClarificationQueue.proxy_user_id == proxy_user_id,
+            ClarificationQueue.status == ClarificationQueueStatus.pending,
+            ClarificationQueue.trigger_on == "next_session",
+            ClarificationQueue.expires_at > utc_now(),
+        )
+        .order_by(ClarificationQueue.created_at.asc())
+        .limit(1)
+    )
+    scalar_one_or_none = getattr(result, "scalar_one_or_none", None)
+    if not callable(scalar_one_or_none):
+        return None
+    clarification = scalar_one_or_none()
+    if clarification is None:
+        return None
+
+    clarification.status = ClarificationQueueStatus.triggered
+    await session.commit()
+    return f"Quick check: {clarification.question_context}. Has anything changed?"
 
 
 @router.get("/{memory_id}/history")
