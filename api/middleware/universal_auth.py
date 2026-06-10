@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any
 from typing import Awaitable
@@ -12,6 +13,14 @@ from api.db.database import SessionLocal
 from api.dependencies import get_cache_service
 from api.services.global_agent_service import GlobalAgentService
 from api.services.uui_service import UUIService
+
+
+def _cors_allowed_origins() -> list[str]:
+    configured = os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+    origins = [origin.strip() for origin in configured if origin.strip()]
+    if origins:
+        return origins
+    return ["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"]
 
 
 class UniversalAuthMiddleware:
@@ -32,6 +41,13 @@ class UniversalAuthMiddleware:
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") != "http" or not str(scope.get("path", "")).startswith("/v1/universal/"):
+            await self.app(scope, receive, send)
+            return
+
+        # Browser CORS preflight requests do not carry the app API key or UUI
+        # token. Let CORSMiddleware handle OPTIONS, then authenticate the real
+        # POST/GET request that follows.
+        if str(scope.get("method", "")).upper() == "OPTIONS":
             await self.app(scope, receive, send)
             return
 
@@ -99,6 +115,7 @@ class UniversalAuthMiddleware:
 
     async def _forbidden(self, scope, receive, send) -> None:
         request_id = str(scope.setdefault("state", {}).get("request_id") or uuid.uuid4())
+        request = Request(scope, receive=receive)
         response = JSONResponse(
             status_code=403,
             content={
@@ -107,4 +124,9 @@ class UniversalAuthMiddleware:
                 "request_id": request_id,
             },
         )
+        origin = request.headers.get("origin")
+        if origin and origin in _cors_allowed_origins():
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"] = "Origin"
         await response(scope, receive, send)
