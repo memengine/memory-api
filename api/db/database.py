@@ -83,7 +83,16 @@ class CircuitBreakerSyncSession(Session):
 
 
 def build_async_engine(database_url: str | None = None):
-    return create_async_engine(database_url or get_database_url(), pool_pre_ping=True)
+    resolved_url = database_url or get_database_url()
+    if resolved_url.startswith("sqlite"):
+        return create_async_engine(resolved_url, pool_pre_ping=True)
+    return create_async_engine(
+        resolved_url,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "20")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "30")),
+        pool_timeout=int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
+        pool_pre_ping=True,
+    )
 
 
 def build_async_session_factory(database_url: str | None = None) -> async_sessionmaker[AsyncSession]:
