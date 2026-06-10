@@ -30,13 +30,22 @@ from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_quota_manager
 from api.db.models import ApiDeprecatedField
-from api.db.models import CallQualityBlockedLayer
+from api.db.models import AuditAction
+from api.db.models import AuditLog
 from api.db.models import CallQualityLog
+from api.db.models import ClarificationQueue
+from api.db.models import ClarificationQueueStatus
 from api.db.models import CrossUserConflict
 from api.db.models import CrossUserConflictStatus
+from api.db.models import EdTechMemory
+from api.db.models import ExtractionJob
+from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
 from api.db.models import OveragePolicy
 from api.db.models import ProxyUser
+from api.db.models import SharedContextSignal
+from api.db.models import SupportMemory
+from api.db.models import Tenant
 from api.db.models import TenantBudget
 from api.db.models import TenantDeprecationUsage
 from api.errors import APIError
@@ -45,6 +54,20 @@ from api.routers.common import utc_now
 from api.schemas.conflict_schemas import CrossUserConflictData
 from api.schemas.conflict_schemas import CrossUserConflictUpdateRequest
 from api.schemas.conflict_schemas import CrossUserConflictsResponse
+from api.schemas.conflict_schemas import ConflictStatsData
+from api.schemas.conflict_schemas import ConflictStatsResponse
+from api.schemas.conflict_schemas import TenantConflictResolveData
+from api.schemas.conflict_schemas import TenantConflictResolveRequest
+from api.schemas.conflict_schemas import TenantConflictResolveResponse
+from api.schemas.edtech_schemas import EnableEdTechSchemaData
+from api.schemas.edtech_schemas import EnableEdTechSchemaResponse
+from api.schemas.support_schemas import SupportCustomerSummary
+from api.schemas.support_schemas import TenantSupportCustomersResponse
+from api.schemas.support_schemas import TenantSupportStatsData
+from api.schemas.support_schemas import TenantSupportStatsResponse
+from api.schemas.support_schemas import TenantSupportTypeData
+from api.schemas.support_schemas import TenantSupportTypePatchRequest
+from api.schemas.support_schemas import TenantSupportTypeResponse
 from api.schemas.responses import CursorPage
 from api.schemas.responses import ProxyUserBlockData
 from api.schemas.responses import ProxyUserBlockResponse
@@ -53,6 +76,11 @@ from api.schemas.responses import ProxyUserDeleteResponse
 from api.schemas.tenant_schemas import BlockEvent
 from api.schemas.tenant_schemas import CostSummary
 from api.schemas.tenant_schemas import CostSummaryResponse
+from api.schemas.tenant_schemas import AvailableDomain
+from api.schemas.tenant_schemas import StudentSummary
+from api.schemas.tenant_schemas import TenantDomainSchemaData
+from api.schemas.tenant_schemas import TenantDomainSchemaPatchRequest
+from api.schemas.tenant_schemas import TenantDomainSchemaResponse
 from api.schemas.tenant_schemas import ProxyUserDetail
 from api.schemas.tenant_schemas import ProxyUserDetailResponse
 from api.schemas.tenant_schemas import TenantDeprecationUsageEntry
@@ -65,6 +93,7 @@ from api.schemas.tenant_schemas import TenantQualityLogResponse
 from api.schemas.tenant_schemas import TenantSettingsData
 from api.schemas.tenant_schemas import TenantSettingsPatchRequest
 from api.schemas.tenant_schemas import TenantSettingsResponse
+from api.schemas.tenant_schemas import TenantStudentsResponse
 from api.schemas.tenant_schemas import TenantTestWebhookData
 from api.schemas.tenant_schemas import TenantTestWebhookResponse
 from api.schemas.tenant_schemas import TenantUsageData
@@ -72,6 +101,7 @@ from api.schemas.tenant_schemas import TenantUsageResponse
 from api.schemas.tenant_schemas import TenantUsersListResponse
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
+from api.services.version_service import VersionService
 from api.middleware.versioning import register_deprecated_field
 
 
@@ -79,6 +109,84 @@ router = APIRouter(prefix="/v1/tenant", tags=["tenant"])
 DEPRECATED_PROXY_USER_STATS_FIELD_SUNSET = datetime(2026, 10, 1, tzinfo=UTC)
 DEPRECATED_PROXY_USER_STATS_FIELD_PATH = "GET /v1/tenant/users/{external_user_id}/stats response.data.user_id"
 DEPRECATED_PROXY_USER_STATS_FIELD_GUIDE = "https://docs.memoryos.io/migration/user-id-to-external-user-id"
+
+
+AVAILABLE_DOMAIN_OPTIONS = [
+    AvailableDomain(
+        value=None,
+        label="General Engine",
+        description="Works for any AI product with generic facts, preferences, goals, procedures, relationships, and expertise.",
+        status="available",
+    ),
+    AvailableDomain(
+        value="edtech",
+        label="EdTech Schema",
+        description="Structured student memory for tutoring, exam prep, learning style, weak topics, and forgetting curves.",
+        status="available",
+    ),
+    AvailableDomain(
+        value="healthcare",
+        label="HealthTech",
+        description="Healthcare-specific memory schema.",
+        status="coming_soon",
+    ),
+    AvailableDomain(
+        value="agritech",
+        label="AgriTech",
+        description="Agriculture-specific memory schema.",
+        status="coming_soon",
+    ),
+    AvailableDomain(
+        value="hrtech",
+        label="HR Tech",
+        description="Hiring and workforce memory schema.",
+        status="coming_soon",
+    ),
+    AvailableDomain(
+        value="support",
+        label="Customer Support Schema",
+        description="Structured customer memory for support AI across SaaS, e-commerce, banking, travel, telecom, and more.",
+        status="available",
+    ),
+]
+
+
+def _tenant_domain_schema(tenant: Tenant) -> str | None:
+    domain_schema = (tenant.metadata_json or {}).get("domain_schema")
+    return domain_schema if domain_schema in {"edtech", "support"} else None
+
+
+def _domain_schema_data(tenant: Tenant) -> TenantDomainSchemaData:
+    return TenantDomainSchemaData(
+        domain_schema=_tenant_domain_schema(tenant),
+        available_domains=AVAILABLE_DOMAIN_OPTIONS,
+        support_type_configured=tenant.support_type_configured,
+        support_type_mode=tenant.support_type_mode or "single",
+        support_types_allowed=list(tenant.support_types_allowed or []),
+    )
+
+
+def _count_forgetting_risk(forgetting_stages: dict | None) -> int:
+    if not forgetting_stages:
+        return 0
+
+    count = 0
+    for value in forgetting_stages.values():
+        if isinstance(value, dict):
+            stage = value.get("stage")
+        else:
+            stage = value
+        if stage in {"forgotten", "critical"}:
+            count += 1
+    return count
+
+
+def _customer_tier(memory: SupportMemory) -> str | None:
+    identity = memory.customer_identity or {}
+    if not isinstance(identity, dict):
+        return None
+    value = identity.get("tier") or identity.get("customer_tier")
+    return str(value) if value else None
 
 
 def _encode_cursor(sort_at: datetime | None, row_id: uuid.UUID) -> str:
@@ -473,7 +581,57 @@ def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConfli
         memory_b_created_at=(memory_b.created_at if memory_b is not None else None),
         detected_at=conflict.detected_at,
         status=conflict.status.value,
+        auto_resolution=conflict.auto_resolution,
+        auto_resolution_at=conflict.auto_resolution_at,
+        resolved_at=conflict.resolved_at,
+        resolution=conflict.resolution,
+        resolution_path=conflict.resolution_path,
+        resolved_by=conflict.resolved_by,
+        resolution_reason=conflict.resolution_reason,
+        requires_attention=bool(conflict.requires_attention),
     )
+
+
+def _cross_user_conflict_dedupe_key(
+    conflict: CrossUserConflict,
+    *,
+    include_status: bool = False,
+) -> tuple[str, ...]:
+    entity_type = conflict.entity_type.value if hasattr(conflict.entity_type, "value") else str(conflict.entity_type)
+    memory_ids = sorted(
+        str(memory_id)
+        for memory_id in (conflict.user_a_memory_id, conflict.user_b_memory_id)
+        if memory_id is not None
+    )
+    if len(memory_ids) < 2:
+        memory_ids = sorted(
+            [
+                conflict.entity_value_a.lower().strip(),
+                conflict.entity_value_b.lower().strip(),
+            ]
+        )
+
+    parts: tuple[str, ...] = (entity_type, *memory_ids)
+    if include_status:
+        status = conflict.status.value if hasattr(conflict.status, "value") else str(conflict.status)
+        parts = (*parts, status, conflict.resolution_path or "")
+    return parts
+
+
+def _dedupe_cross_user_conflicts(
+    conflicts: list[CrossUserConflict],
+    *,
+    include_status: bool = False,
+) -> list[CrossUserConflict]:
+    seen: set[tuple[str, ...]] = set()
+    unique: list[CrossUserConflict] = []
+    for conflict in conflicts:
+        key = _cross_user_conflict_dedupe_key(conflict, include_status=include_status)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(conflict)
+    return unique
 
 
 @router.get("/usage", response_model=TenantUsageResponse)
@@ -497,34 +655,75 @@ async def get_tenant_usage(
 
     tenant_uuid = uuid.UUID(tenant_id)
     month_start = utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    cross_user_pending = int(
-        (
+    cross_user_pending = 0
+    conflicts_resolved_mtd = 0
+    extraction_success_rate = 0.0
+    nothing_to_extract_rate = 0.0
+    if hasattr(session, "execute"):
+        cross_user_pending = int(
+            (
+                await session.execute(
+                    select(func.count(CrossUserConflict.id)).where(
+                        CrossUserConflict.tenant_id == tenant_uuid,
+                        CrossUserConflict.status == CrossUserConflictStatus.pending,
+                        CrossUserConflict.requires_attention.is_(True),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        conflicts_resolved_mtd = int(
+            (
+                await session.execute(
+                    select(func.count(CrossUserConflict.id)).where(
+                        CrossUserConflict.tenant_id == tenant_uuid,
+                        CrossUserConflict.status.in_(
+                            [
+                                CrossUserConflictStatus.resolved,
+                                CrossUserConflictStatus.ignored,
+                            ]
+                        ),
+                        CrossUserConflict.detected_at >= month_start,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        extraction_counts = (
             await session.execute(
-                select(func.count(CrossUserConflict.id)).where(
-                    CrossUserConflict.tenant_id == tenant_uuid,
-                    CrossUserConflict.status == CrossUserConflictStatus.pending,
+                select(
+                    func.count(ExtractionJob.id).label("completed_jobs"),
+                    func.coalesce(
+                        func.sum(case((ExtractionJob.memories_created > 0, 1), else_=0)),
+                        0,
+                    ).label("jobs_with_memories"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    cast(ExtractionJob.result["nothing_to_extract"].astext, String)
+                                    == "true",
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("nothing_to_extract_jobs"),
+                ).where(
+                    ExtractionJob.tenant_id == tenant_uuid,
+                    ExtractionJob.status == ExtractionJobStatus.completed,
+                    ExtractionJob.completed_at >= month_start,
                 )
             )
-        ).scalar_one()
-        or 0
-    )
-    conflicts_resolved_mtd = int(
-        (
-            await session.execute(
-                select(func.count(CrossUserConflict.id)).where(
-                    CrossUserConflict.tenant_id == tenant_uuid,
-                    CrossUserConflict.status.in_(
-                        [
-                            CrossUserConflictStatus.resolved,
-                            CrossUserConflictStatus.ignored,
-                        ]
-                    ),
-                    CrossUserConflict.detected_at >= month_start,
-                )
-            )
-        ).scalar_one()
-        or 0
-    )
+        ).one()
+        completed_jobs = int(extraction_counts.completed_jobs or 0)
+        jobs_with_memories = int(extraction_counts.jobs_with_memories or 0)
+        nothing_to_extract_jobs = int(extraction_counts.nothing_to_extract_jobs or 0)
+        extraction_success_rate = round(jobs_with_memories / completed_jobs, 4) if completed_jobs > 0 else 0.0
+        nothing_to_extract_rate = (
+            round(nothing_to_extract_jobs / completed_jobs, 4) if completed_jobs > 0 else 0.0
+        )
 
     return TenantUsageResponse(
         data=TenantUsageData(
@@ -537,6 +736,8 @@ async def get_tenant_usage(
             reset_at=envelope.reset_at,
             plan_tier=tenant_budget.plan_tier.value,
             conflicts_resolved_mtd=conflicts_resolved_mtd,
+            extraction_success_rate=extraction_success_rate,
+            nothing_to_extract_rate=nothing_to_extract_rate,
             cross_user_conflicts_pending=cross_user_pending,
             conflict_types_breakdown={
                 "FACT_UPDATE": 0,
@@ -583,6 +784,319 @@ async def list_tenant_proxy_users(
             )
             for item, quality_score_avg in proxy_users
         ],
+        pagination=CursorPage(next_cursor=next_cursor, limit=limit, total=total),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/domain-schema", response_model=TenantDomainSchemaResponse)
+async def get_tenant_domain_schema(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> TenantDomainSchemaResponse:
+    tenant = await session.get(Tenant, uuid.UUID(str(tenant_id)))
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+
+    return TenantDomainSchemaResponse(
+        data=_domain_schema_data(tenant),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.patch("/domain-schema", response_model=TenantDomainSchemaResponse)
+async def update_tenant_domain_schema(
+    request: Request,
+    payload: TenantDomainSchemaPatchRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> TenantDomainSchemaResponse:
+    tenant = await session.get(Tenant, uuid.UUID(str(tenant_id)))
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+
+    if payload.domain_schema not in {None, "edtech", "support"}:
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="domain_schema_not_available",
+            details={"domain_schema": payload.domain_schema},
+        )
+
+    metadata = dict(tenant.metadata_json or {})
+    if payload.domain_schema == "edtech":
+        metadata["domain_schema"] = "edtech"
+        metadata["edtech_schema_enabled"] = True
+    elif payload.domain_schema == "support":
+        metadata["domain_schema"] = "support"
+        metadata["edtech_schema_enabled"] = False
+    else:
+        metadata.pop("domain_schema", None)
+        metadata["edtech_schema_enabled"] = False
+        tenant.support_type_configured = None
+        tenant.support_type_mode = "single"
+        tenant.support_types_allowed = []
+    tenant.metadata_json = metadata
+    await session.commit()
+    await session.refresh(tenant)
+
+    return TenantDomainSchemaResponse(
+        data=_domain_schema_data(tenant),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.patch("/support-type", response_model=TenantSupportTypeResponse)
+async def update_tenant_support_type(
+    request: Request,
+    payload: TenantSupportTypePatchRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> TenantSupportTypeResponse:
+    tenant = await session.get(Tenant, uuid.UUID(str(tenant_id)))
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+    if _tenant_domain_schema(tenant) != "support":
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="support_schema_required",
+            details={"message": "Enable Customer Support schema before configuring support type."},
+        )
+
+    if payload.support_type_mode == "single" and payload.support_type is None:
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="support_type_required",
+            details={"message": "single support mode requires support_type."},
+        )
+    if payload.support_type_mode == "multi" and not payload.support_types_allowed:
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="support_types_allowed_required",
+            details={"message": "multi support mode requires at least one allowed support type."},
+        )
+
+    tenant.support_type_mode = payload.support_type_mode
+    tenant.support_type_configured = payload.support_type if payload.support_type_mode == "single" else None
+    tenant.support_types_allowed = list(dict.fromkeys(payload.support_types_allowed))
+    await session.commit()
+    await session.refresh(tenant)
+    return TenantSupportTypeResponse(
+        data=TenantSupportTypeData(
+            support_type_configured=tenant.support_type_configured,
+            support_type_mode=tenant.support_type_mode,
+            support_types_allowed=list(tenant.support_types_allowed or []),
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/customers", response_model=TenantSupportCustomersResponse)
+async def list_tenant_support_customers(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=50),
+) -> TenantSupportCustomersResponse:
+    tenant_uuid = uuid.UUID(str(tenant_id))
+    tenant = await session.get(Tenant, tenant_uuid)
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+    if _tenant_domain_schema(tenant) != "support":
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="support_schema_required",
+            details={"message": "Enable Customer Support schema to access customer support data."},
+        )
+
+    total_result = await session.execute(
+        select(func.count(SupportMemory.id)).where(SupportMemory.tenant_id == tenant_uuid)
+    )
+    total = int(total_result.scalar_one() or 0)
+
+    stmt = (
+        select(SupportMemory, ProxyUser)
+        .join(ProxyUser, ProxyUser.id == SupportMemory.proxy_user_id)
+        .where(SupportMemory.tenant_id == tenant_uuid)
+        .order_by(ProxyUser.last_active_at.desc(), SupportMemory.id.desc())
+        .limit(limit + 1)
+    )
+    if cursor:
+        sort_at, row_id = _decode_cursor(cursor)
+        if sort_at is None:
+            stmt = stmt.where(SupportMemory.id < row_id)
+        else:
+            stmt = stmt.where(
+                or_(
+                    ProxyUser.last_active_at < sort_at,
+                    (ProxyUser.last_active_at == sort_at) & (SupportMemory.id < row_id),
+                )
+            )
+
+    result = await session.execute(stmt)
+    rows = result.all()
+    page_rows = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        last_memory, last_user = page_rows[-1]
+        next_cursor = _encode_cursor(last_user.last_active_at, last_memory.id)
+
+    return TenantSupportCustomersResponse(
+        data=[
+            SupportCustomerSummary(
+                external_user_id=user.external_user_id,
+                customer_tier=_customer_tier(memory),
+                support_type=memory.support_type,
+                sentiment_pattern=memory.sentiment_pattern,
+                open_issues_count=1 if memory.current_open_issue else 0,
+                total_issues_lifetime=len(memory.issue_history or []),
+                last_contact=user.last_active_at or memory.updated_at,
+            )
+            for memory, user in page_rows
+        ],
+        pagination=CursorPage(next_cursor=next_cursor, limit=limit, total=total),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/support-stats", response_model=TenantSupportStatsResponse)
+async def get_tenant_support_stats(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> TenantSupportStatsResponse:
+    tenant_uuid = uuid.UUID(str(tenant_id))
+    tenant = await session.get(Tenant, tenant_uuid)
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+    if _tenant_domain_schema(tenant) != "support":
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="support_schema_required",
+            details={"message": "Enable Customer Support schema to access support stats."},
+        )
+
+    result = await session.execute(select(SupportMemory).where(SupportMemory.tenant_id == tenant_uuid))
+    memories = list(result.scalars().all())
+    total = len(memories)
+    sentiment_breakdown: dict[str, int] = {}
+    support_type_distribution: dict[str, int] = {}
+    total_issues = 0
+    open_issues_count = 0
+    high_risk_count = 0
+    for memory in memories:
+        sentiment = memory.sentiment_pattern or "unknown"
+        sentiment_breakdown[sentiment] = sentiment_breakdown.get(sentiment, 0) + 1
+        support_type = memory.support_type or "unknown"
+        support_type_distribution[support_type] = support_type_distribution.get(support_type, 0) + 1
+        total_issues += len(memory.issue_history or [])
+        if memory.current_open_issue:
+            open_issues_count += 1
+        if memory.sentiment_pattern == "high_escalation_risk":
+            high_risk_count += 1
+
+    return TenantSupportStatsResponse(
+        data=TenantSupportStatsData(
+            total_customers_with_memory=total,
+            open_issues_count=open_issues_count,
+            high_escalation_risk_count=high_risk_count,
+            sentiment_breakdown=sentiment_breakdown,
+            support_type_distribution=support_type_distribution,
+            avg_issues_per_customer=(round(total_issues / total, 2) if total else 0.0),
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/students", response_model=TenantStudentsResponse)
+async def list_tenant_students(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=50),
+) -> TenantStudentsResponse:
+    tenant_uuid = uuid.UUID(str(tenant_id))
+    tenant = await session.get(Tenant, tenant_uuid)
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+    if _tenant_domain_schema(tenant) != "edtech":
+        raise APIError(
+            status_code=400,
+            code="TEN_400",
+            error="edtech_schema_required",
+            details={
+                "message": "Enable EdTech schema to access student data",
+            },
+        )
+
+    total_result = await session.execute(
+        select(func.count(EdTechMemory.id)).where(EdTechMemory.tenant_id == tenant_uuid)
+    )
+    total = int(total_result.scalar_one() or 0)
+
+    stmt = (
+        select(EdTechMemory, ProxyUser)
+        .join(ProxyUser, ProxyUser.id == EdTechMemory.proxy_user_id)
+        .where(EdTechMemory.tenant_id == tenant_uuid)
+        .order_by(ProxyUser.last_active_at.desc(), EdTechMemory.id.desc())
+        .limit(limit + 1)
+    )
+    if cursor:
+        sort_at, row_id = _decode_cursor(cursor)
+        if sort_at is None:
+            stmt = stmt.where(EdTechMemory.id < row_id)
+        else:
+            stmt = stmt.where(
+                or_(
+                    ProxyUser.last_active_at < sort_at,
+                    (ProxyUser.last_active_at == sort_at) & (EdTechMemory.id < row_id),
+                )
+            )
+
+    result = await session.execute(stmt)
+    rows = result.all()
+    page_rows = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        last_memory, last_user = page_rows[-1]
+        next_cursor = _encode_cursor(last_user.last_active_at, last_memory.id)
+
+    today = utc_now().date()
+    data = []
+    for memory, proxy_user in page_rows:
+        days_to_exam = None
+        if memory.exam_date:
+            days_to_exam = (memory.exam_date - today).days
+        data.append(
+            StudentSummary(
+                external_user_id=proxy_user.external_user_id,
+                grade_level=memory.grade_level,
+                board_or_curriculum=memory.board_or_curriculum,
+                exam_name=memory.exam_name,
+                exam_date=memory.exam_date,
+                days_to_exam=days_to_exam,
+                weak_topics_count=len(memory.weak_topics or []),
+                forgetting_risk_count=_count_forgetting_risk(memory.forgetting_stages),
+                last_session_at=proxy_user.last_active_at,
+            )
+        )
+
+    return TenantStudentsResponse(
+        data=data,
         pagination=CursorPage(next_cursor=next_cursor, limit=limit, total=total),
         request_id=get_request_id(request),
         timestamp=utc_now(),
@@ -689,6 +1203,7 @@ async def list_tenant_quality_log(
                 id=str(item.id),
                 external_user_id=item.external_user_id,
                 layer_blocked_at=item.layer_blocked_at.value,
+                reason=getattr(item, "reason", None),
                 quality_score=float(item.quality_score or 0.0),
                 semantic_similarity=item.semantic_similarity,
                 created_at=item.created_at,
@@ -716,6 +1231,134 @@ async def get_tenant_memory_additions(
     )
 
 
+@router.get("/conflict-stats", response_model=ConflictStatsResponse)
+async def get_tenant_conflict_stats(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> ConflictStatsResponse:
+    tenant_uuid = uuid.UUID(tenant_id)
+    month_start = utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_conflicts = (
+        (
+            await session.execute(
+                select(CrossUserConflict)
+                .where(
+                    CrossUserConflict.tenant_id == tenant_uuid,
+                    CrossUserConflict.detected_at >= month_start,
+                )
+                .order_by(CrossUserConflict.detected_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    open_conflicts = (
+        (
+            await session.execute(
+                select(CrossUserConflict)
+                .where(
+                    CrossUserConflict.tenant_id == tenant_uuid,
+                    CrossUserConflict.status.in_(
+                        [
+                            CrossUserConflictStatus.pending,
+                            CrossUserConflictStatus.clarification_queued,
+                        ]
+                    ),
+                )
+                .order_by(CrossUserConflict.detected_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    month_unique = _dedupe_cross_user_conflicts(month_conflicts)
+    open_unique = _dedupe_cross_user_conflicts(open_conflicts)
+
+    total_detected = len(month_unique)
+    requires_attention = sum(
+        1
+        for conflict in open_unique
+        if conflict.requires_attention and conflict.status == CrossUserConflictStatus.pending
+    )
+    pending_user_session = sum(
+        1
+        for conflict in open_unique
+        if conflict.resolution_path == "user_session"
+        and conflict.status == CrossUserConflictStatus.clarification_queued
+    )
+    pending_tenant_review = sum(
+        1
+        for conflict in open_unique
+        if conflict.resolution_path == "tenant_review"
+        and conflict.status == CrossUserConflictStatus.pending
+        and conflict.requires_attention
+    )
+    resolved_by_user_session_mtd = sum(
+        1
+        for conflict in month_unique
+        if conflict.resolved_by == "user_session"
+        and conflict.resolved_at is not None
+        and conflict.resolved_at >= month_start
+    )
+    resolved_by_tenant_mtd = sum(
+        1
+        for conflict in month_unique
+        if conflict.resolved_by == "tenant"
+        and conflict.resolved_at is not None
+        and conflict.resolved_at >= month_start
+    )
+    clarification_pending = pending_user_session
+    clarification_conflict_ids = [
+        conflict.id
+        for conflict in open_unique
+        if conflict.resolution_path == "user_session"
+        and conflict.status == CrossUserConflictStatus.clarification_queued
+    ]
+    if clarification_conflict_ids:
+        clarification_pending = int(
+            (
+                await session.execute(
+                    select(func.count(ClarificationQueue.id)).where(
+                        ClarificationQueue.tenant_id == tenant_uuid,
+                        ClarificationQueue.status == ClarificationQueueStatus.pending,
+                        ClarificationQueue.conflict_id.in_(clarification_conflict_ids),
+                    )
+                )
+            )
+            .scalar_one()
+            or 0
+        )
+    breakdown = {
+        "per_user_scoped": 0,
+        "recency_weighted": 0,
+        "confidence_weighted": 0,
+        "clarification_queued": 0,
+    }
+    for conflict in month_unique:
+        resolution = conflict.auto_resolution
+        if resolution in breakdown:
+            breakdown[str(resolution)] += 1
+
+    auto_resolved = sum(breakdown.values())
+    return ConflictStatsResponse(
+        data=ConflictStatsData(
+            total_detected_mtd=total_detected,
+            auto_resolved_mtd=auto_resolved,
+            auto_resolution_rate=(auto_resolved / total_detected if total_detected else 0.0),
+            resolution_breakdown=breakdown,
+            requires_attention=requires_attention,
+            clarifications_pending=clarification_pending,
+            pending_user_session=pending_user_session,
+            pending_tenant_review=pending_tenant_review,
+            resolved_by_user_session_mtd=resolved_by_user_session_mtd,
+            resolved_by_tenant_mtd=resolved_by_tenant_mtd,
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
 @router.get("/shared-context-conflicts", response_model=CrossUserConflictsResponse)
 async def get_tenant_shared_context_conflicts(
     request: Request,
@@ -729,6 +1372,7 @@ async def get_tenant_shared_context_conflicts(
         if not include_resolved
         else [
             CrossUserConflictStatus.pending,
+            CrossUserConflictStatus.clarification_queued,
             CrossUserConflictStatus.resolved,
             CrossUserConflictStatus.ignored,
         ]
@@ -745,9 +1389,10 @@ async def get_tenant_shared_context_conflicts(
                 CrossUserConflict.status.in_(status_filter),
             )
             .order_by(CrossUserConflict.detected_at.desc())
-            .limit(limit)
+            .limit(min(limit * 5, 2500))
         )
     ).scalars().all()
+    conflicts = _dedupe_cross_user_conflicts(conflicts, include_status=True)[:limit]
     return CrossUserConflictsResponse(
         data=[_cross_user_conflict_to_data(conflict) for conflict in conflicts],
         request_id=get_request_id(request),
@@ -780,21 +1425,171 @@ async def update_tenant_shared_context_conflict(
         raise APIError(status_code=404, code="CONFLICT_404", error="conflict_not_found")
 
     status = payload.status.lower()
-    correct_user = (payload.correct_user or "").upper()
     if status == "ignored":
         conflict.status = CrossUserConflictStatus.ignored
-    elif status == "resolved" and correct_user in {"A", "B"}:
-        conflict.status = CrossUserConflictStatus.resolved
-        memory_to_archive = conflict.user_b_memory if correct_user == "A" else conflict.user_a_memory
-        if memory_to_archive is not None:
-            memory_to_archive.is_archived = True
-            memory_to_archive.updated_at = utc_now()
+        conflict.requires_attention = False
+        conflict.auto_resolution = conflict.auto_resolution or "marked_not_conflict"
+        conflict.auto_resolution_at = utc_now()
     else:
         raise APIError(status_code=400, code="CONFLICT_400", error="invalid_conflict_resolution")
 
     await session.commit()
     return CrossUserConflictsResponse(
         data=[_cross_user_conflict_to_data(conflict)],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post("/conflicts/{conflict_id}/resolve", response_model=TenantConflictResolveResponse)
+async def resolve_tenant_conflict(
+    request: Request,
+    conflict_id: str,
+    payload: TenantConflictResolveRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> TenantConflictResolveResponse:
+    conflict = (
+        await session.execute(
+            select(CrossUserConflict)
+            .options(
+                selectinload(CrossUserConflict.user_a_memory).selectinload(Memory.proxy_user),
+                selectinload(CrossUserConflict.user_b_memory).selectinload(Memory.proxy_user),
+            )
+            .where(
+                CrossUserConflict.id == uuid.UUID(conflict_id),
+                CrossUserConflict.tenant_id == uuid.UUID(tenant_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if conflict is None:
+        raise APIError(status_code=404, code="CONFLICT_404", error="conflict_not_found")
+    if conflict.resolution_path not in {None, "tenant_review"}:
+        raise APIError(
+            status_code=400,
+            code="CONFLICT_400",
+            error="conflict_not_tenant_review",
+        )
+
+    correct_user = payload.correct_user
+    if correct_user not in {"A", "B", "both_valid"}:
+        raise APIError(status_code=400, code="CONFLICT_400", error="invalid_correct_user")
+
+    memory_a = conflict.user_a_memory
+    memory_b = conflict.user_b_memory
+    if memory_a is None or memory_b is None:
+        raise APIError(status_code=400, code="CONFLICT_400", error="conflict_memory_missing")
+
+    reason = payload.reason or None
+    action_taken = "both_valid_no_archive"
+    archived_memory: Memory | None = None
+    kept_memory: Memory | None = None
+    if correct_user == "A":
+        kept_memory = memory_a
+        archived_memory = memory_b
+        action_taken = "archived_user_b_memory"
+    elif correct_user == "B":
+        kept_memory = memory_b
+        archived_memory = memory_a
+        action_taken = "archived_user_a_memory"
+
+    if archived_memory is not None and kept_memory is not None:
+        await VersionService(session).asafe_record_version(
+            archived_memory,
+            "conflict_resolved",
+            (
+                "Tenant confirmed User A version"
+                if correct_user == "A"
+                else "Tenant confirmed User B version"
+            ),
+            "user",
+        )
+        archived_memory.is_archived = True
+        archived_signal_rows = (
+            await session.execute(
+                select(SharedContextSignal).where(
+                    SharedContextSignal.source_memory_id == archived_memory.id,
+                    SharedContextSignal.tenant_id == uuid.UUID(tenant_id),
+                )
+            )
+        ).scalars().all()
+        kept_signal_rows = (
+            await session.execute(
+                select(SharedContextSignal).where(
+                    SharedContextSignal.source_memory_id == kept_memory.id,
+                    SharedContextSignal.tenant_id == uuid.UUID(tenant_id),
+                )
+            )
+        ).scalars().all()
+        for signal in archived_signal_rows:
+            signal.is_superseded = True
+        for signal in kept_signal_rows:
+            signal.is_superseded = False
+
+    now = utc_now()
+    conflict.status = CrossUserConflictStatus.resolved
+    conflict.resolution_path = "tenant_review"
+    conflict.resolved_at = now
+    conflict.resolved_by = "tenant"
+    conflict.resolution = correct_user
+    conflict.resolution_reason = reason
+    conflict.requires_attention = False
+
+    session.add(
+        AuditLog(
+            user_id=(archived_memory.user_id if archived_memory is not None else None),
+            proxy_user_id=(archived_memory.proxy_user_id if archived_memory is not None else None),
+            action=AuditAction.conflict_resolved_by_tenant,
+            memory_id=(archived_memory.id if archived_memory is not None else None),
+            old_value={
+                "conflict_id": str(conflict.id),
+                "memory_a": memory_a.content,
+                "memory_b": memory_b.content,
+            },
+            new_value={
+                "correct_user": correct_user,
+                "reason": reason,
+                "action_taken": action_taken,
+            },
+            metadata_json={
+                "conflict_id": str(conflict.id),
+                "correct_user": correct_user,
+                "reason": reason,
+            },
+        )
+    )
+
+    await session.commit()
+    return TenantConflictResolveResponse(
+        data=TenantConflictResolveData(
+            resolved=True,
+            conflict_id=str(conflict.id),
+            action_taken=action_taken,
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post("/settings/enable-edtech-schema", response_model=EnableEdTechSchemaResponse)
+async def enable_edtech_schema(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> EnableEdTechSchemaResponse:
+    tenant = await session.get(Tenant, uuid.UUID(str(tenant_id)))
+    if tenant is None:
+        raise APIError(status_code=404, code="TEN_404", error="tenant_not_found")
+    metadata = dict(tenant.metadata_json or {})
+    metadata["domain_schema"] = "edtech"
+    metadata["edtech_schema_enabled"] = True
+    tenant.metadata_json = metadata
+    await session.commit()
+    return EnableEdTechSchemaResponse(
+        data=EnableEdTechSchemaData(
+            enabled=True,
+            effective_from="next add() call",
+        ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
