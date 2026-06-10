@@ -42,8 +42,10 @@ from api.db.models import CrossUserConflictStatus
 from api.db.models import DeadLetterJob
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
+from api.db.models import GlobalAgent
 from api.db.models import Memory
 from api.db.models import OveragePolicy
+from api.db.models import PermissionGrant
 from api.db.models import PlanTier
 from api.db.models import ProxyUser
 from api.db.models import QuotaMode
@@ -62,15 +64,22 @@ from api.schemas.internal_schemas import CircuitStatus
 from api.schemas.internal_schemas import CostSummaryResponse
 from api.schemas.internal_schemas import CostSummaryTenant
 from api.schemas.internal_schemas import DeadLetterDiscardResponse
+from api.schemas.internal_schemas import GlobalAgentVerificationRecord
+from api.schemas.internal_schemas import GlobalAgentVerificationResponse
+from api.schemas.internal_schemas import GlobalAgentVerificationUpdateRequest
 from api.schemas.internal_schemas import InternalTenantRecord
 from api.schemas.internal_schemas import QueueStatus
+from api.schemas.internal_schemas import ProviderUsageData
+from api.schemas.internal_schemas import ProviderUsageResponse
 from api.schemas.internal_schemas import QualitySummary
 from api.schemas.internal_schemas import RecentExtractionJob
 from api.schemas.internal_schemas import SystemHealthResponse
 from api.schemas.internal_schemas import TenantDetail
+from api.schemas.internal_schemas import NothingToExtractTenant
 from api.schemas.internal_schemas import PlanChangeRequest
 from api.schemas.internal_schemas import TenantBudgetRecord
 from api.schemas.internal_schemas import TenantSummary
+from api.schemas.lifecycle_schemas import LifecycleReportsResponse
 from api.schemas.tenant_schemas import TenantUsageData
 from api.services.embedding_service import EmbeddingService
 from api.services.llm_service import get_llm_provider_health
@@ -322,6 +331,17 @@ async def _get_system_health(cache_service: CacheService) -> SystemHealthRespons
     )
 
 
+async def _get_provider_usage(cache_service: CacheService) -> ProviderUsageResponse:
+    providers = ["gemini", "openai", "anthropic"]
+    hour_bucket = _utc_now().strftime("%Y%m%d%H")
+    usage = await cache_service.get_provider_usage(hour_bucket, providers)
+    active_provider = max(usage.items(), key=lambda item: item[1])[0] if any(usage.values()) else None
+    return ProviderUsageResponse(
+        data=ProviderUsageData(last_hour=usage, active_provider=active_provider),
+        generated_at=_utc_now(),
+    )
+
+
 async def _list_all_tenants(
     session: AsyncSession,
     *,
@@ -359,6 +379,36 @@ async def _list_all_tenants(
         .group_by(ExtractionJob.tenant_id)
         .subquery()
     )
+    extraction_stats_subquery = (
+        select(
+            ExtractionJob.tenant_id.label("tenant_id"),
+            func.count(ExtractionJob.id).label("total_extraction_calls_mtd"),
+            func.coalesce(
+                func.sum(case((ExtractionJob.memories_created > 0, 1), else_=0)),
+                0,
+            ).label("jobs_with_memories"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            cast(ExtractionJob.result["nothing_to_extract"].astext, String)
+                            == "true",
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("nothing_to_extract_jobs"),
+            func.avg(cast(ExtractionJob.result["tokens_used"].astext, Float)).label("avg_extraction_tokens"),
+        )
+        .where(
+            ExtractionJob.status == ExtractionJobStatus.completed,
+            ExtractionJob.completed_at >= now.replace(day=1, hour=0, minute=0, second=0, microsecond=0),
+        )
+        .group_by(ExtractionJob.tenant_id)
+        .subquery()
+    )
     last_api_call_subquery = (
         select(
             ApiKey.tenant_id.label("tenant_id"),
@@ -378,12 +428,25 @@ async def _list_all_tenants(
         / cast(TenantBudget.monthly_call_limit, Float),
     )
     dead_job_count_expr = func.coalesce(dead_jobs_subquery.c.dead_job_count, 0)
+    total_extraction_calls_expr = func.coalesce(extraction_stats_subquery.c.total_extraction_calls_mtd, 0)
+    extraction_success_rate_expr = case(
+        (total_extraction_calls_expr > 0, cast(extraction_stats_subquery.c.jobs_with_memories, Float) / total_extraction_calls_expr),
+        else_=None,
+    )
+    nothing_to_extract_rate_expr = case(
+        (
+            total_extraction_calls_expr > 0,
+            cast(extraction_stats_subquery.c.nothing_to_extract_jobs, Float) / total_extraction_calls_expr,
+        ),
+        else_=None,
+    )
     last_api_call_expr = last_api_call_subquery.c.last_api_call
     needs_attention_rank = case(
         (
             or_(
                 quota_mode_expr != literal(QuotaMode.full.value),
                 dead_job_count_expr > 0,
+                nothing_to_extract_rate_expr > 0.5,
                 and_(last_api_call_expr.is_not(None), last_api_call_expr < stale_cutoff),
             ),
             1,
@@ -402,6 +465,10 @@ async def _list_all_tenants(
             func.coalesce(memory_counts_subquery.c.memory_count, 0).label("memory_count"),
             func.coalesce(active_users_subquery.c.active_users_7d, 0).label("active_users_7d"),
             dead_job_count_expr.label("dead_job_count"),
+            total_extraction_calls_expr.label("total_extraction_calls_mtd"),
+            extraction_success_rate_expr.label("extraction_success_rate"),
+            nothing_to_extract_rate_expr.label("nothing_to_extract_rate"),
+            extraction_stats_subquery.c.avg_extraction_tokens.label("avg_extraction_tokens"),
             last_api_call_expr.label("last_api_call"),
             needs_attention_rank.label("needs_attention_rank"),
         )
@@ -410,6 +477,7 @@ async def _list_all_tenants(
         .outerjoin(memory_counts_subquery, memory_counts_subquery.c.tenant_id == Tenant.id)
         .outerjoin(active_users_subquery, active_users_subquery.c.tenant_id == Tenant.id)
         .outerjoin(dead_jobs_subquery, dead_jobs_subquery.c.tenant_id == Tenant.id)
+        .outerjoin(extraction_stats_subquery, extraction_stats_subquery.c.tenant_id == Tenant.id)
         .outerjoin(last_api_call_subquery, last_api_call_subquery.c.tenant_id == Tenant.id)
     )
 
@@ -458,6 +526,22 @@ async def _list_all_tenants(
                 dead_job_count=int(row.dead_job_count or 0),
                 last_api_call=row.last_api_call,
                 needs_attention=bool(row.needs_attention_rank),
+                extraction_success_rate=(
+                    round(float(row.extraction_success_rate), 4)
+                    if row.extraction_success_rate is not None
+                    else None
+                ),
+                nothing_to_extract_rate=(
+                    round(float(row.nothing_to_extract_rate), 4)
+                    if row.nothing_to_extract_rate is not None
+                    else None
+                ),
+                avg_extraction_tokens=(
+                    round(float(row.avg_extraction_tokens), 2)
+                    if row.avg_extraction_tokens is not None
+                    else None
+                ),
+                total_extraction_calls_mtd=int(row.total_extraction_calls_mtd or 0),
             )
             for row in rows
         ],
@@ -568,6 +652,7 @@ async def _get_internal_tenant_detail(
 
 async def _get_system_cost_summary(session: AsyncSession) -> CostSummaryResponse:
     now = _utc_now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     days_in_month = calendar.monthrange(now.year, now.month)[1]
     totals_row = (
         await session.execute(
@@ -581,6 +666,57 @@ async def _get_system_cost_summary(session: AsyncSession) -> CostSummaryResponse
     total_calls_mtd = int(totals_row.total_calls or 0)
     total_estimated_cost_usd = round((total_tokens_mtd / 1_000_000) * 0.15, 4)
     avg_cost_per_call = round(total_estimated_cost_usd / total_calls_mtd, 6) if total_calls_mtd > 0 else None
+    extraction_stats_subquery = (
+        select(
+            ExtractionJob.tenant_id.label("tenant_id"),
+            func.count(ExtractionJob.id).label("add_calls"),
+            func.coalesce(func.sum(case((ExtractionJob.memories_created > 0, 1), else_=0)), 0).label("jobs_with_memories"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            cast(ExtractionJob.result["nothing_to_extract"].astext, String)
+                            == "true",
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("nothing_to_extract_jobs"),
+            func.avg(cast(ExtractionJob.result["tokens_used"].astext, Float)).label("avg_extraction_tokens"),
+        )
+        .where(
+            ExtractionJob.status == ExtractionJobStatus.completed,
+            ExtractionJob.completed_at >= month_start,
+        )
+        .group_by(ExtractionJob.tenant_id)
+        .subquery()
+    )
+    system_extraction_row = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(extraction_stats_subquery.c.add_calls), 0).label("add_calls"),
+                func.coalesce(func.sum(extraction_stats_subquery.c.jobs_with_memories), 0).label("jobs_with_memories"),
+                func.coalesce(func.sum(extraction_stats_subquery.c.nothing_to_extract_jobs), 0).label("nothing_to_extract_jobs"),
+                func.avg(extraction_stats_subquery.c.avg_extraction_tokens).label("avg_extraction_tokens"),
+            )
+        )
+    ).one()
+    total_extraction_calls_mtd = int(system_extraction_row.add_calls or 0)
+    jobs_with_memories = int(system_extraction_row.jobs_with_memories or 0)
+    nothing_to_extract_jobs = int(system_extraction_row.nothing_to_extract_jobs or 0)
+    avg_extraction_tokens = round(float(system_extraction_row.avg_extraction_tokens or 0.0), 2)
+    extraction_success_rate = (
+        round(jobs_with_memories / total_extraction_calls_mtd, 4)
+        if total_extraction_calls_mtd > 0
+        else 0.0
+    )
+    nothing_to_extract_rate = (
+        round(nothing_to_extract_jobs / total_extraction_calls_mtd, 4)
+        if total_extraction_calls_mtd > 0
+        else 0.0
+    )
 
     top_rows = (
         await session.execute(
@@ -588,10 +724,44 @@ async def _get_system_cost_summary(session: AsyncSession) -> CostSummaryResponse
                 Tenant.id.label("tenant_id"),
                 Tenant.company_name.label("company_name"),
                 func.coalesce(TenantBudget.current_month_tokens, 0).label("tokens"),
+                extraction_stats_subquery.c.add_calls.label("add_calls"),
+                extraction_stats_subquery.c.jobs_with_memories.label("jobs_with_memories"),
+                extraction_stats_subquery.c.nothing_to_extract_jobs.label("nothing_to_extract_jobs"),
             )
             .select_from(Tenant)
             .outerjoin(TenantBudget, TenantBudget.tenant_id == Tenant.id)
+            .outerjoin(extraction_stats_subquery, extraction_stats_subquery.c.tenant_id == Tenant.id)
             .order_by(desc(func.coalesce(TenantBudget.current_month_tokens, 0)), desc(Tenant.id))
+            .limit(5)
+        )
+    ).all()
+    high_no_extract_rows = (
+        await session.execute(
+            select(
+                Tenant.id.label("tenant_id"),
+                Tenant.company_name.label("company_name"),
+                extraction_stats_subquery.c.add_calls.label("add_calls"),
+                (
+                    cast(extraction_stats_subquery.c.nothing_to_extract_jobs, Float)
+                    / extraction_stats_subquery.c.add_calls
+                ).label("rate"),
+            )
+            .select_from(Tenant)
+            .join(extraction_stats_subquery, extraction_stats_subquery.c.tenant_id == Tenant.id)
+            .where(
+                extraction_stats_subquery.c.add_calls > 0,
+                (
+                    cast(extraction_stats_subquery.c.nothing_to_extract_jobs, Float)
+                    / extraction_stats_subquery.c.add_calls
+                )
+                > 0.4,
+            )
+            .order_by(
+                desc(
+                    cast(extraction_stats_subquery.c.nothing_to_extract_jobs, Float)
+                    / extraction_stats_subquery.c.add_calls
+                )
+            )
             .limit(5)
         )
     ).all()
@@ -615,6 +785,17 @@ async def _get_system_cost_summary(session: AsyncSession) -> CostSummaryResponse
                 company_name=row.company_name,
                 tokens=int(row.tokens or 0),
                 estimated_cost_usd=round((int(row.tokens or 0) / 1_000_000) * 0.15, 4),
+                add_calls=int(row.add_calls or 0),
+                extraction_success_rate=(
+                    round(float(row.jobs_with_memories or 0) / float(row.add_calls or 1), 4)
+                    if int(row.add_calls or 0) > 0
+                    else None
+                ),
+                nothing_to_extract_rate=(
+                    round(float(row.nothing_to_extract_jobs or 0) / float(row.add_calls or 1), 4)
+                    if int(row.add_calls or 0) > 0
+                    else None
+                ),
             )
             for row in top_rows
         ],
@@ -623,6 +804,19 @@ async def _get_system_cost_summary(session: AsyncSession) -> CostSummaryResponse
         estimated_savings_from_gate_usd=round(total_gate_blocks_mtd * (avg_cost_per_call or 0.0), 4),
         projected_month_cost_usd=round((total_estimated_cost_usd / now.day) * days_in_month, 4),
         cost_is_estimate=True,
+        avg_extraction_tokens=avg_extraction_tokens,
+        total_extraction_calls_mtd=total_extraction_calls_mtd,
+        extraction_success_rate=extraction_success_rate,
+        nothing_to_extract_rate=nothing_to_extract_rate,
+        top_5_by_nothing_to_extract=[
+            NothingToExtractTenant(
+                tenant_id=row.tenant_id,
+                company_name=row.company_name,
+                rate=round(float(row.rate or 0.0), 4),
+                add_calls=int(row.add_calls or 0),
+            )
+            for row in high_no_extract_rows
+        ],
     )
 
 
@@ -864,11 +1058,40 @@ def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConfli
     )
 
 
+def _global_agent_verification_record(
+    agent: GlobalAgent,
+    tenant_name: str,
+    grants_count: int,
+) -> GlobalAgentVerificationRecord:
+    return GlobalAgentVerificationRecord(
+        id=agent.id,
+        owner_tenant_id=agent.owner_tenant_id,
+        owner_tenant_name=tenant_name,
+        name=agent.name,
+        description=agent.description,
+        website_url=agent.website_url,
+        logo_url=agent.logo_url,
+        default_categories_requested=list(agent.default_categories_requested or []),
+        is_verified=bool(agent.is_verified),
+        is_public=bool(agent.is_public),
+        is_active=bool(agent.is_active),
+        grants_count=int(grants_count or 0),
+        created_at=agent.created_at,
+    )
+
+
 @router.get("/system-health", response_model=SystemHealthResponse)
 async def system_health(
     cache_service: CacheService = Depends(get_cache_service),
 ) -> SystemHealthResponse:
     return await _get_system_health(cache_service)
+
+
+@router.get("/provider-usage", response_model=ProviderUsageResponse)
+async def provider_usage(
+    cache_service: CacheService = Depends(get_cache_service),
+) -> ProviderUsageResponse:
+    return await _get_provider_usage(cache_service)
 
 
 @router.post("/circuit/{circuit_name}/reset", response_model=CircuitStatus)
@@ -965,6 +1188,74 @@ async def audit_logs(
     )
 
 
+@router.get("/global-agents", response_model=GlobalAgentVerificationResponse)
+async def global_agents_for_verification(
+    session: AsyncSession = Depends(get_db_session),
+    status_filter: str = "pending",
+) -> GlobalAgentVerificationResponse:
+    normalized_status = status_filter.strip().lower()
+    if normalized_status not in {"pending", "verified", "all"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_status_filter")
+
+    stmt = (
+        select(
+            GlobalAgent,
+            Tenant.company_name.label("tenant_name"),
+            func.count(PermissionGrant.id).label("grants_count"),
+        )
+        .join(Tenant, GlobalAgent.owner_tenant_id == Tenant.id)
+        .outerjoin(PermissionGrant, PermissionGrant.agent_id == GlobalAgent.id)
+        .where(GlobalAgent.is_active.is_(True), GlobalAgent.is_public.is_(True))
+        .group_by(GlobalAgent.id, Tenant.company_name)
+        .order_by(GlobalAgent.is_verified.asc(), GlobalAgent.created_at.desc())
+        .limit(250)
+    )
+    if normalized_status == "pending":
+        stmt = stmt.where(GlobalAgent.is_verified.is_(False))
+    elif normalized_status == "verified":
+        stmt = stmt.where(GlobalAgent.is_verified.is_(True))
+
+    result = await session.execute(stmt)
+    records = [
+        _global_agent_verification_record(agent, tenant_name, grants_count)
+        for agent, tenant_name, grants_count in result.all()
+    ]
+    return GlobalAgentVerificationResponse(data=records, generated_at=datetime.now(UTC))
+
+
+@router.patch("/global-agents/{agent_id}/verification", response_model=GlobalAgentVerificationRecord)
+async def update_global_agent_verification(
+    agent_id: str,
+    payload: GlobalAgentVerificationUpdateRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> GlobalAgentVerificationRecord:
+    try:
+        parsed_agent_id = uuid.UUID(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_agent_id") from exc
+
+    result = await session.execute(
+        select(
+            GlobalAgent,
+            Tenant.company_name.label("tenant_name"),
+            func.count(PermissionGrant.id).label("grants_count"),
+        )
+        .join(Tenant, GlobalAgent.owner_tenant_id == Tenant.id)
+        .outerjoin(PermissionGrant, PermissionGrant.agent_id == GlobalAgent.id)
+        .where(GlobalAgent.id == parsed_agent_id)
+        .group_by(GlobalAgent.id, Tenant.company_name)
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="global_agent_not_found")
+
+    agent, tenant_name, grants_count = row
+    agent.is_verified = payload.is_verified
+    await session.commit()
+    await session.refresh(agent)
+    return _global_agent_verification_record(agent, tenant_name, grants_count)
+
+
 @router.get("/cross-user-conflicts", response_model=CrossUserConflictsResponse)
 async def cross_user_conflicts(
     request: Request,
@@ -1039,7 +1330,7 @@ async def reembedding_status(
     }
 
 
-@router.get("/lifecycle-report")
+@router.get("/lifecycle-report", response_model=LifecycleReportsResponse)
 async def lifecycle_report(
     request: Request,
     cache_service: CacheService = Depends(get_cache_service),
