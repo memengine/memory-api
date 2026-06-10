@@ -145,6 +145,10 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     cached: bool
     system_prompt_addition: str
     context_token_count: int = 0
+    clarification_question: str | None = None
+    quota_mode: str | None = None
+    is_degraded: bool = False
+    is_passthrough: bool = False
 
 
 class UserProfileData(BaseModel):
