@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from datetime import datetime
 from typing import Literal
 
@@ -14,6 +15,8 @@ OveragePolicyValue = Literal["block", "warn", "charge"]
 QuotaModeValue = Literal["FULL", "PASSTHROUGH", "DEGRADED_RETRIEVE", "BLOCKED"]
 PlanTierValue = Literal["free", "starter", "growth", "enterprise"]
 BlockedLayerValue = Literal["L1", "L2", "L3", "L4", "NONE"]
+DomainSchemaValue = Literal["edtech", "support"] | None
+DomainStatusValue = Literal["available", "coming_soon"]
 
 
 class TenantUsageData(BaseModel):
@@ -26,6 +29,8 @@ class TenantUsageData(BaseModel):
     reset_at: datetime | None = None
     plan_tier: PlanTierValue
     conflicts_resolved_mtd: int = 0
+    extraction_success_rate: float = 0.0
+    nothing_to_extract_rate: float = 0.0
     cross_user_conflicts_pending: int = 0
     conflict_types_breakdown: dict[str, int] = Field(default_factory=dict)
 
@@ -57,6 +62,46 @@ class TenantMemoryAdditionsResponse(ResponseEnvelope):
     data: list[TenantMemoryAdditionPoint]
 
 
+class AvailableDomain(BaseModel):
+    value: str | None = None
+    label: str
+    description: str
+    status: DomainStatusValue
+
+
+class TenantDomainSchemaData(BaseModel):
+    domain_schema: DomainSchemaValue = None
+    available_domains: list[AvailableDomain] = Field(default_factory=list)
+    support_type_configured: str | None = None
+    support_type_mode: str = "single"
+    support_types_allowed: list[str] = Field(default_factory=list)
+
+
+class TenantDomainSchemaPatchRequest(BaseModel):
+    domain_schema: DomainSchemaValue = None
+
+
+class TenantDomainSchemaResponse(ResponseEnvelope):
+    data: TenantDomainSchemaData
+
+
+class StudentSummary(BaseModel):
+    external_user_id: str
+    grade_level: str | None = None
+    board_or_curriculum: str | None = None
+    exam_name: str | None = None
+    exam_date: date | None = None
+    days_to_exam: int | None = None
+    weak_topics_count: int = 0
+    forgetting_risk_count: int = 0
+    last_session_at: datetime | None = None
+
+
+class TenantStudentsResponse(ResponseEnvelope):
+    data: list[StudentSummary]
+    pagination: CursorPage
+
+
 class BlockEvent(BaseModel):
     blocked_at: datetime
     layer: BlockedLayerValue
@@ -83,6 +128,8 @@ class TenantQualityLogEntry(BaseModel):
     id: str
     external_user_id: str
     layer_blocked_at: BlockedLayerValue
+    reason: str | None = None
+    nothing_to_extract: bool = False
     quality_score: float
     semantic_similarity: float | None = None
     created_at: datetime
