@@ -51,6 +51,16 @@ class SystemHealthResponse(BaseModel):
     generated_at: datetime
 
 
+class ProviderUsageData(BaseModel):
+    last_hour: dict[str, int] = Field(default_factory=dict)
+    active_provider: str | None = None
+
+
+class ProviderUsageResponse(BaseModel):
+    data: ProviderUsageData
+    generated_at: datetime
+
+
 class TenantSummary(BaseModel):
     tenant_id: str
     company_name: str
@@ -62,6 +72,14 @@ class TenantSummary(BaseModel):
     dead_job_count: int
     last_api_call: datetime | None = None
     needs_attention: bool
+    extraction_success_rate: float | None = None
+    nothing_to_extract_rate: float | None = None
+    avg_extraction_tokens: float | None = None
+    total_extraction_calls_mtd: int = 0
+    hot_memories_count: int = 0
+    requires_attention: int = 0
+    clarifications_pending: int = 0
+    auto_resolution_rate: float | None = None
 
 
 class AllTenantsResponse(BaseModel):
@@ -110,6 +128,17 @@ class CostSummaryTenant(BaseModel):
     company_name: str
     tokens: int
     estimated_cost_usd: float
+    extraction_success_rate: float | None = None
+    conflicts_resolved_mtd: int = 0
+    nothing_to_extract_rate: float | None = None
+    add_calls: int = 0
+
+
+class NothingToExtractTenant(BaseModel):
+    tenant_id: uuid.UUID
+    company_name: str
+    rate: float
+    add_calls: int
 
 
 class CostSummaryResponse(BaseModel):
@@ -121,6 +150,13 @@ class CostSummaryResponse(BaseModel):
     estimated_savings_from_gate_usd: float
     projected_month_cost_usd: float
     cost_is_estimate: bool = True
+    avg_extraction_tokens: float = 0.0
+    total_extraction_calls_mtd: int = 0
+    extraction_success_rate: float = 0.0
+    nothing_to_extract_rate: float = 0.0
+    top_5_by_nothing_to_extract: list[NothingToExtractTenant] = Field(default_factory=list)
+    conflicts_resolved_mtd: int = 0
+    memories_auto_archived_mtd: int = 0
 
 
 class SystemCostSummary(CostSummaryResponse):
@@ -159,6 +195,31 @@ class AuditLogsResponse(BaseModel):
     total_count: int
     start_date: date
     end_date: date
+
+
+class GlobalAgentVerificationRecord(BaseModel):
+    id: uuid.UUID
+    owner_tenant_id: uuid.UUID
+    owner_tenant_name: str
+    name: str
+    description: str | None = None
+    website_url: str | None = None
+    logo_url: str | None = None
+    default_categories_requested: list[str] = Field(default_factory=list)
+    is_verified: bool
+    is_public: bool
+    is_active: bool
+    grants_count: int = 0
+    created_at: datetime
+
+
+class GlobalAgentVerificationResponse(BaseModel):
+    data: list[GlobalAgentVerificationRecord]
+    generated_at: datetime
+
+
+class GlobalAgentVerificationUpdateRequest(BaseModel):
+    is_verified: bool
 
 
 class DeadLetterJob(BaseModel):
