@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
 import os
 import time
 from typing import Any
 
+from qdrant_client import AsyncQdrantClient
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException
 from qdrant_client.http import models as qmodels
@@ -30,6 +33,7 @@ class QdrantService:
     DEFAULT_TIMEOUT_SECONDS = 1.0
 
     _shared_client: QdrantClient | None = None
+    _shared_async_client: AsyncQdrantClient | None = None
     _initialized_collections: set[str] = set()
 
     def __init__(
@@ -39,6 +43,7 @@ class QdrantService:
         client: QdrantClient | None = None,
     ) -> None:
         self.breaker = CircuitBreakerRegistry.get_instance().qdrant_cb
+        self.async_client: AsyncQdrantClient | None = None
         if client is not None:
             self.client = client
             self._ensure_collection_if_possible(self.COLLECTION_NAME, self.VECTOR_SIZE)
@@ -46,18 +51,38 @@ class QdrantService:
             return
 
         if self.__class__._shared_client is None:
+            resolved_api_key = (
+                (api_key or None)
+                if api_key is not None
+                else os.getenv("QDRANT_API_KEY") or get_settings().qdrant_api_key
+            )
             self.__class__._shared_client = QdrantClient(
                 url=get_qdrant_url(url),
-                api_key=api_key or os.getenv("QDRANT_API_KEY") or get_settings().qdrant_api_key,
+                api_key=resolved_api_key,
                 timeout=float(os.getenv("QDRANT_TIMEOUT_SECONDS", self.DEFAULT_TIMEOUT_SECONDS)),
             )
         self.client = self.__class__._shared_client
+        if self.__class__._shared_async_client is None:
+            resolved_async_api_key = (
+                (api_key or None)
+                if api_key is not None
+                else os.getenv("QDRANT_API_KEY") or get_settings().qdrant_api_key
+            )
+            self.__class__._shared_async_client = AsyncQdrantClient(
+                url=get_qdrant_url(url),
+                api_key=resolved_async_api_key,
+                timeout=int(float(os.getenv("QDRANT_TIMEOUT_SECONDS", "10"))),
+                prefer_grpc=os.getenv("QDRANT_PREFER_GRPC", "false").lower() in {"1", "true", "yes"},
+                pool_size=int(os.getenv("QDRANT_ASYNC_POOL_SIZE", "100")),
+            )
+        self.async_client = self.__class__._shared_async_client
         self._ensure_collection_if_possible(self.COLLECTION_NAME, self.VECTOR_SIZE)
         self._ensure_collection_if_possible(self.UNIVERSAL_COLLECTION_NAME, self.VECTOR_SIZE)
 
     @classmethod
     def _reset_shared_state(cls) -> None:
         cls._shared_client = None
+        cls._shared_async_client = None
         cls._initialized_collections = set()
 
     def _ensure_collection_if_possible(
@@ -192,10 +217,58 @@ class QdrantService:
         include_archived: bool = False,
         collection_name: str | None = None,
         collection_names: list[str] | None = None,
+        created_after: datetime | str | None = None,
     ) -> list[qmodels.ScoredPoint]:
         target_collections = collection_names or [collection_name or self.COLLECTION_NAME]
         for target_collection in target_collections:
             self._ensure_collection_if_possible(target_collection)
+        must_conditions = self._search_conditions(
+            tenant_id=tenant_id,
+            proxy_user_id=proxy_user_id,
+            user_id=user_id,
+            category_filter=category_filter,
+            include_archived=include_archived,
+            created_after=created_after,
+        )
+
+        merged_points: dict[str, qmodels.ScoredPoint] = {}
+        for target_collection in target_collections:
+            response = self._with_retries(
+                self.client.query_points,
+                collection_name=target_collection,
+                query=query_embedding,
+                query_filter=qmodels.Filter(must=must_conditions),
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+                _fallback=on_qdrant_open,
+                _fallback_on_error=True,
+            )
+            points = response if isinstance(response, list) else list(response.points)
+            for point in points:
+                point_id = str(getattr(point, "id", ""))
+                existing = merged_points.get(point_id)
+                if existing is None or float(getattr(point, "score", 0.0) or 0.0) > float(
+                    getattr(existing, "score", 0.0) or 0.0
+                ):
+                    merged_points[point_id] = point
+
+        return sorted(
+            merged_points.values(),
+            key=lambda point: float(getattr(point, "score", 0.0) or 0.0),
+            reverse=True,
+        )[:limit]
+
+    @staticmethod
+    def _search_conditions(
+        *,
+        tenant_id: str | None,
+        proxy_user_id: str | None,
+        user_id: str | None,
+        category_filter: str | None,
+        include_archived: bool,
+        created_after: datetime | str | None,
+    ) -> list[qmodels.FieldCondition]:
         must_conditions: list[qmodels.FieldCondition] = []
 
         if tenant_id is not None and proxy_user_id is not None:
@@ -237,18 +310,65 @@ class QdrantService:
                 )
             )
 
+        if created_after is not None:
+            created_at_value = created_after if isinstance(created_after, datetime) else str(created_after)
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="created_at",
+                    range=qmodels.DatetimeRange(gte=created_at_value),
+                )
+            )
+
+        return must_conditions
+
+    async def search_memories_async(
+        self,
+        query_embedding: list[float],
+        tenant_id: str | None = None,
+        proxy_user_id: str | None = None,
+        user_id: str | None = None,
+        limit: int = 20,
+        category_filter: str | None = None,
+        include_archived: bool = False,
+        collection_name: str | None = None,
+        collection_names: list[str] | None = None,
+        created_after: datetime | str | None = None,
+    ) -> list[qmodels.ScoredPoint]:
+        if self.async_client is None:
+            return await asyncio.to_thread(
+                self.search_memories,
+                query_embedding=query_embedding,
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                user_id=user_id,
+                limit=limit,
+                category_filter=category_filter,
+                include_archived=include_archived,
+                collection_name=collection_name,
+                collection_names=collection_names,
+                created_after=created_after,
+            )
+
+        target_collections = collection_names or [collection_name or self.COLLECTION_NAME]
+        must_conditions = self._search_conditions(
+            tenant_id=tenant_id,
+            proxy_user_id=proxy_user_id,
+            user_id=user_id,
+            category_filter=category_filter,
+            include_archived=include_archived,
+            created_after=created_after,
+        )
         merged_points: dict[str, qmodels.ScoredPoint] = {}
         for target_collection in target_collections:
-            response = self._with_retries(
-                self.client.query_points,
+            response = await self.breaker.call(
+                self.async_client.query_points,
                 collection_name=target_collection,
                 query=query_embedding,
                 query_filter=qmodels.Filter(must=must_conditions),
                 limit=limit,
                 with_payload=True,
                 with_vectors=False,
-                _fallback=on_qdrant_open,
-                _fallback_on_error=True,
+                fallback=on_qdrant_open,
             )
             points = response if isinstance(response, list) else list(response.points)
             for point in points:
