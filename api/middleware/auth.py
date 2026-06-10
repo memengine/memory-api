@@ -24,6 +24,7 @@ from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import select
+from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -240,12 +241,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     error="org_required",
                     error_code="AUTH_003",
                     error_message=(
-                        "Please select your organisation in the dashboard to continue."
+                        "Please select or create a workspace in the dashboard to continue."
                     ),
                     org_id=None,
                 )
 
-            tenant_id = await self._resolve_tenant_id_from_clerk_org(org_id)
+            org_name = (
+                str(claims.get("org_name") or claims.get("org_slug") or org_id)
+                .strip()
+                or org_id
+            )
+            tenant_id = await self._resolve_tenant_id_from_clerk_org(
+                org_id,
+                org_name=org_name,
+            )
             if tenant_id is None:
                 return JwtAuthResult(
                     user_id=str(subject),
@@ -253,7 +262,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     error="tenant_not_found",
                     error_code="AUTH_002",
                     error_message=(
-                        "No MemoryOS tenant found for this organisation. Please contact support."
+                        "No MemoryOS tenant found for this workspace. Please try again or contact support."
                     ),
                     org_id=org_id,
                 )
@@ -282,7 +291,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         return None
 
-    async def _resolve_tenant_id_from_clerk_org(self, org_id: str | None) -> str | None:
+    async def _resolve_tenant_id_from_clerk_org(
+        self,
+        org_id: str | None,
+        *,
+        org_name: str | None = None,
+    ) -> str | None:
         if not org_id:
             return None
 
@@ -310,6 +324,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
             )
             tenant_id = result.scalar_one_or_none()
+            if tenant_id is None:
+                tenant_id = await self._create_tenant_for_clerk_org(
+                    session,
+                    org_id=org_id,
+                    org_name=org_name or org_id,
+                )
 
         if tenant_id is None:
             return None
@@ -327,6 +347,56 @@ class AuthMiddleware(BaseHTTPMiddleware):
             self._mark_redis_unavailable()
 
         return tenant_id_str
+
+    async def _create_tenant_for_clerk_org(
+        self,
+        session,
+        *,
+        org_id: str,
+        org_name: str,
+    ) -> Any:
+        result = await session.execute(
+            text(
+                """
+                INSERT INTO tenants (company_name, clerk_org_id, is_active, plan_tier)
+                VALUES (:company_name, :clerk_org_id, TRUE, 'free')
+                ON CONFLICT (clerk_org_id) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "company_name": org_name,
+                "clerk_org_id": org_id,
+            },
+        )
+        tenant_id = result.scalar_one_or_none()
+        if tenant_id is None:
+            return None
+
+        await session.execute(
+            text(
+                """
+                INSERT INTO tenant_budgets (tenant_id, plan_tier)
+                VALUES (:tenant_id, 'free')
+                ON CONFLICT (tenant_id) DO NOTHING
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        try:
+            from api.config.plan_limits import apply_plan_limits
+
+            await session.run_sync(
+                lambda sync_session: apply_plan_limits(
+                    str(tenant_id),
+                    "free",
+                    sync_session,
+                )
+            )
+        except Exception:
+            LOGGER.exception("Failed to apply free plan limits for Clerk org %s", org_id)
+        await session.commit()
+        return tenant_id
 
     async def _authenticate_api_key(self, raw_api_key: str) -> ApiKeyAuthResult | None:
         cache_key = self._api_key_cache_key(raw_api_key)
