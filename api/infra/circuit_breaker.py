@@ -177,6 +177,9 @@ class CircuitBreaker:
         return half_open_state
 
     def _record_success(self) -> None:
+        with self._lock:
+            if self._local_state.state == "CLOSED" and self._local_state.failure_count == 0:
+                return
         self._save_state(CircuitState(state="CLOSED", failure_count=0, window_started_at=0.0, opened_at=0.0))
 
     def _record_failure(self) -> None:
