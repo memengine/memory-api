@@ -13,6 +13,7 @@ from fastapi import Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from pydantic import Field
+from celery.result import AsyncResult
 from qdrant_client.http import models as qmodels
 from sqlalchemy import select
 
@@ -23,7 +24,6 @@ from api.dependencies import get_context_builder
 from api.dependencies import get_qdrant_service
 from api.dependencies import get_quality_gate_service
 from api.db.cache import CacheService
-from api.db.models import MemoryCategory
 from api.db.models import PermissionGrant
 from api.db.models import UniversalMemory
 from api.db.models import UniversalUser
@@ -68,6 +68,16 @@ class UniversalMemoryRetrieveResponse(MemoryRetrieveResponse):
     is_passthrough: bool = False
 
 
+class UniversalMemoryJobStatusResponse(BaseModel):
+    job_id: str
+    state: str
+    status: str
+    memories_created: int | None = None
+    blocked_reason: str | None = None
+    error: str | None = None
+    result: dict[str, Any] | None = None
+
+
 def _current_global_agent(request: Request):
     agent = getattr(request.state, "global_agent", None)
     if agent is None:
@@ -80,10 +90,6 @@ def _current_universal_user(request: Request):
     if universal_user is None:
         raise RuntimeError("Universal auth context missing universal_user.")
     return universal_user
-
-
-def _current_uui_token(request: Request) -> str:
-    return str(getattr(request.state, "uui_token", ""))
 
 
 async def _get_active_grant(
@@ -108,6 +114,7 @@ async def _dispatch_universal_job(job_payload: dict[str, Any]) -> str | None:
         dispatched = celery_app.send_task(
             UNIVERSAL_EXTRACTION_TASK_NAME,
             args=[job_payload],
+            task_id=str(job_payload.get("job_id")),
         )
         if dispatched is not None and hasattr(dispatched, "__await__"):
             await dispatched
@@ -264,8 +271,6 @@ async def add_universal_memories(
 ) -> MemoryAddResponse:
     agent = _current_global_agent(request)
     user = _current_universal_user(request)
-    uui_token = _current_uui_token(request)
-
     uui_service = UUIService(session=session, cache_service=cache_service)
     grants = await uui_service.get_grants(str(user.id))
     grant = next((item for item in grants if str(item.agent_id) == str(agent.id)), None)
@@ -278,6 +283,26 @@ async def add_universal_memories(
                 "request_id": get_request_id(request),
             },
         )
+
+    idempotency_scope = f"universal:{agent.id}:{user.id}"
+    if payload.idempotency_key:
+        cached_job = await cache_service.get_idempotent_response(
+            payload.idempotency_key,
+            scope=idempotency_scope,
+            operation="universal_memory_add",
+        )
+        if cached_job is not None:
+            return MemoryAddResponse(
+                job_id=cached_job.get("job_id"),
+                status=str(cached_job.get("status") or "queued"),
+                blocked_reason=cached_job.get("blocked_reason"),
+                retry_after_seconds=cached_job.get("retry_after_seconds"),
+                budget_remaining_pct=cached_job.get("budget_remaining_pct"),
+                processing_eta_seconds=cached_job.get("processing_eta_seconds"),
+                processing_status=cached_job.get("processing_status") or "normal",
+                request_id=get_request_id(request),
+                timestamp=utc_now(),
+            )
 
     gate_result = await quality_gate_service.check(
         [message.model_dump() for message in payload.messages],
@@ -307,10 +332,31 @@ async def add_universal_memories(
         "messages": [message.model_dump() for message in payload.messages],
         "metadata": payload.metadata,
         "queued_at": utc_now().isoformat(),
-        "uui_token": uui_token,
+        "processing_status": "normal",
     }
+    if payload.idempotency_key:
+        await cache_service.set_idempotent_response(
+            payload.idempotency_key,
+            job_payload,
+            ttl=86400,
+            scope=idempotency_scope,
+            operation="universal_memory_add",
+        )
     dispatch_error = await _dispatch_universal_job(job_payload)
     if dispatch_error:
+        if payload.idempotency_key:
+            failed_payload = {
+                **job_payload,
+                "status": "error",
+                "blocked_reason": dispatch_error,
+            }
+            await cache_service.set_idempotent_response(
+                payload.idempotency_key,
+                failed_payload,
+                ttl=300,
+                scope=idempotency_scope,
+                operation="universal_memory_add",
+            )
         return JSONResponse(
             status_code=200,
             content={
@@ -335,6 +381,34 @@ async def add_universal_memories(
         processing_status="normal",
         request_id=get_request_id(request),
         timestamp=utc_now(),
+    )
+
+
+@router.get("/memories/jobs/{job_id}", response_model=UniversalMemoryJobStatusResponse)
+async def get_universal_memory_job_status(
+    job_id: str,
+) -> UniversalMemoryJobStatusResponse:
+    result = AsyncResult(job_id, app=celery_app)
+    payload = result.result if isinstance(result.result, dict) else None
+    if payload is None:
+        return UniversalMemoryJobStatusResponse(
+            job_id=job_id,
+            state=result.state,
+            status=str(result.state).lower(),
+            memories_created=None,
+            blocked_reason=None,
+            error=str(result.result) if result.failed() and result.result is not None else None,
+            result=None,
+        )
+
+    return UniversalMemoryJobStatusResponse(
+        job_id=job_id,
+        state=result.state,
+        status=str(payload.get("status") or result.state).lower(),
+        memories_created=payload.get("memories_created"),
+        blocked_reason=payload.get("blocked_reason"),
+        error=payload.get("error"),
+        result=payload,
     )
 
 
