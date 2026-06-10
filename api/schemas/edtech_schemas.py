@@ -31,6 +31,11 @@ class EdTechMemoryView(BaseModel):
     id: str
     proxy_user_id: str
     tenant_id: str
+    learner_type: str | None = None
+    learner_type_confidence: str = "high"
+    primary_goal: str | None = None
+    primary_deadline_event: str | None = None
+    primary_deadline_date: date | None = None
     grade_level: str | None = None
     board_or_curriculum: str | None = None
     subjects: list[dict[str, Any]] = Field(default_factory=list)
@@ -47,6 +52,12 @@ class EdTechMemoryView(BaseModel):
     exam_date: date | None = None
     marks_target: dict[str, Any] | None = None
     mock_scores: list[dict[str, Any]] = Field(default_factory=list)
+    progress_trend: dict[str, Any] = Field(default_factory=dict)
+    competitive_exam_context: dict[str, Any] = Field(default_factory=dict)
+    higher_education_context: dict[str, Any] = Field(default_factory=dict)
+    professional_cert_context: dict[str, Any] = Field(default_factory=dict)
+    skill_learner_context: dict[str, Any] = Field(default_factory=dict)
+    medical_context: dict[str, Any] = Field(default_factory=dict)
     forgetting_stages: dict[str, Any] = Field(default_factory=dict)
     improvement_velocity: dict[str, Any] = Field(default_factory=dict)
     streak: dict[str, Any] | None = None
