@@ -48,6 +48,7 @@ class MemoryRetrieveRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
     categories: list[MemoryCategory] = Field(default_factory=list)
     agent_id: str | None = None
+    time_filter_days: int | None = Field(default=None, ge=1, le=3650)
     format: MemoryFormat = "bullets"
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
 
