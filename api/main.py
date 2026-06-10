@@ -190,6 +190,22 @@ def _build_universal_app() -> FastAPI:
         description="Cross-agent universal memory access",
         version=get_settings().app_version,
     )
+    universal_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_allowed_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-MemoryOS-UUI",
+            "Idempotency-Key",
+        ],
+        expose_headers=[
+            "X-MemoryOS-Processing",
+        ],
+        max_age=600,
+    )
     _register_exception_handlers(universal_app)
     universal_app.include_router(universal_router)
     return universal_app
