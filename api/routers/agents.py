@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Query
 from fastapi import Request
+from sqlalchemy import desc
+from sqlalchemy import select
 
+from api.db.models import GlobalAgent
 from api.dependencies import DbSession
 from api.dependencies import get_agent_service
 from api.dependencies import get_authenticated_user_id
@@ -19,6 +23,7 @@ from api.schemas.responses import AgentListResponse
 from api.schemas.responses import CursorPage
 from api.schemas.uui_schemas import GlobalAgentCreateRequest
 from api.schemas.uui_schemas import GlobalAgentData
+from api.schemas.uui_schemas import GlobalAgentListResponse
 from api.schemas.uui_schemas import GlobalAgentPublic
 from api.schemas.uui_schemas import GlobalAgentPublicResponse
 from api.schemas.uui_schemas import GlobalAgentRegistrationData
@@ -73,6 +78,26 @@ async def get_global_agent_profile(
         raise APIError(status_code=404, code="AGN_404", error="global_agent_not_found")
     return GlobalAgentPublicResponse(
         data=GlobalAgentPublic.model_validate(profile, from_attributes=True),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/global", response_model=GlobalAgentListResponse)
+async def list_global_agents(
+    request: Request,
+    session: DbSession,
+    authenticated_tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+) -> GlobalAgentListResponse:
+    result = await session.execute(
+        select(GlobalAgent)
+        .where(GlobalAgent.owner_tenant_id == uuid.UUID(authenticated_tenant_id))
+        .order_by(desc(GlobalAgent.created_at))
+        .limit(100)
+    )
+    agents = result.scalars().all()
+    return GlobalAgentListResponse(
+        data=[_global_agent_to_data(agent) for agent in agents],
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
