@@ -174,18 +174,26 @@ class FakeSession:
             existing.granted_at = datetime.now(UTC)
             return FakeExecuteResult([existing.id])
 
-        if "from permission_grants join global_agents" in query_text:
+        if "from permission_grants" in query_text and "global_agents" in query_text:
             user_uui_id = None
+            grant_id = None
             for criterion in getattr(query, "_where_criteria", ()):
                 left = str(getattr(criterion, "left", ""))
                 right = getattr(getattr(criterion, "right", None), "value", None)
                 if "permission_grants.user_uui_id" in left:
                     user_uui_id = right
+                if "permission_grants.id" in left:
+                    grant_id = right
             rows = []
             for grant in self.grants.values():
-                if grant.user_uui_id == user_uui_id and grant.is_active:
-                    grant.global_agent = self.agents[grant.agent_id]
-                    rows.append(grant)
+                if grant_id is not None and grant.id != grant_id:
+                    continue
+                if user_uui_id is not None and grant.user_uui_id != user_uui_id:
+                    continue
+                if user_uui_id is not None and not grant.is_active:
+                    continue
+                grant.global_agent = self.agents[grant.agent_id]
+                rows.append(grant)
             return FakeExecuteResult(rows)
 
         if "from permission_grants" in query_text and "categories_allowed" in query_text:
