@@ -60,8 +60,7 @@ tmp/
 tmp_uvicorn_*.log
 pytest-cache-files-*/
 
-# Keep local GitHub workflow drafts/config out of this repo for now
-.github/
+# Local editor/project notes
 .docs/
 .vscode/
 .idea/
@@ -70,3 +69,4 @@ Thumbs.db
 *.temp
 *.bak
 *.orig
+.github/
