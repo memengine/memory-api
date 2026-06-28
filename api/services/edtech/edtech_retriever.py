@@ -24,6 +24,14 @@ except ModuleNotFoundError:  # pragma: no cover
 
 class EdTechRetriever:
     CACHE_TTL_SECONDS = 300
+    LEARNER_TYPE_INTROS = {
+        "school_student": "What you know about this student:",
+        "competitive_exam": "What you know about this aspirant:",
+        "higher_education": "What you know about this student:",
+        "professional_cert": "What you know about this candidate:",
+        "skill_learner": "What you know about this learner:",
+        "medical_student": "What you know about this medical student:",
+    }
 
     def __init__(self, *, session: AsyncSession, cache_service: CacheService | None = None) -> None:
         self.session = session
@@ -52,7 +60,7 @@ class EdTechRetriever:
         if memory is None:
             return EdTechRetrieveResult(system_prompt_addition="", context_token_count=0, days_to_exam=None)
 
-        days_to_exam = _days_to_exam(memory.exam_date)
+        days_to_exam = _days_to_exam(memory.primary_deadline_date or memory.exam_date)
         prompt = self.build_system_prompt_addition(memory, days_to_exam=days_to_exam, max_tokens=max_tokens)
         output = EdTechRetrieveResult(
             system_prompt_addition=prompt,
@@ -70,9 +78,10 @@ class EdTechRetriever:
         max_tokens: int = 600,
     ) -> str:
         sections = [
-            "Student learning profile from MemoryOS:",
+            self.LEARNER_TYPE_INTROS.get(memory.learner_type or "school_student", "What you know about this learner:"),
             self._review_urgency_section(memory, days_to_exam),
             self._exam_section(memory, days_to_exam),
+            self._extension_context_section(memory),
             self._learning_style_section(memory),
             self._strong_topics_section(memory),
             self._do_not_assume_section(memory),
@@ -114,16 +123,40 @@ class EdTechRetriever:
         return "\n".join(lines)
 
     def _exam_section(self, memory: EdTechMemory, days_to_exam: int | None) -> str:
-        if not memory.exam_name and days_to_exam is None and not memory.marks_target:
+        deadline_event = memory.primary_deadline_event or memory.exam_name
+        if not deadline_event and days_to_exam is None and not memory.marks_target and not memory.primary_goal:
             return ""
-        parts = ["Exam context:"]
-        if memory.exam_name:
-            parts.append(f" - Exam: {memory.exam_name}")
+        label = "Deadline context:" if memory.learner_type in {"skill_learner", "higher_education"} else "Exam context:"
+        parts = [label]
+        if memory.primary_goal:
+            parts.append(f" - Goal: {memory.primary_goal}")
+        if deadline_event:
+            parts.append(f" - Target: {deadline_event}")
         if days_to_exam is not None:
             parts.append(f" - Countdown: {days_to_exam} days remaining")
         if memory.marks_target:
             parts.append(f" - Target: {json.dumps(memory.marks_target, ensure_ascii=True)}")
         return "\n".join(parts)
+
+    def _extension_context_section(self, memory: EdTechMemory) -> str:
+        context_by_type = {
+            "competitive_exam": memory.competitive_exam_context,
+            "higher_education": memory.higher_education_context,
+            "professional_cert": memory.professional_cert_context,
+            "skill_learner": memory.skill_learner_context,
+            "medical_student": memory.medical_context,
+        }
+        context = context_by_type.get(memory.learner_type or "", {})
+        if not context:
+            return ""
+        title_by_type = {
+            "competitive_exam": "Competitive exam context:",
+            "higher_education": "Higher education context:",
+            "professional_cert": "Certification context:",
+            "skill_learner": "Skill-learning context:",
+            "medical_student": "Medical learning context:",
+        }
+        return f"{title_by_type.get(memory.learner_type or '', 'Learner context:')}\n - {json.dumps(context, ensure_ascii=True)}"
 
     def _learning_style_section(self, memory: EdTechMemory) -> str:
         bits = []
