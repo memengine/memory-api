@@ -14,10 +14,13 @@ from api.db.models import PermissionGrant
 from api.db.models import UUIProxyLink
 from api.db.models import UniversalMemory
 from api.db.models import UniversalUser
+from api.db.models import VerifiedOrgConnection
 from api.db.vector_store import QdrantService
 from api.services.embedding_service import EmbeddingService
+from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.domain_projection_types import DomainMemoryProjection
 from api.services.domain_projection_types import DomainProjectionResult
+from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
 from api.services.version_service import VersionService
 
 
@@ -89,6 +92,12 @@ class DomainProjectionService:
         )
         if grant is None:
             return DomainProjectionResult(skipped=len(projections), skipped_reason="write_not_permitted")
+        organisation_connection = self._active_org_connection(
+            session=session,
+            tenant_id=parsed_tenant_id,
+            user_uui_id=link.user_uui_id,
+            proxy_user_id=parsed_proxy_user_id,
+        )
 
         embedder = self.embedder or EmbeddingService(sync_session=session)
         version_service = self.version_service or VersionService(session)
@@ -114,6 +123,11 @@ class DomainProjectionService:
                     session=session,
                     user_uui_id=link.user_uui_id,
                     source_agent_id=parsed_agent_id,
+                    source_org_connection_id=(
+                        organisation_connection.id
+                        if organisation_connection is not None
+                        else None
+                    ),
                     projection=normalized,
                 )
                 session.flush()
@@ -125,8 +139,23 @@ class DomainProjectionService:
                     changed_by_agent_id=str(parsed_agent_id),
                     db_session=session,
                 )
-                self._upsert_vector(memory, normalized, embedder)
-                created += 1
+                claim_decision = UniversalClaimLedgerService.record_sync(
+                    session,
+                    memory,
+                    grant=grant,
+                    source_tenant_id=parsed_tenant_id,
+                    resolution_reason=f"Projected from {normalized.source_domain} schema",
+                )
+                memory.metadata_json = {
+                    **dict(memory.metadata_json or {}),
+                    "claim_id": str(claim_decision.claim_id),
+                    "claim_status": claim_decision.status,
+                }
+                if claim_decision.memory_is_active:
+                    self._enqueue_vector(session, memory, normalized, embedder)
+                    created += 1
+                else:
+                    skipped += 1
                 continue
 
             if self._projection_matches(existing, normalized):
@@ -137,6 +166,9 @@ class DomainProjectionService:
             existing.category = normalized.category
             existing.importance_score = normalized.importance_score
             existing.confidence = normalized.confidence
+            if organisation_connection is not None:
+                existing.source_type = "org_connection"
+                existing.source_org_connection_id = organisation_connection.id
             existing.metadata_json = self._metadata(normalized, previous=existing.metadata_json)
             session.add(existing)
             session.flush()
@@ -148,8 +180,23 @@ class DomainProjectionService:
                 changed_by_agent_id=str(parsed_agent_id),
                 db_session=session,
             )
-            self._upsert_vector(existing, normalized, embedder)
-            updated += 1
+            claim_decision = UniversalClaimLedgerService.record_sync(
+                session,
+                existing,
+                grant=grant,
+                source_tenant_id=parsed_tenant_id,
+                resolution_reason=f"Updated from {normalized.source_domain} schema projection",
+            )
+            existing.metadata_json = {
+                **dict(existing.metadata_json or {}),
+                "claim_id": str(claim_decision.claim_id),
+                "claim_status": claim_decision.status,
+            }
+            if claim_decision.memory_is_active:
+                self._enqueue_vector(session, existing, normalized, embedder)
+                updated += 1
+            else:
+                skipped += 1
 
         if created:
             user = session.get(UniversalUser, link.user_uui_id)
@@ -193,6 +240,23 @@ class DomainProjectionService:
                 PermissionGrant.is_active.is_(True),
                 PermissionGrant.access_type == "read_write",
                 (PermissionGrant.expires_at.is_(None) | (PermissionGrant.expires_at > func.now())),
+            )
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def _active_org_connection(
+        *,
+        session: Session,
+        tenant_id: uuid.UUID,
+        user_uui_id: uuid.UUID,
+        proxy_user_id: uuid.UUID,
+    ) -> VerifiedOrgConnection | None:
+        return session.execute(
+            select(VerifiedOrgConnection).where(
+                VerifiedOrgConnection.tenant_id == tenant_id,
+                VerifiedOrgConnection.user_uui_id == user_uui_id,
+                VerifiedOrgConnection.proxy_user_id == proxy_user_id,
+                VerifiedOrgConnection.is_active.is_(True),
             )
         ).scalar_one_or_none()
 
@@ -265,6 +329,7 @@ class DomainProjectionService:
         session: Session,
         user_uui_id: uuid.UUID,
         source_agent_id: uuid.UUID,
+        source_org_connection_id: uuid.UUID | None,
         projection: DomainMemoryProjection,
     ) -> UniversalMemory:
         now = datetime.now(UTC)
@@ -273,6 +338,12 @@ class DomainProjectionService:
             id=memory_id,
             user_uui_id=user_uui_id,
             source_agent_id=source_agent_id,
+            source_org_connection_id=source_org_connection_id,
+            source_type=(
+                "org_connection"
+                if source_org_connection_id is not None
+                else "passport_agent"
+            ),
             content=projection.content,
             category=projection.category,
             importance_score=projection.importance_score,
@@ -299,42 +370,38 @@ class DomainProjectionService:
             and abs(float(memory.confidence) - projection.confidence) < 0.01
         )
 
-    def _upsert_vector(
+    def _enqueue_vector(
         self,
+        session: Session,
         memory: UniversalMemory,
         projection: DomainMemoryProjection,
         embedder: EmbeddingService,
     ) -> None:
-        try:
-            embedding = embedder.embed_sync(projection.content)
-            qdrant_service = self.qdrant_service or QdrantService()
-            qdrant_service.upsert_memory(
-                memory_id=str(memory.id),
-                embedding=embedding.vector,
-                payload={
-                    "memory_id": str(memory.id),
-                    "user_uui_id": str(memory.user_uui_id),
-                    "source_agent_id": str(memory.source_agent_id),
-                    "category": projection.category,
-                    "importance_score": projection.importance_score,
-                    "is_archived": False,
-                    "created_at": (memory.created_at or datetime.now(UTC)).isoformat(),
-                    "source_domain": projection.source_domain,
-                    "projection_key": projection.projection_key,
-                },
-                collection_name=self.UNIVERSAL_COLLECTION_NAME,
-                vector_size=embedding.dimensions,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "domain_projection_vector_upsert_failed",
-                extra={
-                    "event": "domain_projection_vector_upsert_failed",
-                    "memory_id": str(memory.id),
-                    "projection_key": projection.projection_key,
-                    "error": str(exc),
-                },
-            )
+        embedding = embedder.embed_sync(projection.content)
+        enqueue_vector_upsert(
+            session,
+            memory_id=memory.id,
+            embedding=embedding.vector,
+            payload={
+                "memory_id": str(memory.id),
+                "user_uui_id": str(memory.user_uui_id),
+                "source_agent_id": str(memory.source_agent_id),
+                "source_org_connection_id": (
+                    str(memory.source_org_connection_id)
+                    if memory.source_org_connection_id
+                    else None
+                ),
+                "source_type": memory.source_type,
+                "category": projection.category,
+                "importance_score": projection.importance_score,
+                "claim_status": (memory.metadata_json or {}).get("claim_status", "active"),
+                "is_archived": False,
+                "created_at": (memory.created_at or datetime.now(UTC)).isoformat(),
+                "source_domain": projection.source_domain,
+                "projection_key": projection.projection_key,
+                "qdrant_collection": self.UNIVERSAL_COLLECTION_NAME,
+            },
+        )
 
 
 __all__ = [
