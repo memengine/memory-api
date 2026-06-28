@@ -1,0 +1,24 @@
+{
+  "id": "borderline_short_today_preference",
+  "case_type": "borderline",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Maybe keep replies short today; I am not sure if I always want that."
+    },
+    {
+      "role": "assistant",
+      "content": "I can keep this session brief."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User may prefer short replies, but this may only apply today.",
+      "category": "preference",
+      "confidence": 0.55,
+      "importance_score": 4.5
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Weak candidate for the future soft extraction buffer, not a strong durable memory."
+}

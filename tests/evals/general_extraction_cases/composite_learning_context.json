@@ -1,0 +1,48 @@
+{
+  "id": "composite_learning_context",
+  "case_type": "composite",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am in class 12."
+    },
+    {
+      "role": "assistant",
+      "content": "Which subject is hardest right now?"
+    },
+    {
+      "role": "user",
+      "content": "Organic chemistry mechanisms are weak for me."
+    },
+    {
+      "role": "assistant",
+      "content": "Any deadline?"
+    },
+    {
+      "role": "user",
+      "content": "My board exam starts in 34 days."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User is in class 12.",
+      "category": "fact",
+      "confidence": 0.9,
+      "importance_score": 8.0
+    },
+    {
+      "content": "User is weak in organic chemistry mechanisms.",
+      "category": "expertise",
+      "confidence": 0.86,
+      "importance_score": 8.0
+    },
+    {
+      "content": "User's board exam starts in 34 days.",
+      "category": "goal",
+      "confidence": 0.84,
+      "importance_score": 8.5
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Educational composite case for the general extractor baseline."
+}

@@ -1,0 +1,30 @@
+{
+  "id": "positive_fact_role_company",
+  "case_type": "positive",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am a product manager at a B2B SaaS startup, mostly working on onboarding and activation."
+    },
+    {
+      "role": "assistant",
+      "content": "Thanks, that context helps."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User is a product manager at a B2B SaaS startup.",
+      "category": "fact",
+      "confidence": 0.91,
+      "importance_score": 8.0
+    },
+    {
+      "content": "User works mostly on onboarding and activation.",
+      "category": "fact",
+      "confidence": 0.86,
+      "importance_score": 7.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Stable role and work area facts."
+}

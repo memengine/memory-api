@@ -1,0 +1,48 @@
+{
+  "id": "composite_role_team_goal",
+  "case_type": "composite",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I lead the integrations pod."
+    },
+    {
+      "role": "assistant",
+      "content": "What are you focused on this quarter?"
+    },
+    {
+      "role": "user",
+      "content": "My team owns Slack and webhook integrations."
+    },
+    {
+      "role": "assistant",
+      "content": "And what outcome matters most?"
+    },
+    {
+      "role": "user",
+      "content": "We need to reduce onboarding drop-off before the next board review."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User leads the integrations pod.",
+      "category": "fact",
+      "confidence": 0.88,
+      "importance_score": 7.5
+    },
+    {
+      "content": "User's team owns Slack and webhook integrations.",
+      "category": "fact",
+      "confidence": 0.87,
+      "importance_score": 7.0
+    },
+    {
+      "content": "User needs to reduce onboarding drop-off before the next board review.",
+      "category": "goal",
+      "confidence": 0.86,
+      "importance_score": 8.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Durable facts and goal are spread across turns."
+}

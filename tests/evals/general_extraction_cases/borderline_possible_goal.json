@@ -1,0 +1,24 @@
+{
+  "id": "borderline_possible_goal",
+  "case_type": "borderline",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am thinking about applying for data roles later, but it is not a concrete plan yet."
+    },
+    {
+      "role": "assistant",
+      "content": "We can revisit it when it becomes more concrete."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User is considering applying for data roles later, but has not committed yet.",
+      "category": "goal",
+      "confidence": 0.58,
+      "importance_score": 5.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Candidate goal below current extraction threshold."
+}

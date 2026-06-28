@@ -1,0 +1,24 @@
+{
+  "id": "positive_goal_data_scientist",
+  "case_type": "positive",
+  "messages": [
+    {
+      "role": "user",
+      "content": "My goal is to become a data scientist at Google within the next year."
+    },
+    {
+      "role": "assistant",
+      "content": "We can build a focused plan for that."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User wants to become a data scientist at Google within the next year.",
+      "category": "goal",
+      "confidence": 0.94,
+      "importance_score": 9.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Explicit long-term career goal."
+}

@@ -1,0 +1,17 @@
+{
+  "id": "negative_transient_mood",
+  "case_type": "negative",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am tired today and just want to finish this one task."
+    },
+    {
+      "role": "assistant",
+      "content": "Let's keep it focused."
+    }
+  ],
+  "expected_memories": [],
+  "expected_nothing_to_extract": true,
+  "notes": "Transient state should not become long-term memory."
+}

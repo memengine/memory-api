@@ -1,0 +1,17 @@
+{
+  "id": "negative_greeting_only",
+  "case_type": "negative",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hi, thanks for helping today."
+    },
+    {
+      "role": "assistant",
+      "content": "Happy to help."
+    }
+  ],
+  "expected_memories": [],
+  "expected_nothing_to_extract": true,
+  "notes": "Greeting and acknowledgement only."
+}

@@ -1,0 +1,24 @@
+{
+  "id": "borderline_language_switch",
+  "case_type": "borderline",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Sometimes I might switch to Hindi for hard concepts, but English is okay for now."
+    },
+    {
+      "role": "assistant",
+      "content": "I can adapt if you switch languages."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User may switch to Hindi for hard concepts while generally using English.",
+      "category": "preference",
+      "confidence": 0.6,
+      "importance_score": 6.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Useful weak signal for multilingual personalization."
+}

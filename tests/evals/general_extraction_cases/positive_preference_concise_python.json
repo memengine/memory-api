@@ -1,0 +1,24 @@
+{
+  "id": "positive_preference_concise_python",
+  "case_type": "positive",
+  "messages": [
+    {
+      "role": "user",
+      "content": "When you explain coding topics to me, I prefer concise Python-first examples instead of long theory."
+    },
+    {
+      "role": "assistant",
+      "content": "Got it. I will keep coding explanations concise and Python-first."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User prefers concise Python-first coding explanations over long theory.",
+      "category": "preference",
+      "confidence": 0.92,
+      "importance_score": 7.5
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Clear durable communication preference."
+}

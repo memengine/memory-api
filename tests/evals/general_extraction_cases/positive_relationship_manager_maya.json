@@ -1,0 +1,24 @@
+{
+  "id": "positive_relationship_manager_maya",
+  "case_type": "positive",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Maya is my manager and she reviews my roadmap documents before leadership meetings."
+    },
+    {
+      "role": "assistant",
+      "content": "Understood."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "Maya is user's manager and reviews user's roadmap documents before leadership meetings.",
+      "category": "relationship",
+      "confidence": 0.89,
+      "importance_score": 7.5
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Named professional relationship."
+}

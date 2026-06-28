@@ -1,0 +1,17 @@
+{
+  "id": "negative_weather_question",
+  "case_type": "negative",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is the weather like in Delhi today?"
+    },
+    {
+      "role": "assistant",
+      "content": "I would need live weather access to answer that accurately."
+    }
+  ],
+  "expected_memories": [],
+  "expected_nothing_to_extract": true,
+  "notes": "External factual question with no durable user memory."
+}

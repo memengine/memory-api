@@ -1,0 +1,30 @@
+{
+  "id": "positive_expertise_fastapi_sqlalchemy",
+  "case_type": "positive",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I am comfortable with FastAPI and SQLAlchemy, but I am still learning async Python patterns."
+    },
+    {
+      "role": "assistant",
+      "content": "That gives me a good baseline."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User is comfortable with FastAPI and SQLAlchemy.",
+      "category": "expertise",
+      "confidence": 0.9,
+      "importance_score": 7.0
+    },
+    {
+      "content": "User is still learning async Python patterns.",
+      "category": "expertise",
+      "confidence": 0.86,
+      "importance_score": 6.5
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Skill strengths and learning edge."
+}

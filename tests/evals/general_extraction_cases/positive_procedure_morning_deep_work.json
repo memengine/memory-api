@@ -1,0 +1,24 @@
+{
+  "id": "positive_procedure_morning_deep_work",
+  "case_type": "positive",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I usually do deep work from 7 to 10 in the morning before meetings start."
+    },
+    {
+      "role": "assistant",
+      "content": "I will keep morning focus time in mind."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User usually does deep work from 7 to 10 in the morning before meetings.",
+      "category": "procedure",
+      "confidence": 0.9,
+      "importance_score": 7.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Recurring work habit."
+}

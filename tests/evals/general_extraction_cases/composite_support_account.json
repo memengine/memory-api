@@ -1,0 +1,48 @@
+{
+  "id": "composite_support_account",
+  "case_type": "composite",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Our workspace billing failed after upgrading to Growth."
+    },
+    {
+      "role": "assistant",
+      "content": "Which integrations are active?"
+    },
+    {
+      "role": "user",
+      "content": "We use Slack and webhook integrations."
+    },
+    {
+      "role": "assistant",
+      "content": "When do you need this fixed?"
+    },
+    {
+      "role": "user",
+      "content": "I need the invoice fixed before my finance review."
+    }
+  ],
+  "expected_memories": [
+    {
+      "content": "User's workspace billing failed after upgrading to Growth.",
+      "category": "fact",
+      "confidence": 0.88,
+      "importance_score": 7.5
+    },
+    {
+      "content": "User's workspace uses Slack and webhook integrations.",
+      "category": "fact",
+      "confidence": 0.85,
+      "importance_score": 6.5
+    },
+    {
+      "content": "User needs the invoice fixed before a finance review.",
+      "category": "goal",
+      "confidence": 0.86,
+      "importance_score": 8.0
+    }
+  ],
+  "expected_nothing_to_extract": false,
+  "notes": "Support-like facts spread across a short conversation."
+}
