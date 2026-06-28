@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import uuid
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session
 
 from api.db.models import SupportMemory
 from api.schemas.support_schemas import SupportExtractionResult
+from api.services.claim_ledger_service import ClaimLedgerService
+from api.services.claim_ledger_service import serialize_claim_value
 from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
 from api.services.support.pii_redaction import count_redactions
@@ -33,6 +36,19 @@ DICT_FIELDS = {
 }
 LIST_FIELDS = {"issue_history", "risk_signals"}
 SCALAR_FIELDS = {"sentiment_pattern"}
+SUPPORT_CLAIM_CATEGORIES = {
+    "support_type": "fact",
+    "support_type_source": "fact",
+    "customer_identity": "fact",
+    "communication_preference": "preference",
+    "language_profile": "preference",
+    "current_open_issue": "goal",
+    "issue_history": "fact",
+    "resolution_preference": "preference",
+    "sentiment_pattern": "fact",
+    "risk_signals": "fact",
+    "support_context": "fact",
+}
 MAX_ISSUE_HISTORY = 50
 MAX_RISK_SIGNALS = 25
 DEFAULT_SUPPORT_TYPES = [
@@ -61,7 +77,9 @@ class SupportExtractor:
     ) -> None:
         self.session = session
         self.llm_service = llm_service or LLMService(
-            provider_clients={LLMProvider.GEMINI: client} if client is not None else None,
+            provider_clients={LLMProvider.GEMINI: client}
+            if client is not None
+            else None,
             require_provider=client is None,
             use_state_store=client is None,
         )
@@ -92,7 +110,9 @@ class SupportExtractor:
                     allowed_support_types=allowed_support_types,
                 )
             )
-        raise RuntimeError("extract_and_merge_sync cannot be called from a running event loop.")
+        raise RuntimeError(
+            "extract_and_merge_sync cannot be called from a running event loop."
+        )
 
     async def extract_and_merge(
         self,
@@ -131,7 +151,9 @@ class SupportExtractor:
             support_type=detection.support_type,
             support_type_mode=str(routing["support_type_mode"]),
             allowed_support_types=list(routing["allowed_support_types"]),
-            existing_memory_compressed=self.prompt_builder.compress_existing_memory(existing),
+            existing_memory_compressed=self.prompt_builder.compress_existing_memory(
+                existing
+            ),
             active_fields=active_fields_for(detection.support_type),
         )
         tokens_used = 0
@@ -168,17 +190,21 @@ class SupportExtractor:
                 support_type_confidence=detection.confidence,
             )
 
-        detected_type, detected_source, detected_confidence = _support_type_from_response(
-            data=data,
-            fallback_type=detection.support_type,
-            fallback_source=detection.source,
-            fallback_confidence=detection.confidence,
-            support_type_mode=str(routing["support_type_mode"]),
-            allowed_support_types=list(routing["allowed_support_types"]),
+        detected_type, detected_source, detected_confidence = (
+            _support_type_from_response(
+                data=data,
+                fallback_type=detection.support_type,
+                fallback_source=detection.source,
+                fallback_confidence=detection.confidence,
+                support_type_mode=str(routing["support_type_mode"]),
+                allowed_support_types=list(routing["allowed_support_types"]),
+            )
         )
         extracted = data.get("extracted") or {}
         if extracted and not isinstance(extracted, dict):
-            raise SupportExtractionError("Support extraction response field 'extracted' must be an object.")
+            raise SupportExtractionError(
+                "Support extraction response field 'extracted' must be an object."
+            )
 
         redactions = count_redactions(extracted, support_type=detected_type)
         extracted = redact_support_pii(extracted, support_type=detected_type)
@@ -205,7 +231,13 @@ class SupportExtractor:
                 redactions_count=redactions,
             )
 
-        memory = existing or SupportMemory(id=uuid.uuid4(), proxy_user_id=proxy_uuid, tenant_id=tenant_uuid)
+        memory = existing or SupportMemory(
+            id=uuid.uuid4(), proxy_user_id=proxy_uuid, tenant_id=tenant_uuid
+        )
+        previous_field_values = {
+            field: copy.deepcopy(getattr(memory, field, None))
+            for field in SUPPORT_CLAIM_CATEGORIES
+        }
         fields_updated: set[str] = set()
         memory.support_type = detected_type
         memory.support_type_source = detected_source
@@ -222,6 +254,16 @@ class SupportExtractor:
         except (TypeError, ValueError):
             pass
         memory.extraction_source_job_ids = existing_job_ids
+        claims = self._record_field_claims(
+            memory,
+            fields_updated=fields_updated,
+            job_id=job_id,
+        )
+        self._restore_non_winning_fields(
+            memory,
+            claims=claims,
+            previous_field_values=previous_field_values,
+        )
         self._upsert_memory(memory)
 
         return SupportExtractionResult(
@@ -234,6 +276,46 @@ class SupportExtractor:
             support_type_confidence=detected_confidence,
             redactions_count=redactions,
         )
+
+    def _record_field_claims(
+        self,
+        memory: SupportMemory,
+        *,
+        fields_updated: set[str],
+        job_id: str,
+    ) -> None:
+        try:
+            ClaimLedgerService(self.session).record_domain_fields(
+                domain_record=memory,
+                domain="support",
+                fields_updated=fields_updated,
+                field_categories=SUPPORT_CLAIM_CATEGORIES,
+                job_id=job_id,
+            )
+        except Exception:
+            LOGGER.exception(
+                "support_claim_ledger_write_failed",
+                extra={
+                    "event": "support_claim_ledger_write_failed",
+                    "tenant_id": str(memory.tenant_id),
+                    "proxy_user_id": str(memory.proxy_user_id),
+                    "job_id": job_id,
+                },
+            )
+            return []
+
+    @staticmethod
+    def _restore_non_winning_fields(
+        memory: SupportMemory,
+        *,
+        claims: list[Any],
+        previous_field_values: dict[str, Any],
+    ) -> None:
+        for claim in claims:
+            field = str(claim.predicate_key).removeprefix("support.")
+            current_value = serialize_claim_value(getattr(memory, field, None))
+            if claim.active_value != current_value and field in previous_field_values:
+                setattr(memory, field, previous_field_values[field])
 
     def _merge_extracted(
         self,
@@ -256,8 +338,14 @@ class SupportExtractor:
         for field in LIST_FIELDS:
             value = extracted.get(field)
             if isinstance(value, list) and value:
-                limit = MAX_ISSUE_HISTORY if field == "issue_history" else MAX_RISK_SIGNALS
-                setattr(memory, field, _append_unique(getattr(memory, field) or [], value, limit=limit))
+                limit = (
+                    MAX_ISSUE_HISTORY if field == "issue_history" else MAX_RISK_SIGNALS
+                )
+                setattr(
+                    memory,
+                    field,
+                    _append_unique(getattr(memory, field) or [], value, limit=limit),
+                )
                 fields_updated.add(field)
 
         for field in SCALAR_FIELDS:
@@ -288,7 +376,11 @@ class SupportExtractor:
             "updated_at": datetime.now(UTC),
         }
         insert_stmt = pg_insert(SupportMemory).values(**values)
-        update_values = {key: value for key, value in values.items() if key not in {"id", "proxy_user_id", "tenant_id"}}
+        update_values = {
+            key: value
+            for key, value in values.items()
+            if key not in {"id", "proxy_user_id", "tenant_id"}
+        }
         stmt = insert_stmt.on_conflict_do_update(
             constraint="uq_support_memories_proxy_tenant",
             set_=update_values,
@@ -308,18 +400,42 @@ def _normalize_routing(
     allowed_support_types: list[str] | None,
     existing_support_type: str | None,
 ) -> dict[str, Any]:
-    mode = support_type_mode if support_type_mode in {"single", "multi", "auto"} else "single"
-    allowed = [item for item in (allowed_support_types or []) if item in DEFAULT_SUPPORT_TYPES]
+    mode = (
+        support_type_mode
+        if support_type_mode in {"single", "multi", "auto"}
+        else "single"
+    )
+    allowed = [
+        item for item in (allowed_support_types or []) if item in DEFAULT_SUPPORT_TYPES
+    ]
     if mode == "single":
-        fixed = tenant_configured_type if tenant_configured_type in DEFAULT_SUPPORT_TYPES else existing_support_type
+        fixed = (
+            tenant_configured_type
+            if tenant_configured_type in DEFAULT_SUPPORT_TYPES
+            else existing_support_type
+        )
         fixed = fixed if fixed in DEFAULT_SUPPORT_TYPES else "general_info"
-        return {"support_type_mode": "single", "fixed_support_type": fixed, "allowed_support_types": [fixed]}
+        return {
+            "support_type_mode": "single",
+            "fixed_support_type": fixed,
+            "allowed_support_types": [fixed],
+        }
     if mode == "multi":
         if not allowed and tenant_configured_type in DEFAULT_SUPPORT_TYPES:
             allowed = [tenant_configured_type]
-        allowed = [item for item in allowed if item in DEFAULT_SUPPORT_TYPES] or DEFAULT_SUPPORT_TYPES
-        return {"support_type_mode": "multi", "fixed_support_type": None, "allowed_support_types": allowed}
-    return {"support_type_mode": "auto", "fixed_support_type": None, "allowed_support_types": DEFAULT_SUPPORT_TYPES}
+        allowed = [
+            item for item in allowed if item in DEFAULT_SUPPORT_TYPES
+        ] or DEFAULT_SUPPORT_TYPES
+        return {
+            "support_type_mode": "multi",
+            "fixed_support_type": None,
+            "allowed_support_types": allowed,
+        }
+    return {
+        "support_type_mode": "auto",
+        "fixed_support_type": None,
+        "allowed_support_types": DEFAULT_SUPPORT_TYPES,
+    }
 
 
 def _support_type_from_response(
@@ -335,13 +451,21 @@ def _support_type_from_response(
         return fallback_type, "tenant_configured", 1.0
 
     candidate = str(data.get("support_type") or "").strip()
-    confidence = _coerce_confidence(data.get("support_type_confidence"), fallback_confidence)
+    confidence = _coerce_confidence(
+        data.get("support_type_confidence"), fallback_confidence
+    )
     if candidate in allowed_support_types and confidence >= 0.75:
         return candidate, "allowed_detected", confidence
 
     if "general_info" in allowed_support_types and confidence < 0.75:
         return "general_info", "allowed_detected", confidence
-    return fallback_type, fallback_source if fallback_source != "tenant_configured" else "allowed_detected", fallback_confidence
+    return (
+        fallback_type,
+        fallback_source
+        if fallback_source != "tenant_configured"
+        else "allowed_detected",
+        fallback_confidence,
+    )
 
 
 def _coerce_confidence(value: Any, fallback: float) -> float:
@@ -373,9 +497,13 @@ def _parse_response(content: str) -> dict[str, Any]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise SupportExtractionError("Support extraction response was not valid JSON.") from exc
+        raise SupportExtractionError(
+            "Support extraction response was not valid JSON."
+        ) from exc
     if not isinstance(data, dict):
-        raise SupportExtractionError("Support extraction response must be a JSON object.")
+        raise SupportExtractionError(
+            "Support extraction response must be a JSON object."
+        )
     return data
 
 
@@ -397,7 +525,11 @@ def _append_unique(current: list[Any], incoming: list[Any], *, limit: int) -> li
     for item in [*current, *incoming]:
         if item in (None, "", [], {}):
             continue
-        key = json.dumps(item, sort_keys=True, default=str) if isinstance(item, (dict, list)) else str(item)
+        key = (
+            json.dumps(item, sort_keys=True, default=str)
+            if isinstance(item, (dict, list))
+            else str(item)
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -405,4 +537,9 @@ def _append_unique(current: list[Any], incoming: list[Any], *, limit: int) -> li
     return output[-limit:]
 
 
-__all__ = ["SupportExtractionError", "SupportExtractor", "_normalize_routing", "_support_type_from_response"]
+__all__ = [
+    "SupportExtractionError",
+    "SupportExtractor",
+    "_normalize_routing",
+    "_support_type_from_response",
+]
