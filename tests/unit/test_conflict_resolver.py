@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 from api.db.models import AuditAction
 from api.db.models import AuditLog
+from api.db.models import ClarificationQueue
+from api.db.models import CrossUserConflict
 from api.db.models import Memory
 from api.db.models import MemoryCategory
 from api.db.models import VectorSyncOperation
@@ -235,6 +237,66 @@ def test_reject_resolution_discards_new_memory_and_logs_reason() -> None:
     outbox_rows = [item for item in session.added if isinstance(item, VectorSyncOutbox)]
     assert outbox_rows == []
     assert any(isinstance(item, AuditLog) and item.action == AuditAction.deleted for item in session.added)
+
+
+def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None:
+    existing = make_existing_memory()
+    existing.content = "Customer's current subscription plan is Starter."
+    existing.category = MemoryCategory.fact
+    existing.metadata_json = {
+        "provenance": {
+            "writer_id": "11111111-1111-1111-1111-111111111111",
+            "service": "support-service",
+            "authority_rules": {"categories": {"fact": 50}},
+            "observed_at": "2026-06-14T08:00:00+00:00",
+        }
+    }
+    session = FakeSession(existing_memory=existing)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing)]
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=qdrant,
+        embedder=lambda _text: [0.1] * 3,
+        client=make_llm_client("UPDATE"),
+        default_source_conversation_id=uuid.uuid4(),
+        provenance_snapshot={
+            "writer_id": "22222222-2222-2222-2222-222222222222",
+            "service": "billing-service",
+            "authority_rules": {"categories": {"fact": 50}},
+            "observed_at": "2026-06-14T10:00:00+00:00",
+        },
+    )
+
+    stored = resolver.check_and_store(
+        [
+            ExtractedMemory(
+                content="Customer's current subscription plan is Growth.",
+                category="fact",
+                importance_score=8.0,
+                confidence=1.0,
+                expiry="permanent",
+                reasoning="Subscription record",
+            )
+        ],
+        user_id=str(existing.user_id),
+        tenant_id=str(uuid.uuid4()),
+        proxy_user_id=str(existing.proxy_user_id),
+    )
+
+    assert len(stored) == 1
+    assert stored[0].resolution == "CLARIFICATION_PENDING"
+    pending = session.memories[stored[0].id]
+    assert existing.is_archived is False
+    assert pending.is_archived is True
+    conflicts = [item for item in session.added if isinstance(item, CrossUserConflict)]
+    clarifications = [item for item in session.added if isinstance(item, ClarificationQueue)]
+    assert len(conflicts) == 1
+    assert conflicts[0].resolution_path == "tenant_review"
+    assert conflicts[0].requires_attention is True
+    assert len(clarifications) == 1
+    outbox_rows = [item for item in session.added if isinstance(item, VectorSyncOutbox)]
+    assert outbox_rows == []
 
 
 def test_temporal_conflicts_keep_both_without_llm_classification() -> None:
