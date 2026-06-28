@@ -3,6 +3,7 @@ from sqlalchemy.dialects import postgresql
 from api.db.models import ApiKey
 from api.db.models import AuditAction
 from api.db.models import AuditLog
+from api.db.models import BackfillJob
 from api.db.models import Base
 from api.db.models import CallQualityLog
 from api.db.models import Conversation
@@ -21,31 +22,45 @@ def test_expected_tables_are_registered() -> None:
         "api_deprecated_fields",
         "api_keys",
         "audit_logs",
+        "backfill_jobs",
         "call_quality_log",
         "clarification_queue",
         "conversations",
         "cross_user_conflicts",
         "dead_letter_jobs",
+        "edtech_memories",
         "embedding_models",
         "extraction_jobs",
         "global_agents",
         "llm_provider_config",
         "memories",
+        "memory_claim_revisions",
+        "memory_claims",
+        "memory_source_events",
         "memory_versions",
+        "organisation_directory",
+        "pending_extraction_candidates",
         "permission_grants",
         "proxy_users",
         "regions",
+        "retrieval_events",
+        "retrieval_feedback_events",
+        "service_writers",
         "shared_context_signals",
+        "support_memories",
         "tenant_budgets",
         "tenant_deprecation_usage",
         "tenants",
         "universal_memories",
+        "universal_memory_claim_revisions",
+        "universal_memory_claims",
         "universal_memory_versions",
         "universal_users",
         "user_memory_flags",
         "users",
         "uui_proxy_link",
         "vector_sync_outbox",
+        "verified_org_connections",
     ]
 
 
@@ -72,7 +87,21 @@ def test_memory_indexes_match_requested_shape() -> None:
 
     assert importance_sql == ["memories.user_id", "memories.importance_score DESC"]
     assert last_accessed_sql == ["memories.user_id", "memories.last_accessed_at DESC"]
-    assert indexes["ix_memories_metadata_gin"].dialect_options["postgresql"]["using"] == "gin"
+
+    proxy_importance_sql = [
+        str(expression.compile(dialect=dialect))
+        for expression in indexes["ix_memories_proxy_user_importance_score_desc"].expressions
+    ]
+    proxy_last_accessed_sql = [
+        str(expression.compile(dialect=dialect))
+        for expression in indexes["ix_memories_proxy_user_last_accessed_at_desc"].expressions
+    ]
+    assert proxy_importance_sql == ["memories.proxy_user_id", "memories.importance_score"]
+    assert proxy_last_accessed_sql == ["memories.proxy_user_id", "memories.last_accessed_at"]
+    assert (
+        indexes["ix_memories_metadata_gin"].dialect_options["postgresql"]["using"]
+        == "gin"
+    )
 
 
 def test_server_side_defaults_are_defined_for_uuid_and_timestamps() -> None:
@@ -129,7 +158,7 @@ def test_tenant_defaults_match_contract() -> None:
     metadata_column = Tenant.__table__.c.metadata
 
     assert str(Tenant.__table__.c.created_at.server_default.arg) == "now()"
-    assert str(Tenant.__table__.c.plan_tier.server_default.arg) == "'starter'"
+    assert Tenant.__table__.c.plan_tier.server_default is None
     assert str(Tenant.__table__.c.is_active.server_default.arg) == "true"
     assert Tenant.__table__.c.clerk_org_id.nullable is True
     assert Tenant.__table__.c.alert_webhook_url.type.length == 500
@@ -159,7 +188,9 @@ def test_enums_expose_requested_values() -> None:
 
 
 def test_conversation_status_default_is_queued() -> None:
-    assert str(Conversation.__table__.c.processing_status.server_default.arg) == "'queued'"
+    assert (
+        str(Conversation.__table__.c.processing_status.server_default.arg) == "'queued'"
+    )
 
 
 def test_quota_mode_enum_values_match_contract() -> None:
@@ -169,3 +200,14 @@ def test_quota_mode_enum_values_match_contract() -> None:
         "DEGRADED_RETRIEVE",
         "BLOCKED",
     ]
+
+
+def test_backfill_jobs_model_matches_migration_contract() -> None:
+    indexes = {index.name: index for index in BackfillJob.__table__.indexes}
+
+    assert "ix_backfill_jobs_status_started_at" in indexes
+    assert str(BackfillJob.__table__.c.id.server_default.arg) == "gen_random_uuid()"
+    assert str(BackfillJob.__table__.c.total_rows.server_default.arg) == "0"
+    assert str(BackfillJob.__table__.c.processed_rows.server_default.arg) == "0"
+    assert str(BackfillJob.__table__.c.pct_complete.server_default.arg) == "0"
+    assert str(BackfillJob.__table__.c.started_at.server_default.arg) == "NOW()"
