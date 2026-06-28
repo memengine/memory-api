@@ -13,6 +13,8 @@ x-app-service: &app-service
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      INSTALL_DEV_DEPS: ${INSTALL_DEV_DEPS:-false}
   image: memoryos-api:latest
   env_file:
     - .env
@@ -186,10 +188,11 @@ services:
     restart: unless-stopped
 
   localstack:
-    image: localstack/localstack:latest
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:3.8.1}
     environment:
       SERVICES: ${LOCALSTACK_SERVICES:-s3,sqs}
       LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: ${LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT:-1}
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
     ports:
       - "4566:4566"
     volumes:
