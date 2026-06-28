@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from html import escape
 
 from api.services.retriever import MemoryResult
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOKENS = 500
 MIN_CONTEXT_IMPORTANCE = 3.0
@@ -58,9 +60,9 @@ class ContextBuilder:
         if max_tokens <= 0 or not memories:
             return self._empty_result(normalized_format)
 
-        eligible = self._prepare_memories(memories)
+        eligible, dropped_before_budget = self._prepare_memories(memories)
         if not eligible:
-            return self._empty_result(normalized_format)
+            return self._empty_result(normalized_format, memories_dropped=dropped_before_budget)
 
         selected, dropped_for_budget = self._select_memories_within_budget(
             eligible,
@@ -72,7 +74,7 @@ class ContextBuilder:
             system_prompt_addition=rendered,
             token_count=self._count_tokens(rendered),
             memory_count=len(selected),
-            memories_dropped=dropped_for_budget,
+            memories_dropped=dropped_before_budget + dropped_for_budget,
             format=normalized_format,
         )
 
@@ -103,28 +105,31 @@ class ContextBuilder:
         )
 
     @staticmethod
-    def _empty_result(format: str) -> ContextResult:
+    def _empty_result(format: str, memories_dropped: int = 0) -> ContextResult:
         return ContextResult(
             system_prompt_addition="",
             token_count=0,
             memory_count=0,
-            memories_dropped=0,
+            memories_dropped=memories_dropped,
             format=format,
         )
 
-    def _prepare_memories(self, memories: list[MemoryResult]) -> list[MemoryResult]:
+    def _prepare_memories(self, memories: list[MemoryResult]) -> tuple[list[MemoryResult], int]:
         prepared: list[MemoryResult] = []
+        dropped = 0
         for memory in sorted(memories, key=lambda item: item.final_score, reverse=True):
             if float(memory.importance_score) < MIN_CONTEXT_IMPORTANCE:
+                dropped += 1
                 continue
             is_duplicate = any(
                 self._content_similarity(memory.content, existing.content) > NEAR_DUPLICATE_THRESHOLD
                 for existing in prepared
             )
             if is_duplicate:
+                dropped += 1
                 continue
             prepared.append(memory)
-        return prepared
+        return prepared, dropped
 
     def _select_memories_within_budget(
         self,
@@ -210,17 +215,21 @@ class ContextBuilder:
 
             encoding = tiktoken.get_encoding("cl100k_base")
             return len(encoding.encode(text))
-        except Exception:
-            return math.ceil(len(text) / 4)
+        except Exception as exc:
+            logger.warning(
+                "tiktoken unavailable; using approximate context token count. error=%s",
+                exc,
+            )
+            return math.ceil(len(text.split()) * 1.3)
 
     @staticmethod
     def _content_similarity(left: str, right: str) -> float:
         normalized_left = " ".join(left.lower().split())
         normalized_right = " ".join(right.lower().split())
+        if normalized_left == normalized_right:
+            return 1.0
         left_tokens = set(normalized_left.rstrip(".,;:!?").split())
         right_tokens = set(normalized_right.rstrip(".,;:!?").split())
         if not left_tokens or not right_tokens:
             return 0.0
-        token_overlap = len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
-        sequence_ratio = SequenceMatcher(None, normalized_left, normalized_right).ratio()
-        return min(token_overlap, sequence_ratio)
+        return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
