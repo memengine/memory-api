@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import asyncio
 import uuid
 from datetime import datetime
@@ -32,6 +33,7 @@ from api.db.cache import CacheService
 from api.schemas.requests import MemoryAddRequest
 from api.schemas.requests import MemoryRetrieveRequest
 from api.schemas.requests import MemoryUpdateRequest
+from api.schemas.requests import RetrievalFeedbackRequest
 from api.schemas.responses import CursorPage
 from api.schemas.responses import MemoryAddResponse
 from api.schemas.responses import MemoryData
@@ -44,6 +46,8 @@ from api.schemas.responses import MemoryListResponse
 from api.schemas.responses import MemoryMutationResponse
 from api.schemas.responses import MemoryRetrieveResponse
 from api.schemas.responses import MemorySearchResult
+from api.schemas.responses import RetrievalFeedbackData
+from api.schemas.responses import RetrievalFeedbackResponse
 from api.schemas.edtech_schemas import EdTechMemoryView
 from api.schemas.edtech_schemas import EdTechProfileResponse
 from api.errors import APIError
@@ -53,6 +57,7 @@ from api.services.memory_service import MemoryService
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quality_gate import QualityGateService
 from api.services.retriever import RetrieverService
+from api.services.retrieval_feedback_service import RetrievalFeedbackService
 from api.services.version_service import VersionService
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
@@ -60,6 +65,7 @@ from api.tasks.queue_router import get_processing_eta
 
 
 router = APIRouter(prefix="/v1/memories", tags=["memories"])
+logger = logging.getLogger(__name__)
 
 
 def _memory_to_data(memory) -> MemoryData:
@@ -77,6 +83,8 @@ def _memory_to_data(memory) -> MemoryData:
         agent_id=str(memory.agent_id) if memory.agent_id else None,
         previous_version_id=str(memory.previous_version_id) if memory.previous_version_id else None,
         source_conversation_id=str(memory.source_conversation_id) if memory.source_conversation_id else None,
+        source_event_id=str(getattr(memory, "source_event_id", None)) if getattr(memory, "source_event_id", None) else None,
+        provenance=(getattr(memory, "metadata_json", None) or {}).get("provenance"),
         metadata=memory.metadata_json or {},
     )
 
@@ -215,11 +223,23 @@ async def add_memories(
                 timestamp=utc_now(),
             )
 
-    gate_result = await quality_gate_service.check(
-        [message.model_dump() for message in payload.messages],
-        tenant_id,
-        payload.external_user_id,
-    )
+    gate_messages = [message.model_dump() for message in payload.messages]
+    if payload.source is not None:
+        # Registered backend events use service + event_id + payload_hash as
+        # their idempotency boundary. Conversational semantic deduplication
+        # would otherwise discard legitimate updates with similar templates.
+        gate_result = await quality_gate_service.check(
+            gate_messages,
+            tenant_id,
+            payload.external_user_id,
+            semantic_deduplication=False,
+        )
+    else:
+        gate_result = await quality_gate_service.check(
+            gate_messages,
+            tenant_id,
+            payload.external_user_id,
+        )
     if not gate_result.passed:
         return JSONResponse(
             status_code=200,
@@ -251,6 +271,8 @@ async def add_memories(
         tenant_id=tenant_id,
         external_user_id=payload.external_user_id,
         proxy_user_id=str(proxy_user.id),
+        api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
+        source=payload.source.model_dump(mode="json") if payload.source else None,
     )
     if job.get("status") != "queued":
         return JSONResponse(
@@ -330,6 +352,8 @@ async def retrieve_memories(
             last_accessed=datetime.fromisoformat(result.last_accessed_at) if result.last_accessed_at else None,
             relevance_score=result.final_score,
             context_snippet=context_builder.build_context([result], format=payload.format, max_tokens=120),
+            source_event_id=result.source_event_id,
+            provenance=result.provenance,
         )
         for result in results
     ]
@@ -361,7 +385,30 @@ async def retrieve_memories(
         session=session,
         proxy_user_id=str(proxy_user.id),
     )
+    retrieval_id = None
+    try:
+        retrieval_event = await RetrievalFeedbackService(session=session).log_retrieval(
+            tenant_id=tenant_id,
+            proxy_user_id=str(proxy_user.id),
+            external_user_id=payload.external_user_id,
+            query=payload.query,
+            categories=[str(category.value if hasattr(category, "value") else category) for category in payload.categories],
+            agent_id=payload.agent_id,
+            retrieved_memory_ids=[result.id for result in results],
+            result_count=len(results),
+            top_relevance_score=float(results[0].final_score) if results else None,
+            included_in_prompt=bool(system_prompt_addition),
+            cache_hit=bool(retriever_service.last_cache_hit),
+            quota_mode=getattr(retriever_service, "last_quota_mode", None),
+            is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
+            metadata={"request_id": get_request_id(request)},
+        )
+        retrieval_id = str(retrieval_event.id)
+    except Exception as exc:
+        logger.warning("retrieval feedback logging failed: %s", exc)
+
     return MemoryRetrieveResponse(
+        retrieval_id=retrieval_id,
         data=data,
         cached=bool(retriever_service.last_cache_hit),
         system_prompt_addition=system_prompt_addition,
@@ -370,6 +417,45 @@ async def retrieve_memories(
         quota_mode=getattr(retriever_service, "last_quota_mode", None),
         is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
         is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post("/retrieval-feedback", response_model=RetrievalFeedbackResponse)
+async def record_retrieval_feedback(
+    request: Request,
+    payload: RetrievalFeedbackRequest,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+) -> RetrievalFeedbackResponse:
+    """Record whether a retrieved memory helped, was ignored, or was corrected by the user."""
+    if payload.outcome == "user_corrected" and not payload.correction:
+        raise APIError(
+            status_code=422,
+            code="REQ_422",
+            error="correction_required_for_user_corrected",
+        )
+
+    feedback = await RetrievalFeedbackService(session=session).record_feedback(
+        tenant_id=tenant_id,
+        retrieval_id=str(payload.retrieval_id),
+        outcome=payload.outcome,
+        used_memory_ids=[str(memory_id) for memory_id in payload.used_memory_ids],
+        correction=payload.correction,
+        agent_confidence=payload.agent_confidence,
+        metadata=payload.metadata,
+        memory_service=memory_service,
+        api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
+    )
+    return RetrievalFeedbackResponse(
+        data=RetrievalFeedbackData(
+            feedback_id=str(feedback.id),
+            retrieval_id=str(feedback.retrieval_event_id),
+            outcome=feedback.outcome,
+            correction_job_id=str(feedback.correction_job_id) if feedback.correction_job_id else None,
+        ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
@@ -565,6 +651,8 @@ async def get_memory_job_status(
             job_id=job["job_id"],
             status=job["status"],
             memories_created=int(job.get("memories_created", 0)),
+            pending_candidates_buffered=int(job.get("pending_candidates_buffered", 0) or 0),
+            pending_candidates_promoted=int(job.get("pending_candidates_promoted", 0) or 0),
             attempts=int(job.get("attempts", 0)),
             created_at=datetime.fromisoformat(job["created_at"]) if job.get("created_at") else None,
             processing_started_at=datetime.fromisoformat(job["processing_started_at"])
