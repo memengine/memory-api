@@ -31,6 +31,8 @@ NEGATIVE EXAMPLES AND SAFETY RULES
 - never store a single technical question unless it clearly reveals persistent context
 - never store emotional states from one conversation as permanent memories
 - never store one-time tactical next steps if a broader durable memory is the real takeaway
+- never store the AI's advice as if it were the user's memory
+- never store vague placeholders like "User is building a new project related to X"; wait until the user gives concrete details
 
 EXTRACTION RULES
 - assign exactly one category per memory
@@ -62,6 +64,8 @@ EXTRACTION RULES
 - example: store "User's product launched and is live" rather than only "launched yesterday"
 - do not store tentative self-improvement explorations like "maybe I should try X" unless the user clearly adopts them as an ongoing goal or procedure
 - do not store generic self-improvement goals inferred from temporary struggles when the durable memory is a work preference instead
+- do not store action items phrased by the assistant, such as "User should share their GitHub link" or "User needs to update the README"
+- if the user mentions a project, store it only when the memory contains concrete user-stated details such as purpose, stack, repo, metric, domain, or outcome
 - if the user is learning something, prefer one clean learning-goal memory over multiple micro-memories about being a beginner
 - use expiry "temporary" for any event or context tied to a specific upcoming date (demo next Tuesday, launch this week, etc.)
 - use expiry "permanent" for everything else
