@@ -29,6 +29,15 @@ def main() -> None:
     print("Prepend this to your OpenAI system prompt:")
     print(prompt_addition)
 
+    if result.retrieval_id:
+        memory.feedback(
+            retrieval_id=result.retrieval_id,
+            outcome="used_successfully",
+            used_memory_ids=[item.id for item in result.items],
+            agent_confidence=0.9,
+            metadata={"example": "raw_openai"},
+        )
+
 
 if __name__ == "__main__":
     main()
