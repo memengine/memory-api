@@ -25,12 +25,29 @@ def build_vector_payload(
         "content": memory.content,
         "category": memory.category.value if hasattr(memory.category, "value") else str(memory.category),
         "importance_score": float(memory.importance_score),
+        "confidence_score": float(getattr(memory, "confidence_score", 1.0) or 1.0),
         "is_archived": bool(memory.is_archived),
         "created_at": (
             memory.created_at.isoformat()
             if memory.created_at
             else datetime.now(UTC).isoformat()
         ),
+        "last_accessed_at": (
+            getattr(memory, "last_accessed_at", None).isoformat()
+            if getattr(memory, "last_accessed_at", None)
+            else None
+        ),
+        "previous_version_id": (
+            str(getattr(memory, "previous_version_id"))
+            if getattr(memory, "previous_version_id", None)
+            else None
+        ),
+        "source_event_id": (
+            str(getattr(memory, "source_event_id"))
+            if getattr(memory, "source_event_id", None)
+            else None
+        ),
+        "provenance": (getattr(memory, "metadata_json", None) or {}).get("provenance"),
         "embedding_model_id": embedding_model_id or getattr(memory, "embedding_model_id", None),
         "qdrant_collection": (
             qdrant_collection
