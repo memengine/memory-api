@@ -50,6 +50,7 @@ function mapSdkError(
 }
 
 function toMemoryItem(item: UniversalRetrieveEnvelope["data"][number]): MemoryItem {
+  const originalImportanceScore = item.importance_score;
   return {
     id: item.id,
     content: item.content,
@@ -58,6 +59,25 @@ function toMemoryItem(item: UniversalRetrieveEnvelope["data"][number]): MemoryIt
     lastAccessed: item.last_accessed,
     relevanceScore: item.relevance_score,
     contextSnippet: item.context_snippet,
+    accessCount: 0,
+    originalImportanceScore,
+    isHot: false,
+    systemArchived: false,
+    sourceEventId: null,
+    provenance: null,
+    get importanceDelta() {
+      return Number((this.importanceScore - this.originalImportanceScore).toFixed(2));
+    },
+    get importanceTrend() {
+      const delta = this.importanceDelta;
+      if (delta > 0.3) {
+        return "rising";
+      }
+      if (delta < -0.3) {
+        return "decaying";
+      }
+      return "stable";
+    },
   };
 }
 
@@ -143,6 +163,10 @@ export class UniversalMemoryOS {
       processingEtaSeconds: payload.processing_eta_seconds ?? null,
       processingStatus: payload.processing_status ?? processingStatusFromHeaders(response.headers),
       circuitStatus: circuitStatusFromHeaders(response.headers),
+      nothingToExtract: false,
+      get wasStored() {
+        return payload.status === "queued";
+      },
     };
   }
 
@@ -157,6 +181,7 @@ export class UniversalMemoryOS {
     const payload = (await this.parseJson(response)) as UniversalRetrieveEnvelope;
     const quotaMode = quotaModeFromHeaders(response.headers);
     return {
+      retrievalId: null,
       items: payload.data.map(toMemoryItem),
       cached: payload.cached,
       systemPromptAddition: payload.system_prompt_addition,
@@ -164,25 +189,31 @@ export class UniversalMemoryOS {
       isPassthrough: Boolean(payload.is_passthrough) || quotaMode === "PASSTHROUGH",
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
+      contextTokenCount: 0,
+      memoriesFromHotTier: 0,
+      get hasContext() {
+        return Boolean(payload.system_prompt_addition) && !(Boolean(payload.is_passthrough) || quotaMode === "PASSTHROUGH");
+      },
       categoriesAvailable: payload.categories_available ?? [],
       permissionStatus: payload.permission_error ?? null,
     };
   }
 
-  static consentUrl(agentId: string, redirectUri: string, state?: string): string {
+  static consentUrl(agentId: string, redirectUri?: string | null, state?: string, categories?: string[]): string {
     if (!agentId.trim()) {
       throw new Error("agentId must not be empty.");
     }
-    if (!redirectUri.trim()) {
-      throw new Error("redirectUri must not be empty.");
-    }
 
-    const params = new URLSearchParams({
-      agent_id: agentId,
-      redirect_uri: redirectUri,
-    });
+    const params = new URLSearchParams({ agent_id: agentId });
+    if (redirectUri?.trim()) {
+      params.set("redirect_uri", redirectUri);
+    }
     if (state) {
       params.set("state", state);
+    }
+    const cleanedCategories = Array.from(new Set((categories ?? []).map((category) => category.trim()).filter(Boolean)));
+    if (cleanedCategories.length > 0) {
+      params.set("categories", cleanedCategories.join(","));
     }
     return `${UniversalMemoryOS.DEFAULT_CONSENT_BASE_URL}/consent?${params.toString()}`;
   }
