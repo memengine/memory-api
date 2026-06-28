@@ -134,18 +134,27 @@ class UniversalMemory:
         )
 
     @staticmethod
-    def consent_url(agent_id: str, redirect_uri: str, state: str | None = None) -> str:
+    def consent_url(
+        agent_id: str,
+        redirect_uri: str | None = None,
+        state: str | None = None,
+        categories: list[str] | None = None,
+        link_token: str | None = None,
+    ) -> str:
         if not str(agent_id or "").strip():
             raise ValueError("agent_id must not be empty.")
-        if not str(redirect_uri or "").strip():
-            raise ValueError("redirect_uri must not be empty.")
 
-        query = {
-            "agent_id": agent_id,
-            "redirect_uri": redirect_uri,
-        }
+        query = {"agent_id": agent_id}
+        if redirect_uri is not None and str(redirect_uri).strip():
+            query["redirect_uri"] = redirect_uri
         if state is not None:
             query["state"] = state
+        if link_token is not None and str(link_token).strip():
+            query["link_token"] = link_token
+        if categories:
+            cleaned_categories = list(dict.fromkeys(str(category).strip() for category in categories if str(category).strip()))
+            if cleaned_categories:
+                query["categories"] = ",".join(cleaned_categories)
         return f"{UniversalMemory.DEFAULT_CONSENT_BASE_URL}/consent?{urlencode(query)}"
 
     def _request_response(
