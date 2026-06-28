@@ -22,6 +22,16 @@ async function main(): Promise<void> {
   const promptAddition = memories.hasContext ? memories.systemPromptAddition : "";
   console.log("Prepend this to your OpenAI system prompt:");
   console.log(promptAddition);
+
+  if (memories.retrievalId) {
+    await client.feedback({
+      retrievalId: memories.retrievalId,
+      outcome: "used_successfully",
+      usedMemoryIds: memories.items.map((item) => item.id),
+      agentConfidence: 0.9,
+      metadata: { example: "raw_openai" },
+    });
+  }
 }
 
 void main();
