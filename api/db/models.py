@@ -14,6 +14,7 @@ from sqlalchemy import DateTime
 from sqlalchemy import Enum
 from sqlalchemy import Float
 from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -34,7 +35,8 @@ from sqlalchemy.orm import relationship
 UUID_SERVER_DEFAULT = text("gen_random_uuid()")
 EMPTY_JSONB_OBJECT = text("'{}'::jsonb")
 EMPTY_JSONB_ARRAY = text("'[]'::jsonb")
-EMPTY_TEXT_ARRAY = text("'{}'::varchar[]")
+EMPTY_TEXT_ARRAY = text("'{}'::text[]")
+EMPTY_VARCHAR_ARRAY = text("'{}'::varchar[]")
 EMPTY_UUID_ARRAY = text("'{}'::uuid[]")
 
 
@@ -156,6 +158,13 @@ class ExtractionJobStatus(str, enum.Enum):
     dead = "dead"
 
 
+class BackfillJobStatus(str, enum.Enum):
+    running = "running"
+    paused = "paused"
+    complete = "complete"
+    failed = "failed"
+
+
 class ApiVersionValue(str, enum.Enum):
     v1 = "v1"
     v2 = "v2"
@@ -210,10 +219,18 @@ class User(Base):
     )
 
     api_keys: Mapped[list[ApiKey]] = relationship(back_populates="user")
-    memories: Mapped[list[Memory]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    conversations: Mapped[list[Conversation]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    agents: Mapped[list[Agent]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    memories: Mapped[list[Memory]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    audit_logs: Mapped[list[AuditLog]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    agents: Mapped[list[Agent]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class EmbeddingModel(Base):
@@ -226,13 +243,17 @@ class EmbeddingModel(Base):
     )
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
     dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
-    qdrant_collection: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    qdrant_collection: Mapped[str] = mapped_column(
+        String(100), nullable=False, unique=True
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         server_default=text("false"),
     )
-    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deprecated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -279,11 +300,13 @@ class Tenant(Base):
         nullable=False,
         server_default=text("'IN1'"),
     )
-    clerk_org_id: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    clerk_org_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     plan_tier: Mapped[PlanTier] = mapped_column(
         Enum(PlanTier, name="plan_tier_enum"),
         nullable=False,
-        server_default=text("'starter'"),
+        server_default=None,
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
@@ -297,8 +320,12 @@ class Tenant(Base):
         nullable=False,
         server_default=EMPTY_JSONB_OBJECT,
     )
-    support_type_configured: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    support_type_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'single'"))
+    support_type_configured: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    support_type_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'single'")
+    )
     support_types_allowed: Mapped[list[str]] = mapped_column(
         JSONB,
         nullable=False,
@@ -312,7 +339,9 @@ class Tenant(Base):
 
     api_keys: Mapped[list[ApiKey]] = relationship(back_populates="tenant")
     region: Mapped[Region] = relationship(back_populates="tenants")
-    proxy_users: Mapped[list[ProxyUser]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    proxy_users: Mapped[list[ProxyUser]] = relationship(
+        back_populates="tenant", cascade="all, delete-orphan"
+    )
     deprecation_usage: Mapped[list[TenantDeprecationUsage]] = relationship(
         back_populates="tenant",
         cascade="all, delete-orphan",
@@ -350,6 +379,23 @@ class Tenant(Base):
         back_populates="tenant",
         cascade="all, delete-orphan",
     )
+    service_writers: Mapped[list[ServiceWriter]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    memory_source_events: Mapped[list[MemorySourceEvent]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
+    organisation_directory_entry: Mapped[OrganisationDirectory | None] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    verified_org_connections: Mapped[list[VerifiedOrgConnection]] = relationship(
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+    )
 
 
 class ApiKey(Base):
@@ -376,7 +422,7 @@ class ApiKey(Base):
     permissions: Mapped[list[str]] = mapped_column(
         ARRAY(String()),
         nullable=False,
-        server_default=EMPTY_TEXT_ARRAY,
+        server_default=EMPTY_VARCHAR_ARRAY,
     )
     rate_limit_per_minute: Mapped[int] = mapped_column(
         Integer,
@@ -388,7 +434,9 @@ class ApiKey(Base):
         nullable=False,
         server_default=func.now(),
     )
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -397,7 +445,211 @@ class ApiKey(Base):
 
     tenant: Mapped[Tenant | None] = relationship(back_populates="api_keys")
     user: Mapped[User | None] = relationship(back_populates="api_keys")
+    service_writer: Mapped[ServiceWriter | None] = relationship(
+        back_populates="api_key"
+    )
+    memory_source_events: Mapped[list[MemorySourceEvent]] = relationship(
+        back_populates="api_key"
+    )
 
+
+class ServiceWriter(Base):
+    __tablename__ = "service_writers"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "service_key", name="uq_service_writers_tenant_service"
+        ),
+        UniqueConstraint("api_key_id", name="uq_service_writers_api_key"),
+        Index("ix_service_writers_tenant_active", "tenant_id", "is_active"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    api_key_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("api_keys.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    service_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    authority_rules: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="service_writers")
+    api_key: Mapped[ApiKey | None] = relationship(back_populates="service_writer")
+    source_events: Mapped[list[MemorySourceEvent]] = relationship(
+        back_populates="writer"
+    )
+
+
+class MemorySourceEvent(Base):
+    __tablename__ = "memory_source_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "source_service",
+            "source_event_id",
+            name="uq_memory_source_events_tenant_service_event",
+        ),
+        Index(
+            "ix_memory_source_events_tenant_observed",
+            "tenant_id",
+            text("observed_at DESC"),
+        ),
+        Index(
+            "ix_memory_source_events_proxy_user_observed",
+            "proxy_user_id",
+            text("observed_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    writer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("service_writers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    api_key_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("api_keys.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_service: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+    evidence_refs: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_ARRAY,
+    )
+    processing_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="memory_source_events")
+    proxy_user: Mapped[ProxyUser] = relationship()
+    writer: Mapped[ServiceWriter | None] = relationship(back_populates="source_events")
+    api_key: Mapped[ApiKey | None] = relationship(back_populates="memory_source_events")
+    extraction_job: Mapped[ExtractionJob | None] = relationship(
+        back_populates="source_event",
+        uselist=False,
+    )
+    memories: Mapped[list[Memory]] = relationship(back_populates="source_event")
+
+class RetrievalEvent(Base):
+    __tablename__ = "retrieval_events"
+    __table_args__ = (
+        Index("ix_retrieval_events_tenant_created", "tenant_id", text("created_at DESC")),
+        Index("ix_retrieval_events_proxy_user_created", "proxy_user_id", text("created_at DESC")),
+        Index("ix_retrieval_events_query_hash", "tenant_id", "query_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("proxy_users.id", ondelete="CASCADE"), nullable=False)
+    external_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    query_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    query_preview: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    categories: Mapped[list[str]] = mapped_column(ARRAY(String()), nullable=False, server_default=EMPTY_VARCHAR_ARRAY)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    retrieved_memory_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=EMPTY_UUID_ARRAY)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    top_relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_relevance: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    not_found: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    included_in_prompt: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    quota_mode: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    is_degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tenant: Mapped[Tenant] = relationship()
+    proxy_user: Mapped[ProxyUser] = relationship()
+    feedback_events: Mapped[list[RetrievalFeedbackEvent]] = relationship(back_populates="retrieval_event", cascade="all, delete-orphan")
+
+
+class RetrievalFeedbackEvent(Base):
+    __tablename__ = "retrieval_feedback_events"
+    __table_args__ = (
+        CheckConstraint("outcome IN ('used_successfully','used_partially','ignored','not_useful','user_corrected','clarification_needed')", name="ck_retrieval_feedback_events_outcome"),
+        CheckConstraint("agent_confidence IS NULL OR (agent_confidence >= 0 AND agent_confidence <= 1)", name="ck_retrieval_feedback_events_agent_confidence"),
+        Index("ix_retrieval_feedback_events_tenant_created", "tenant_id", text("created_at DESC")),
+        Index("ix_retrieval_feedback_events_outcome", "tenant_id", "outcome", text("created_at DESC")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT)
+    retrieval_event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("retrieval_events.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("proxy_users.id", ondelete="CASCADE"), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(40), nullable=False)
+    used_memory_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=EMPTY_UUID_ARRAY)
+    correction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    correction_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("extraction_jobs.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    retrieval_event: Mapped[RetrievalEvent] = relationship(back_populates="feedback_events")
+    tenant: Mapped[Tenant] = relationship()
+    proxy_user: Mapped[ProxyUser] = relationship()
+    correction_job: Mapped[ExtractionJob | None] = relationship()
 
 class Agent(Base):
     __tablename__ = "agents"
@@ -525,7 +777,9 @@ class Memory(Base):
         nullable=False,
         server_default=text("0"),
     )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     previous_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memories.id", ondelete="SET NULL"),
@@ -535,6 +789,11 @@ class Memory(Base):
         UUID(as_uuid=True),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memory_source_events.id", ondelete="SET NULL"),
+        nullable=True,
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -553,12 +812,17 @@ class Memory(Base):
     embedding_model: Mapped[EmbeddingModel] = relationship(back_populates="memories")
     agent: Mapped[Agent | None] = relationship(back_populates="memories")
     source_conversation: Mapped[Conversation] = relationship(back_populates="memories")
+    source_event: Mapped[MemorySourceEvent | None] = relationship(
+        back_populates="memories"
+    )
     previous_version: Mapped[Memory | None] = relationship(
         remote_side="Memory.id",
         back_populates="next_versions",
         foreign_keys=[previous_version_id],
     )
-    next_versions: Mapped[list[Memory]] = relationship(back_populates="previous_version")
+    next_versions: Mapped[list[Memory]] = relationship(
+        back_populates="previous_version"
+    )
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="memory")
     versions: Mapped[list[MemoryVersion]] = relationship(
         back_populates="memory",
@@ -576,12 +840,213 @@ class Memory(Base):
         back_populates="user_b_memory",
         foreign_keys="CrossUserConflict.user_b_memory_id",
     )
+    claim_revisions: Mapped[list[MemoryClaimRevision]] = relationship(
+        back_populates="memory",
+        cascade="all, delete-orphan",
+    )
+
+
+class MemoryClaim(Base):
+    __tablename__ = "memory_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "proxy_user_id",
+            "claim_fingerprint",
+            name="uq_memory_claims_tenant_user_fingerprint",
+        ),
+        CheckConstraint(
+            "status IN ('active','superseded','disputed','archived')",
+            name="ck_memory_claims_status",
+        ),
+        Index(
+            "ix_memory_claims_tenant_user_status",
+            "tenant_id",
+            "proxy_user_id",
+            "status",
+        ),
+        Index("ix_memory_claims_tenant_category", "tenant_id", "category"),
+        Index("ix_memory_claims_active_memory", "active_memory_id"),
+        ForeignKeyConstraint(
+            ["winning_revision_id"],
+            ["memory_claim_revisions.id"],
+            name="fk_memory_claims_winning_revision_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    category: Mapped[MemoryCategory] = mapped_column(
+        Enum(MemoryCategory, name="memory_category_enum"),
+        nullable=False,
+    )
+    claim_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    predicate_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    scope: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+    active_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        server_default=text("'active'"),
+    )
+    active_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    winning_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    authority_priority: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("50"),
+    )
+    confidence_score: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        server_default=text("0"),
+    )
+    observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    tenant: Mapped[Tenant] = relationship()
+    proxy_user: Mapped[ProxyUser] = relationship()
+    active_memory: Mapped[Memory | None] = relationship(foreign_keys=[active_memory_id])
+    revisions: Mapped[list[MemoryClaimRevision]] = relationship(
+        back_populates="claim",
+        cascade="all, delete-orphan",
+        foreign_keys="MemoryClaimRevision.claim_id",
+    )
+
+
+class MemoryClaimRevision(Base):
+    __tablename__ = "memory_claim_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('asserted','activated','superseded','rejected','disputed','archived')",
+            name="ck_memory_claim_revisions_status",
+        ),
+        Index("ix_memory_claim_revisions_claim_created", "claim_id", "created_at"),
+        Index("ix_memory_claim_revisions_source_event", "source_event_id"),
+        Index("ix_memory_claim_revisions_memory", "memory_id"),
+        Index("ix_memory_claim_revisions_domain_field", "source_domain", "source_field"),
+        Index("ix_memory_claim_revisions_versions", "schema_version", "processor_version"),
+        CheckConstraint("schema_version > 0", name="ck_memory_claim_revisions_schema_version_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memory_claims.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memory_source_events.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_writer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("service_writers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_domain: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    source_domain_record_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    source_field: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    asserted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    authority_priority: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("50"),
+    )
+    confidence_score: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        server_default=text("0"),
+    )
+    observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    evidence_refs: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_ARRAY,
+    )
+    resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    processor_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default=text("'legacy'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    claim: Mapped[MemoryClaim] = relationship(
+        back_populates="revisions",
+        foreign_keys=[claim_id],
+    )
+    memory: Mapped[Memory | None] = relationship(back_populates="claim_revisions")
+    source_event: Mapped[MemorySourceEvent | None] = relationship()
+    source_writer: Mapped[ServiceWriter | None] = relationship()
 
 
 class MemoryVersion(Base):
     __tablename__ = "memory_versions"
     __table_args__ = (
-        UniqueConstraint("memory_id", "version_number", name="uq_memory_versions_memory_version"),
+        UniqueConstraint(
+            "memory_id", "version_number", name="uq_memory_versions_memory_version"
+        ),
         CheckConstraint(
             "change_type IN ('created', 'conflict_update', 'manual_edit', 'importance_decay', 'importance_boost', 'archived', 'conflict_resolved')",
             name="ck_memory_versions_change_type",
@@ -609,7 +1074,9 @@ class MemoryVersion(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     change_type: Mapped[str] = mapped_column(String(50), nullable=False)
     change_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    changed_by: Mapped[str] = mapped_column(String(50), nullable=False, server_default=text("'system'"))
+    changed_by: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default=text("'system'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -668,6 +1135,13 @@ class AuditLog(Base):
 
 class ProxyUser(Base):
     __tablename__ = "proxy_users"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "external_user_id_hash",
+            name="uq_proxy_users_tenant_hash",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -743,7 +1217,9 @@ class ProxyUser(Base):
 class EdTechMemory(Base):
     __tablename__ = "edtech_memories"
     __table_args__ = (
-        UniqueConstraint("proxy_user_id", "tenant_id", name="uq_edtech_memories_proxy_tenant"),
+        UniqueConstraint(
+            "proxy_user_id", "tenant_id", name="uq_edtech_memories_proxy_tenant"
+        ),
         CheckConstraint(
             "learner_type IS NULL OR learner_type IN ('school_student','competitive_exam','higher_education','professional_cert','skill_learner','medical_student')",
             name="ck_edtech_memories_learner_type",
@@ -771,45 +1247,87 @@ class EdTechMemory(Base):
     )
 
     learner_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    learner_type_confidence: Mapped[str] = mapped_column(String(10), nullable=False, server_default=text("'high'"))
+    learner_type_confidence: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default=text("'high'")
+    )
     primary_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
-    primary_deadline_event: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    primary_deadline_event: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
     primary_deadline_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     grade_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
     board_or_curriculum: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    subjects: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
-    syllabus_stage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    subjects: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
+    syllabus_stage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
 
-    strong_topics: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
-    weak_topics: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
-    concept_gaps: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
-    misconceptions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    strong_topics: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
+    weak_topics: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
+    concept_gaps: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
+    misconceptions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
 
-    explanation_style: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    explanation_style: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     session_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    language_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    language_profile: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     peak_hours: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     exam_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     exam_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     marks_target: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    mock_scores: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    mock_scores: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
 
-    progress_trend: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    competitive_exam_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    higher_education_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    professional_cert_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    skill_learner_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    medical_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    progress_trend: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    competitive_exam_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    higher_education_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    professional_cert_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    skill_learner_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    medical_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
 
-    forgetting_stages: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    improvement_velocity: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    forgetting_stages: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    improvement_velocity: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
     streak: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     last_topic_studied: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    last_extraction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    last_extraction_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     extraction_source_job_ids: Mapped[list[uuid.UUID]] = mapped_column(
         ARRAY(UUID(as_uuid=True)),
         nullable=False,
@@ -834,7 +1352,9 @@ class EdTechMemory(Base):
 class SupportMemory(Base):
     __tablename__ = "support_memories"
     __table_args__ = (
-        UniqueConstraint("proxy_user_id", "tenant_id", name="uq_support_memories_proxy_tenant"),
+        UniqueConstraint(
+            "proxy_user_id", "tenant_id", name="uq_support_memories_proxy_tenant"
+        ),
         CheckConstraint(
             "support_type IS NULL OR support_type IN ('saas','ecommerce','banking_fintech','travel','telecom','edtech_support','general_info')",
             name="ck_support_memories_support_type",
@@ -862,27 +1382,45 @@ class SupportMemory(Base):
     )
 
     support_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    support_type_source: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'detected'"))
-    customer_identity: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    support_type_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'detected'")
+    )
+    customer_identity: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
     communication_preference: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
         server_default=EMPTY_JSONB_OBJECT,
     )
-    language_profile: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
-    current_open_issue: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    issue_history: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
+    language_profile: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
+    current_open_issue: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    issue_history: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
     resolution_preference: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
         server_default=EMPTY_JSONB_OBJECT,
     )
     sentiment_pattern: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    risk_signals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY)
-    support_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    risk_signals: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_ARRAY
+    )
+    support_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
 
-    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    last_extraction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    last_extraction_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     extraction_source_job_ids: Mapped[list[uuid.UUID]] = mapped_column(
         ARRAY(UUID(as_uuid=True)),
         nullable=False,
@@ -940,7 +1478,9 @@ class SharedContextSignal(Base):
         ForeignKey("memories.id", ondelete="CASCADE"),
         nullable=True,
     )
-    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0.75"))
+    confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default=text("0.75")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -958,7 +1498,9 @@ class SharedContextSignal(Base):
     )
 
     tenant: Mapped[Tenant] = relationship(back_populates="shared_context_signals")
-    source_proxy_user: Mapped[ProxyUser | None] = relationship(back_populates="shared_context_signals")
+    source_proxy_user: Mapped[ProxyUser | None] = relationship(
+        back_populates="shared_context_signals"
+    )
     source_memory: Mapped[Memory | None] = relationship(
         back_populates="shared_context_signals",
         foreign_keys=[source_memory_id],
@@ -1016,9 +1558,13 @@ class CrossUserConflict(Base):
         server_default=text("'pending'"),
     )
     auto_resolution: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    auto_resolution_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_resolution_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     resolution_path: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     resolved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
     resolution: Mapped[str | None] = mapped_column(String(20), nullable=True)
     resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1098,7 +1644,9 @@ class ClarificationQueue(Base):
 
     tenant: Mapped[Tenant] = relationship(back_populates="clarification_queue")
     proxy_user: Mapped[ProxyUser] = relationship(back_populates="clarification_queue")
-    conflict: Mapped[CrossUserConflict | None] = relationship(back_populates="clarification_queue")
+    conflict: Mapped[CrossUserConflict | None] = relationship(
+        back_populates="clarification_queue"
+    )
 
 
 class UniversalUser(Base):
@@ -1113,7 +1661,9 @@ class UniversalUser(Base):
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     otp_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
-    otp_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    otp_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1146,6 +1696,14 @@ class UniversalUser(Base):
         back_populates="universal_user",
         cascade="all, delete-orphan",
     )
+    verified_org_connections: Mapped[list[VerifiedOrgConnection]] = relationship(
+        back_populates="universal_user",
+        cascade="all, delete-orphan",
+    )
+    universal_memory_claims: Mapped[list[UniversalMemoryClaim]] = relationship(
+        back_populates="universal_user",
+        cascade="all, delete-orphan",
+    )
 
 
 class GlobalAgent(Base):
@@ -1166,7 +1724,7 @@ class GlobalAgent(Base):
     logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     website_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     default_categories_requested: Mapped[list[str]] = mapped_column(
-        ARRAY(String()),
+        ARRAY(Text()),
         nullable=False,
         server_default=EMPTY_TEXT_ARRAY,
     )
@@ -1207,7 +1765,6 @@ class GlobalAgent(Base):
     )
     universal_memories: Mapped[list[UniversalMemory]] = relationship(
         back_populates="source_agent",
-        cascade="all, delete-orphan",
     )
 
 
@@ -1218,7 +1775,9 @@ class PermissionGrant(Base):
             "access_type IN ('read_only', 'read_write')",
             name="ck_permission_grants_access_type",
         ),
-        UniqueConstraint("user_uui_id", "agent_id", name="uq_permission_grants_user_agent"),
+        UniqueConstraint(
+            "user_uui_id", "agent_id", name="uq_permission_grants_user_agent"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1237,9 +1796,8 @@ class PermissionGrant(Base):
         nullable=False,
     )
     categories_allowed: Mapped[list[str]] = mapped_column(
-        ARRAY(String()),
+        ARRAY(Text()),
         nullable=False,
-        server_default=EMPTY_TEXT_ARRAY,
     )
     access_type: Mapped[str] = mapped_column(
         String(20),
@@ -1251,15 +1809,21 @@ class PermissionGrant(Base):
         nullable=False,
         server_default=func.now(),
     )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         server_default=text("true"),
     )
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
-    universal_user: Mapped[UniversalUser] = relationship(back_populates="permission_grants")
+    universal_user: Mapped[UniversalUser] = relationship(
+        back_populates="permission_grants"
+    )
     global_agent: Mapped[GlobalAgent] = relationship(back_populates="permission_grants")
 
 
@@ -1270,8 +1834,18 @@ class UniversalMemory(Base):
             "category IN ('preference','fact','goal','procedure','relationship','expertise')",
             name="ck_universal_memories_category",
         ),
-        CheckConstraint("importance_score > 0 AND importance_score <= 10", name="ck_universal_memories_importance"),
-        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_universal_memories_confidence"),
+        CheckConstraint(
+            "importance_score > 0 AND importance_score <= 10",
+            name="ck_universal_memories_importance",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_universal_memories_confidence",
+        ),
+        CheckConstraint(
+            "source_type IN ('passport_agent','org_connection','user_correction','system')",
+            name="ck_universal_memories_source_type",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1284,10 +1858,20 @@ class UniversalMemory(Base):
         ForeignKey("universal_users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    source_agent_id: Mapped[uuid.UUID] = mapped_column(
+    source_agent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("global_agents.id", ondelete="CASCADE"),
+        ForeignKey("global_agents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_org_connection_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("verified_org_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(30),
         nullable=False,
+        server_default=text("'passport_agent'"),
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -1321,8 +1905,15 @@ class UniversalMemory(Base):
         server_default=EMPTY_JSONB_OBJECT,
     )
 
-    universal_user: Mapped[UniversalUser] = relationship(back_populates="universal_memories")
-    source_agent: Mapped[GlobalAgent] = relationship(back_populates="universal_memories")
+    universal_user: Mapped[UniversalUser] = relationship(
+        back_populates="universal_memories"
+    )
+    source_agent: Mapped[GlobalAgent | None] = relationship(
+        back_populates="universal_memories"
+    )
+    source_org_connection: Mapped[VerifiedOrgConnection | None] = relationship(
+        back_populates="universal_memories",
+    )
     flags: Mapped[list[UserMemoryFlag]] = relationship(
         back_populates="memory",
         cascade="all, delete-orphan",
@@ -1331,12 +1922,157 @@ class UniversalMemory(Base):
         back_populates="universal_memory",
         cascade="all, delete-orphan",
     )
+    claim_revisions: Mapped[list[UniversalMemoryClaimRevision]] = relationship(
+        back_populates="universal_memory",
+    )
+
+
+class UniversalMemoryClaim(Base):
+    __tablename__ = "universal_memory_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_uui_id",
+            "claim_fingerprint",
+            name="uq_universal_memory_claims_user_fingerprint",
+        ),
+        CheckConstraint(
+            "status IN ('active','disputed','archived')",
+            name="ck_universal_memory_claims_status",
+        ),
+        Index("ix_universal_memory_claims_user_status", "user_uui_id", "status"),
+        Index("ix_universal_memory_claims_active_memory", "active_memory_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT
+    )
+    user_uui_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    claim_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    predicate_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    active_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default=text("'active'")
+    )
+    active_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_memories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    winning_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    confidence_score: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default=text("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    universal_user: Mapped[UniversalUser] = relationship(
+        back_populates="universal_memory_claims"
+    )
+    active_memory: Mapped[UniversalMemory | None] = relationship(
+        foreign_keys=[active_memory_id]
+    )
+    revisions: Mapped[list[UniversalMemoryClaimRevision]] = relationship(
+        back_populates="claim",
+        cascade="all, delete-orphan",
+        foreign_keys="UniversalMemoryClaimRevision.claim_id",
+    )
+
+
+class UniversalMemoryClaimRevision(Base):
+    __tablename__ = "universal_memory_claim_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('asserted','activated','superseded','disputed','archived')",
+            name="ck_universal_memory_claim_revisions_status",
+        ),
+        Index(
+            "ix_universal_memory_claim_revisions_claim_created",
+            "claim_id",
+            "created_at",
+        ),
+        Index("ix_universal_memory_claim_revisions_memory", "universal_memory_id"),
+        Index("ix_universal_memory_claim_revisions_grant", "permission_grant_id"),
+        Index("ix_universal_memory_claim_revisions_versions", "schema_version", "processor_version"),
+        CheckConstraint("schema_version > 0", name="ck_universal_memory_claim_revisions_schema_version_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT
+    )
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_memory_claims.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    universal_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_memories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("global_agents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_org_connection_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("verified_org_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    permission_grant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("permission_grants.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    asserted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence_score: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default=text("0")
+    )
+    resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    processor_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default=text("'legacy'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    claim: Mapped[UniversalMemoryClaim] = relationship(
+        back_populates="revisions", foreign_keys=[claim_id]
+    )
+    universal_memory: Mapped[UniversalMemory | None] = relationship(
+        back_populates="claim_revisions"
+    )
 
 
 class UniversalMemoryVersion(Base):
     __tablename__ = "universal_memory_versions"
     __table_args__ = (
-        UniqueConstraint("universal_memory_id", "version_number", name="uq_universal_memory_versions_memory_version"),
+        UniqueConstraint(
+            "universal_memory_id",
+            "version_number",
+            name="uq_universal_memory_versions_memory_version",
+        ),
         CheckConstraint(
             "change_type IN ('created','user_corrected','user_removed','conflict_resolved','agent_updated','importance_decay','importance_boost','archived')",
             name="ck_universal_memory_versions_change_type",
@@ -1420,7 +2156,9 @@ class UserMemoryFlag(Base):
         nullable=False,
         server_default=text("'pending'"),
     )
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     memory: Mapped[UniversalMemory] = relationship(back_populates="flags")
     universal_user: Mapped[UniversalUser] = relationship(back_populates="memory_flags")
@@ -1429,7 +2167,9 @@ class UserMemoryFlag(Base):
 class UUIProxyLink(Base):
     __tablename__ = "uui_proxy_link"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "proxy_user_id", name="uq_uui_proxy_link_tenant_proxy_user"),
+        UniqueConstraint(
+            "tenant_id", "proxy_user_id", name="uq_uui_proxy_link_tenant_proxy_user"
+        ),
         UniqueConstraint("proxy_user_id", name="uq_uui_proxy_link_proxy_user"),
     )
 
@@ -1464,6 +2204,168 @@ class UUIProxyLink(Base):
     universal_user: Mapped[UniversalUser] = relationship(back_populates="proxy_links")
 
 
+class OrganisationDirectory(Base):
+    __tablename__ = "organisation_directory"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_organisation_directory_tenant"),
+        CheckConstraint(
+            "category IN ('ecommerce','banking','travel','telecom','edtech','saas','other')",
+            name="ck_organisation_directory_category",
+        ),
+        Index(
+            "ix_organisation_directory_public_category",
+            "is_public",
+            "category",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    website_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    category: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default=text("'other'")
+    )
+    oauth_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    oauth_client_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    oauth_client_secret_ciphertext: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    oauth_authorization_url: Mapped[str | None] = mapped_column(
+        String(1000), nullable=True
+    )
+    oauth_token_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    oauth_userinfo_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    oauth_scopes: Mapped[list[str]] = mapped_column(
+        ARRAY(String()),
+        nullable=False,
+        server_default=EMPTY_VARCHAR_ARRAY,
+    )
+    link_token_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    is_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    is_public: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="organisation_directory_entry")
+    connections: Mapped[list[VerifiedOrgConnection]] = relationship(
+        back_populates="organisation",
+        cascade="all, delete-orphan",
+    )
+
+
+class VerifiedOrgConnection(Base):
+    __tablename__ = "verified_org_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_uui_id",
+            "org_directory_id",
+            name="uq_verified_org_connections_user_org",
+        ),
+        CheckConstraint(
+            "connection_method IN ('oauth','oidc','link_token')",
+            name="ck_verified_org_connections_method",
+        ),
+        CheckConstraint(
+            "revoked_by IS NULL OR revoked_by IN ('user','system')",
+            name="ck_verified_org_connections_revoked_by",
+        ),
+        Index(
+            "ix_verified_org_connections_user_active",
+            "user_uui_id",
+            "is_active",
+        ),
+        Index(
+            "ix_verified_org_connections_tenant_active",
+            "tenant_id",
+            "is_active",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    user_uui_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("universal_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    org_directory_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organisation_directory.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    proxy_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    connection_method: Mapped[str] = mapped_column(String(30), nullable=False)
+    external_account_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_by: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    universal_user: Mapped[UniversalUser] = relationship(
+        back_populates="verified_org_connections"
+    )
+    tenant: Mapped[Tenant] = relationship(back_populates="verified_org_connections")
+    organisation: Mapped[OrganisationDirectory] = relationship(
+        back_populates="connections"
+    )
+    proxy_user: Mapped[ProxyUser | None] = relationship()
+    universal_memories: Mapped[list[UniversalMemory]] = relationship(
+        back_populates="source_org_connection",
+    )
+
+
 class AgentApiKey(Base):
     __tablename__ = "agent_api_keys"
 
@@ -1490,7 +2392,9 @@ class AgentApiKey(Base):
         nullable=False,
         server_default=func.now(),
     )
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     global_agent: Mapped[GlobalAgent] = relationship(back_populates="api_keys")
 
@@ -1503,7 +2407,9 @@ class TenantBudget(Base):
         primary_key=True,
         server_default=UUID_SERVER_DEFAULT,
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), unique=True, nullable=False
+    )
     plan_tier: Mapped[PlanTier] = mapped_column(
         Enum(PlanTier, name="plan_tier_enum"),
         nullable=False,
@@ -1555,7 +2461,9 @@ class TenantBudget(Base):
         Enum(QuotaMode, name="quota_mode_enum", values_callable=enum_values),
         nullable=True,
     )
-    reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1576,7 +2484,9 @@ class ApiDeprecatedField(Base):
         nullable=False,
     )
     field_path: Mapped[str] = mapped_column(String(255), nullable=False)
-    deprecated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deprecated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     sunset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     replacement_field: Mapped[str | None] = mapped_column(String(255), nullable=True)
     migration_guide_url: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -1728,7 +2638,53 @@ class VectorSyncOutbox(Base):
         nullable=False,
         server_default=func.now(),
     )
-    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class BackfillJob(Base):
+    __tablename__ = "backfill_jobs"
+    __table_args__ = (
+        Index("ix_backfill_jobs_status_started_at", "status", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[BackfillJobStatus] = mapped_column(
+        Enum(BackfillJobStatus, name="backfill_job_status_enum"),
+        nullable=False,
+    )
+    total_rows: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    processed_rows: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    pct_complete: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        server_default=text("0"),
+    )
+    eta_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW()"),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ExtractionJob(Base):
@@ -1746,6 +2702,12 @@ class ExtractionJob(Base):
         nullable=False,
     )
     external_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memory_source_events.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
     status: Mapped[ExtractionJobStatus] = mapped_column(
         Enum(ExtractionJobStatus, name="extraction_job_status_enum"),
         nullable=False,
@@ -1758,7 +2720,9 @@ class ExtractionJob(Base):
         nullable=False,
         server_default=EMPTY_JSONB_OBJECT,
     )
-    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT)
+    result: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
+    )
     attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -1786,11 +2750,27 @@ class ExtractionJob(Base):
         nullable=False,
         server_default=func.now(),
     )
-    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    stale_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    stale_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    raw_payload_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    payload_redacted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1799,10 +2779,129 @@ class ExtractionJob(Base):
     )
 
     proxy_user: Mapped[ProxyUser] = relationship(back_populates="extraction_jobs")
+    source_event: Mapped[MemorySourceEvent | None] = relationship(
+        back_populates="extraction_job"
+    )
+    pending_candidates: Mapped[list[PendingExtractionCandidate]] = relationship(
+        back_populates="extraction_job",
+    )
     dead_letter_entry: Mapped[DeadLetterJob | None] = relationship(
         back_populates="extraction_job",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+
+
+class PendingExtractionCandidate(Base):
+    __tablename__ = "pending_extraction_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "proxy_user_id",
+            "candidate_fingerprint",
+            name="uq_pending_extraction_candidates_fingerprint",
+        ),
+        CheckConstraint(
+            "status IN ('pending','promoted','dismissed','expired')",
+            name="ck_pending_extraction_candidates_status",
+        ),
+        CheckConstraint(
+            "confidence_score >= 0 AND confidence_score <= 1",
+            name="ck_pending_extraction_candidates_confidence",
+        ),
+        CheckConstraint(
+            "importance_score >= 1 AND importance_score <= 10",
+            name="ck_pending_extraction_candidates_importance",
+        ),
+        Index(
+            "ix_pending_extraction_candidates_tenant_status",
+            "tenant_id",
+            "status",
+            "updated_at",
+        ),
+        Index(
+            "ix_pending_extraction_candidates_proxy_user",
+            "proxy_user_id",
+            "status",
+        ),
+        Index("ix_pending_extraction_candidates_job", "extraction_job_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=UUID_SERVER_DEFAULT,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    extraction_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("extraction_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memory_source_events.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[MemoryCategory] = mapped_column(
+        Enum(MemoryCategory, name="memory_category_enum"),
+        nullable=False,
+    )
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False)
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_reason: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        server_default=text("'confidence_below_store_threshold'"),
+    )
+    candidate_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    reinforcement_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    extraction_job: Mapped[ExtractionJob | None] = relationship(
+        back_populates="pending_candidates"
     )
 
 
@@ -1844,29 +2943,66 @@ class DeadLetterJob(Base):
         nullable=False,
         server_default=func.now(),
     )
-    last_retried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_retried_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
-    extraction_job: Mapped[ExtractionJob] = relationship(back_populates="dead_letter_entry")
+    extraction_job: Mapped[ExtractionJob] = relationship(
+        back_populates="dead_letter_entry"
+    )
 
 
 Index("ix_memories_user_category", Memory.user_id, Memory.category)
-Index("ix_memories_user_importance_score_desc", Memory.user_id, Memory.importance_score.desc())
-Index("ix_memories_user_last_accessed_at_desc", Memory.user_id, Memory.last_accessed_at.desc())
+Index(
+    "ix_memories_user_importance_score_desc",
+    Memory.user_id,
+    Memory.importance_score.desc(),
+)
+Index(
+    "ix_memories_user_last_accessed_at_desc",
+    Memory.user_id,
+    Memory.last_accessed_at.desc(),
+)
 Index("ix_memories_user_is_archived", Memory.user_id, Memory.is_archived)
 Index("ix_memory_versions_memory_id", MemoryVersion.memory_id)
 Index("ix_memories_proxy_user_category", Memory.proxy_user_id, Memory.category)
-Index("ix_memories_proxy_user_importance_score_desc", Memory.proxy_user_id, Memory.importance_score.desc())
-Index("ix_memories_proxy_user_last_accessed_at_desc", Memory.proxy_user_id, Memory.last_accessed_at.desc())
+Index(
+    "ix_memories_proxy_user_importance_score_desc",
+    Memory.proxy_user_id,
+    Memory.importance_score,
+)
+Index(
+    "ix_memories_proxy_user_last_accessed_at_desc",
+    Memory.proxy_user_id,
+    Memory.last_accessed_at,
+)
 Index("ix_memories_proxy_user_is_archived", Memory.proxy_user_id, Memory.is_archived)
 Index("ix_memories_embedding_model_id", Memory.embedding_model_id)
+Index("ix_memories_source_event_id", Memory.source_event_id)
 Index("ix_memories_metadata_gin", Memory.__table__.c.metadata, postgresql_using="gin")
 Index("ix_api_keys_key_prefix", ApiKey.key_prefix)
-Index("ix_proxy_users_tenant_hash", ProxyUser.tenant_id, ProxyUser.external_user_id_hash, unique=True)
-Index("ix_proxy_users_tenant_active", ProxyUser.tenant_id, ProxyUser.last_active_at.desc())
+Index("ix_tenants_clerk_org_id", Tenant.clerk_org_id, unique=True)
+Index(
+    "ix_proxy_users_tenant_hash",
+    ProxyUser.tenant_id,
+    ProxyUser.external_user_id_hash,
+    unique=True,
+)
+Index(
+    "ix_proxy_users_tenant_active", ProxyUser.tenant_id, ProxyUser.last_active_at
+)
 Index("ix_universal_users_uui_token", UniversalUser.uui_token, unique=True)
 Index("ix_universal_users_email", UniversalUser.email, unique=True)
-Index("ix_permission_grants_user_active", PermissionGrant.user_uui_id, PermissionGrant.is_active)
-Index("ix_permission_grants_agent_active", PermissionGrant.agent_id, PermissionGrant.is_active)
+Index(
+    "ix_permission_grants_user_active",
+    PermissionGrant.user_uui_id,
+    PermissionGrant.is_active,
+)
+Index(
+    "ix_permission_grants_agent_active",
+    PermissionGrant.agent_id,
+    PermissionGrant.is_active,
+)
 Index(
     "ix_universal_memories_user_category_archived",
     UniversalMemory.user_uui_id,
@@ -1879,14 +3015,22 @@ Index(
     UniversalMemory.importance_score.desc(),
 )
 Index("ix_universal_memories_source_agent_id", UniversalMemory.source_agent_id)
-Index("ix_user_memory_flags_user_status", UserMemoryFlag.user_uui_id, UserMemoryFlag.status)
+Index(
+    "ix_user_memory_flags_user_status",
+    UserMemoryFlag.user_uui_id,
+    UserMemoryFlag.status,
+)
 Index(
     "ix_universal_memory_versions_memory_created",
     UniversalMemoryVersion.universal_memory_id,
     UniversalMemoryVersion.created_at.desc(),
 )
 Index("ix_agent_api_keys_key_prefix", AgentApiKey.key_prefix)
-Index("ix_agent_api_keys_global_agent_active", AgentApiKey.global_agent_id, AgentApiKey.is_active)
+Index(
+    "ix_agent_api_keys_global_agent_active",
+    AgentApiKey.global_agent_id,
+    AgentApiKey.is_active,
+)
 Index("ix_tenants_region_id", Tenant.region_id)
 Index(
     "ix_api_deprecated_fields_version_path",
@@ -1904,22 +3048,61 @@ Index(
 Index(
     "ix_tenant_deprecation_usage_last_used",
     TenantDeprecationUsage.tenant_id,
-    TenantDeprecationUsage.last_used_at.desc(),
+    TenantDeprecationUsage.last_used_at,
 )
 Index("ix_llm_provider_config_tenant_id", LLMProviderConfig.tenant_id, unique=True)
-Index("ix_vector_sync_outbox_status_created", VectorSyncOutbox.status, VectorSyncOutbox.created_at)
+Index(
+    "ix_vector_sync_outbox_status_created",
+    VectorSyncOutbox.status,
+    VectorSyncOutbox.created_at,
+)
 Index("ix_vector_sync_outbox_memory_id", VectorSyncOutbox.memory_id)
-Index("ix_extraction_jobs_status_updated", ExtractionJob.status, ExtractionJob.updated_at)
+Index(
+    "ix_extraction_jobs_status_updated", ExtractionJob.status, ExtractionJob.updated_at
+)
 Index("ix_extraction_jobs_tenant_status", ExtractionJob.tenant_id, ExtractionJob.status)
 Index("ix_extraction_jobs_proxy_user", ExtractionJob.proxy_user_id)
-Index("ix_extraction_jobs_status_stale_after", ExtractionJob.status, ExtractionJob.stale_after)
-Index("ix_dead_letter_jobs_tenant_created", DeadLetterJob.tenant_id, DeadLetterJob.created_at.desc())
-Index("ix_edtech_memories_tenant_exam_date", EdTechMemory.tenant_id, EdTechMemory.exam_date)
-Index("ix_edtech_memories_tenant_primary_deadline_date", EdTechMemory.tenant_id, EdTechMemory.primary_deadline_date)
-Index("ix_edtech_memories_tenant_last_extraction", EdTechMemory.tenant_id, EdTechMemory.last_extraction_at)
-Index("ix_support_memories_tenant_type", SupportMemory.tenant_id, SupportMemory.support_type)
-Index("ix_support_memories_tenant_sentiment", SupportMemory.tenant_id, SupportMemory.sentiment_pattern)
-Index("ix_support_memories_tenant_updated", SupportMemory.tenant_id, SupportMemory.updated_at.desc())
+Index("ix_extraction_jobs_payload_retention", ExtractionJob.raw_payload_expires_at)
+Index(
+    "ix_extraction_jobs_status_stale_after",
+    ExtractionJob.status,
+    ExtractionJob.stale_after,
+)
+Index(
+    "ix_dead_letter_jobs_tenant_created",
+    DeadLetterJob.tenant_id,
+    DeadLetterJob.created_at,
+)
+Index(
+    "ix_edtech_memories_tenant_exam_date",
+    EdTechMemory.tenant_id,
+    EdTechMemory.exam_date,
+)
+Index(
+    "ix_edtech_memories_tenant_primary_deadline_date",
+    EdTechMemory.tenant_id,
+    EdTechMemory.primary_deadline_date,
+)
+Index(
+    "ix_edtech_memories_tenant_last_extraction",
+    EdTechMemory.tenant_id,
+    EdTechMemory.last_extraction_at,
+)
+Index(
+    "ix_support_memories_tenant_type",
+    SupportMemory.tenant_id,
+    SupportMemory.support_type,
+)
+Index(
+    "ix_support_memories_tenant_sentiment",
+    SupportMemory.tenant_id,
+    SupportMemory.sentiment_pattern,
+)
+Index(
+    "ix_support_memories_tenant_updated",
+    SupportMemory.tenant_id,
+    SupportMemory.updated_at,
+)
 Index(
     "ix_embedding_models_single_active",
     EmbeddingModel.is_active,
@@ -1958,6 +3141,7 @@ __all__ = [
     "Memory",
     "MemoryCategory",
     "MemoryVersion",
+    "PendingExtractionCandidate",
     "OveragePolicy",
     "PlanTier",
     "PermissionGrant",
