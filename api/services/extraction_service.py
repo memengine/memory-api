@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from api.db.cache import CacheService
 from api.schemas.extraction_schemas import ExtractionResult
+from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
@@ -27,8 +28,12 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
 LOGGER = logging.getLogger(__name__)
 ALLOWED_CATEGORIES = {"preference", "fact", "goal", "procedure", "relationship", "expertise"}
 DEFAULT_CONFIDENCE_THRESHOLD = 0.65
+DEFAULT_PENDING_CONFIDENCE_THRESHOLD = 0.45
 MAX_CONVERSATION_TOKENS = 5000
 MAX_EXISTING_MEMORIES = 20
+COMPOSITIONAL_MIN_MESSAGES = 4
+COMPOSITIONAL_MIN_USER_MESSAGES = 2
+COMPOSITIONAL_MIN_CHARS = 240
 
 
 class ExtractionError(RuntimeError):
@@ -58,6 +63,7 @@ class ExtractionService:
         cache_service: CacheService | None = None,
         spec_path: Path | str | None = None,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        pending_confidence_threshold: float = DEFAULT_PENDING_CONFIDENCE_THRESHOLD,
     ) -> None:
         self.client = client
         self.llm_service = llm_service or LLMService(
@@ -67,6 +73,7 @@ class ExtractionService:
         )
         self.cache_service = cache_service
         self._confidence_threshold = float(confidence_threshold)
+        self._pending_confidence_threshold = min(float(pending_confidence_threshold), self._confidence_threshold)
         resolved_spec_path = Path(spec_path) if spec_path is not None else self._default_spec_path()
         parsed = self._load_spec(resolved_spec_path)
         self._category_definitions = parsed.category_definitions
@@ -82,6 +89,7 @@ class ExtractionService:
         job_id: str | None = None,
         existing_memories: list[Any] | None = None,
         user_id: str | None = None,
+        source_context: dict[str, Any] | None = None,
     ) -> ExtractionResult:
         """Extract memory candidates from a conversation.
 
@@ -92,19 +100,42 @@ class ExtractionService:
         resolved_user_id = proxy_user_id or user_id or ""
         conversation = self._build_conversation_string(messages)
         user_message = self._append_existing_memory_context(
-            conversation,
+            self._prepend_source_context(conversation, source_context),
             existing_memories or [],
         )
 
+        composition_signals: dict[str, Any] = {}
+        tokens_used = 0
+        provider_used: str | None = None
+        if self._should_run_compositional_pass(messages=messages, conversation=conversation, source_context=source_context):
+            composition_response = await self.llm_service.complete(
+                system_prompt=self._build_composition_system_prompt(),
+                user_message=conversation,
+                temperature=0.0,
+                max_tokens=700,
+                response_format="json",
+            )
+            tokens_used += int(composition_response.total_tokens or 0)
+            provider_used = composition_response.provider_used or provider_used
+            await self._record_provider_usage(composition_response.provider_used)
+            composition_signals = self._parse_composition_response(composition_response.content)
+            if composition_signals:
+                user_message = self._append_composition_context(user_message, composition_signals)
+
         response = await self.llm_service.complete(
-            system_prompt=self._build_system_prompt(),
+            system_prompt=self._build_system_prompt(
+                source_context=source_context,
+                has_composition_signals=bool(composition_signals),
+            ),
             user_message=user_message,
             temperature=0.1,
             max_tokens=1500,
             response_format="json",
         )
+        tokens_used += int(response.total_tokens or 0)
+        provider_used = response.provider_used or provider_used
         await self._record_provider_usage(response.provider_used)
-        kept, filtered_count, nothing_to_extract = self._parse_and_validate_response(response.content)
+        kept, pending, filtered_count, nothing_to_extract = self._parse_and_validate_response(response.content)
         LOGGER.info(
             "extraction_completed",
             extra={
@@ -112,21 +143,25 @@ class ExtractionService:
                 "tenant_id": tenant_id,
                 "proxy_user_id": resolved_user_id,
                 "job_id": job_id,
-                "provider_used": response.provider_used,
+                "provider_used": provider_used,
+                "compositional_pass": bool(composition_signals),
                 "memories_extracted": len(kept),
                 "memories_filtered": filtered_count,
+                "pending_candidates": len(pending),
                 "tokens_used": response.total_tokens,
             },
         )
         return ExtractionResult(
             memories_extracted=len(kept),
             memories_filtered=filtered_count,
+            pending_candidates_count=len(pending),
             conflicts_resolved=0,
             nothing_to_extract=nothing_to_extract,
-            tokens_used=int(response.total_tokens or 0),
-            provider_used=response.provider_used,
+            tokens_used=tokens_used,
+            provider_used=provider_used or "unknown",
             job_id=str(job_id or ""),
             memories_to_store=kept,
+            pending_candidates=pending,
         )
 
     async def _record_provider_usage(self, provider: str | None) -> None:
@@ -155,6 +190,7 @@ class ExtractionService:
         job_id: str | None = None,
         existing_memories: list[Any] | None = None,
         user_id: str | None = None,
+        source_context: dict[str, Any] | None = None,
     ) -> ExtractionResult:
         return asyncio.run(
             self.extract(
@@ -164,10 +200,16 @@ class ExtractionService:
                 job_id=job_id,
                 existing_memories=existing_memories,
                 user_id=user_id,
+                source_context=source_context,
             )
         )
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(
+        self,
+        *,
+        source_context: dict[str, Any] | None = None,
+        has_composition_signals: bool = False,
+    ) -> str:
         categories = "\n".join(
             f"- {category}: {definition.strip()}"
             for category, definition in self._category_definitions.items()
@@ -182,8 +224,10 @@ class ExtractionService:
             f"{self._importance_rubric.strip()}\n\n"
             "Never store:\n"
             f"{never_store}\n\n"
-            f"Only extract memories with confidence >= {self._confidence_threshold:.2f}. "
-            "Discard anything below this threshold.\n\n"
+            f"Extract strong memories with confidence >= {self._confidence_threshold:.2f}. "
+            f"Also return borderline candidates with confidence >= {self._pending_confidence_threshold:.2f}; "
+            "MemoryOS will hold those as pending candidates instead of storing them permanently. "
+            f"Discard anything below {self._pending_confidence_threshold:.2f}.\n\n"
             "Return exactly this JSON shape:\n"
             '{\n'
             '  "memories": [\n'
@@ -201,7 +245,107 @@ class ExtractionService:
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
+        if source_context:
+            prompt += (
+                "\n\nAUTHENTICATED SERVICE EVENT MODE\n"
+                "This payload was deliberately submitted by a registered backend service. "
+                "Declarative statements from the service are authoritative observations, "
+                "even when represented with the assistant role. Extract durable customer "
+                "facts asserted by the service, but never extract questions, instructions, "
+                "speculation, credentials, or unsupported implications. Canonicalize the "
+                "result as a fact about the user/customer."
+            )
+        if has_composition_signals:
+            prompt += (
+                "\n\nCOMPOSITIONAL EXTRACTION MODE\n"
+                "The user message includes compact entity and relationship hints from an earlier pass. "
+                "Use those hints only when they are directly supported by the transcript. "
+                "They are not memories by themselves. Convert supported cross-message relationships "
+                "into clean, atomic memories and discard unsupported hints."
+            )
         return prompt
+
+    @staticmethod
+    def _should_run_compositional_pass(
+        *,
+        messages: list[dict[str, Any]],
+        conversation: str,
+        source_context: dict[str, Any] | None,
+    ) -> bool:
+        if source_context:
+            return False
+        if len(messages) < COMPOSITIONAL_MIN_MESSAGES:
+            return False
+        user_messages = sum(1 for message in messages if str(message.get("role") or "").lower() == "user")
+        return user_messages >= COMPOSITIONAL_MIN_USER_MESSAGES and len(conversation) >= COMPOSITIONAL_MIN_CHARS
+
+    @staticmethod
+    def _build_composition_system_prompt() -> str:
+        return (
+            "You are the first pass in a two-pass memory extraction pipeline. "
+            "Find entities and relationships that are spread across multiple turns. "
+            "Do not create memories. Do not infer beyond the transcript. Return JSON only.\n\n"
+            "Return exactly this JSON shape:\n"
+            '{"entities":[{"name":"string","type":"person|project|company|tool|role|goal|preference|other","evidence":"short quote or turn summary"}],'
+            '"relationships":[{"subject":"string","relation":"string","object":"string","evidence":"short quote or turn summary","confidence":0.0}],'
+            '"notes":"optional string"}'
+        )
+
+    @staticmethod
+    def _parse_composition_response(raw_content: str) -> dict[str, Any]:
+        try:
+            data = json.loads(raw_content or "{}")
+        except json.JSONDecodeError:
+            LOGGER.warning("composition_pass_invalid_json", extra={"event": "composition_pass_invalid_json"})
+            return {}
+        if not isinstance(data, dict):
+            return {}
+
+        entities = [item for item in data.get("entities") or [] if isinstance(item, dict)][:12]
+        relationships = [item for item in data.get("relationships") or [] if isinstance(item, dict)][:12]
+        if not entities and not relationships:
+            return {}
+        return {"entities": entities, "relationships": relationships}
+
+    @staticmethod
+    def _append_composition_context(user_message: str, signals: dict[str, Any]) -> str:
+        lines = [
+            user_message,
+            "",
+            "Compositional extraction hints from pass 1 (use only if supported by transcript):",
+        ]
+        for entity in signals.get("entities") or []:
+            name = str(entity.get("name") or "").strip()
+            entity_type = str(entity.get("type") or "other").strip()
+            evidence = str(entity.get("evidence") or "").strip()
+            if name:
+                lines.append(f"- entity: {name} ({entity_type}) evidence: {evidence[:160]}")
+        for relation in signals.get("relationships") or []:
+            subject = str(relation.get("subject") or "").strip()
+            predicate = str(relation.get("relation") or "").strip()
+            obj = str(relation.get("object") or "").strip()
+            confidence = relation.get("confidence", "")
+            evidence = str(relation.get("evidence") or "").strip()
+            if subject and predicate and obj:
+                lines.append(f"- relationship: {subject} --{predicate}--> {obj} confidence: {confidence} evidence: {evidence[:160]}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _prepend_source_context(
+        conversation: str,
+        source_context: dict[str, Any] | None,
+    ) -> str:
+        if not source_context:
+            return conversation
+        service = str(source_context.get("service") or "registered-service")
+        observed_at = str(source_context.get("observed_at") or "")
+        return (
+            "Authenticated backend observation\n"
+            f"Service: {service}\n"
+            f"Observed at: {observed_at}\n"
+            "Treat declarative service statements as observed customer facts.\n\n"
+            f"{conversation}"
+        )
 
     def _build_conversation_string(self, messages: list[dict[str, Any]]) -> str:
         retained: list[dict[str, Any]] = []
@@ -240,7 +384,10 @@ class ExtractionService:
                 lines.append(f"- [{category}] {content}")
         return "\n".join(lines)
 
-    def _parse_and_validate_response(self, raw_content: str) -> tuple[list[ExtractedMemory], int, bool]:
+    def _parse_and_validate_response(
+        self,
+        raw_content: str,
+    ) -> tuple[list[ExtractedMemory], list[PendingExtractedMemory], int, bool]:
         try:
             data = json.loads(raw_content or "{}")
         except json.JSONDecodeError as exc:
@@ -252,18 +399,34 @@ class ExtractionService:
 
         raw_memories = data.get("memories") or []
         if data.get("nothing_to_extract"):
-            return [], len(raw_memories), True
+            return [], [], len(raw_memories), True
         if not isinstance(raw_memories, list):
             raise ExtractionError("LLM extraction response has non-list memories field")
 
         kept: list[ExtractedMemory] = []
+        pending: list[PendingExtractedMemory] = []
+        invalid_count = 0
         for raw_memory in raw_memories:
             candidate = self._coerce_memory(raw_memory)
-            if candidate is not None:
-                kept.append(candidate)
-        return kept, len(raw_memories) - len(kept), False
+            if candidate is None:
+                invalid_count += 1
+                continue
+            if candidate.confidence >= self._confidence_threshold:
+                kept.append(
+                    ExtractedMemory(
+                        content=candidate.content,
+                        category=candidate.category,  # type: ignore[arg-type]
+                        importance_score=candidate.importance_score,
+                        confidence=candidate.confidence,
+                        expiry="permanent",
+                        reasoning=candidate.reasoning,
+                    )
+                )
+            else:
+                pending.append(candidate)
+        return kept, pending, invalid_count, False
 
-    def _coerce_memory(self, raw_memory: Any) -> ExtractedMemory | None:
+    def _coerce_memory(self, raw_memory: Any) -> PendingExtractedMemory | None:
         if not isinstance(raw_memory, dict):
             return None
 
@@ -276,7 +439,7 @@ class ExtractionService:
         except (TypeError, ValueError):
             return None
 
-        if confidence < self._confidence_threshold:
+        if confidence < self._pending_confidence_threshold:
             return None
         if importance_score < 2.0:
             return None
@@ -288,17 +451,15 @@ class ExtractionService:
             content = content[:500].rstrip()
 
         try:
-            return ExtractedMemory(
+            return PendingExtractedMemory(
                 content=content,
-                category=category,  # type: ignore[arg-type]
+                category=category,
                 importance_score=max(1.0, min(10.0, importance_score)),
                 confidence=max(0.0, min(1.0, confidence)),
-                expiry="permanent",
                 reasoning=reasoning,
             )
-        except ValidationError:
+        except (TypeError, ValueError):
             return None
-
     @classmethod
     def _load_spec(cls, spec_path: Path) -> ParsedExtractionSpec:
         if cls._cached_spec is not None and cls._cached_spec_path == spec_path:
@@ -383,3 +544,7 @@ class ExtractionService:
 
 
 __all__ = ["ExtractionError", "ExtractionService", "ExtractionResult", "ParsedExtractionSpec"]
+
+
+
+
