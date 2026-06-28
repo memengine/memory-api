@@ -53,7 +53,7 @@ class ExtractionService:
                 self._extract_chunk(chunk, user_id=user_id, chunk_index=chunk_index)
             )
 
-        processed = self._postprocess_memories(extracted_memories)
+        processed = self._postprocess_memories(extracted_memories, messages=messages)
         return [memory for memory in processed if memory.confidence >= MIN_CONFIDENCE]
 
     def _extract_chunk(
@@ -412,12 +412,17 @@ class ExtractionService:
         return SequenceMatcher(None, left_text, right_text).ratio() >= 0.72
 
     @classmethod
-    def _postprocess_memories(cls, memories: list[ExtractedMemory]) -> list[ExtractedMemory]:
+    def _postprocess_memories(
+        cls,
+        memories: list[ExtractedMemory],
+        messages: list[dict[str, Any]] | None = None,
+    ) -> list[ExtractedMemory]:
+        user_evidence_text = cls._user_evidence_text(messages or [])
         normalized = [cls._normalize_memory(memory) for memory in memories]
         filtered = [
             memory
             for memory in normalized
-            if not cls._should_drop_memory(memory, normalized)
+            if not cls._should_drop_memory(memory, normalized, user_evidence_text)
         ]
 
         deduped: list[ExtractedMemory] = []
@@ -484,6 +489,7 @@ class ExtractionService:
         cls,
         memory: ExtractedMemory,
         all_memories: list[ExtractedMemory],
+        user_evidence_text: str = "",
     ) -> bool:
         lower = memory.content.lower()
 
@@ -494,6 +500,15 @@ class ExtractionService:
             "has explored using ",
         )
         if any(pattern in lower for pattern in temporary_problem_patterns):
+            return True
+
+        if cls._is_assistant_instruction_memory(lower):
+            return True
+
+        if cls._is_vague_low_information_memory(lower):
+            return True
+
+        if cls._looks_unsupported_by_user(memory, user_evidence_text):
             return True
 
         tentative_patterns = (
@@ -534,6 +549,136 @@ class ExtractionService:
                 return True
 
         return False
+
+    @staticmethod
+    def _user_evidence_text(messages: list[dict[str, Any]]) -> str:
+        return " ".join(
+            str(message.get("content", "")).strip()
+            for message in messages
+            if str(message.get("role", "user")).lower() == "user"
+        ).lower()
+
+    @staticmethod
+    def _is_assistant_instruction_memory(lower_content: str) -> bool:
+        instruction_patterns = (
+            "user should ",
+            "user needs to ",
+            "user must ",
+            "user has to ",
+            "user was advised to ",
+            "user was told to ",
+            "user's assignment is ",
+            "user has an assignment to ",
+        )
+        return any(pattern in lower_content for pattern in instruction_patterns)
+
+    @staticmethod
+    def _is_vague_low_information_memory(lower_content: str) -> bool:
+        vague_patterns = (
+            "new project related to ",
+            "project related to ",
+            "something related to ",
+            "work related to ",
+            "is interested in something",
+            "is working on something",
+            "mentioned something",
+            "talked about something",
+        )
+        if any(pattern in lower_content for pattern in vague_patterns):
+            return True
+
+        vague_project_match = re.search(
+            r"\buser (?:is |has been )?(?:building|working on|starting|planning) "
+            r"(?:a |an |the )?(?:new )?project\b",
+            lower_content,
+        )
+        if not vague_project_match:
+            return False
+
+        concrete_signals = (
+            "using ",
+            "with ",
+            "for ",
+            "repository",
+            "github",
+            "deployed",
+            "built ",
+            "classified",
+            "predict",
+            "pipeline",
+        )
+        return not any(signal in lower_content for signal in concrete_signals)
+
+    @classmethod
+    def _looks_unsupported_by_user(cls, memory: ExtractedMemory, user_evidence_text: str) -> bool:
+        if not user_evidence_text:
+            return False
+
+        lower = memory.content.lower()
+        # Only apply this conservative evidence check to memories that commonly
+        # come from assistant advice or broad inference. Concrete memories still
+        # pass through the normal quality filters.
+        risky_starts = (
+            "user should ",
+            "user needs to ",
+            "user must ",
+            "user has to ",
+            "user plans to ",
+            "user wants to ",
+            "user's next step ",
+        )
+        if not lower.startswith(risky_starts):
+            return False
+
+        memory_tokens = cls._significant_tokens(lower)
+        evidence_tokens = cls._significant_tokens(user_evidence_text)
+        if not memory_tokens or not evidence_tokens:
+            return False
+
+        overlap = memory_tokens & evidence_tokens
+        return len(overlap) < 2
+
+    @staticmethod
+    def _significant_tokens(text: str) -> set[str]:
+        stop_words = {
+            "about",
+            "after",
+            "again",
+            "also",
+            "because",
+            "before",
+            "being",
+            "could",
+            "from",
+            "have",
+            "into",
+            "just",
+            "more",
+            "need",
+            "needs",
+            "next",
+            "only",
+            "should",
+            "that",
+            "their",
+            "there",
+            "this",
+            "user",
+            "using",
+            "want",
+            "wants",
+            "what",
+            "when",
+            "where",
+            "with",
+            "work",
+            "working",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]{2,}", text.lower())
+            if token not in stop_words
+        }
 
     @staticmethod
     def _postprocess_overlap(left: ExtractedMemory, right: ExtractedMemory) -> bool:
