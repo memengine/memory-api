@@ -6,6 +6,9 @@ from api.db.models import UniversalMemory
 from api.db.models import UniversalMemoryClaim
 from api.db.models import UniversalMemoryClaimRevision
 from api.services.claim_ledger_service import build_claim_identity
+from api.services.claim_versions import CLAIM_PROCESSOR_VERSION
+from api.services.claim_versions import CLAIM_SCHEMA_VERSION
+from api.services.claim_versions import PASSPORT_BACKFILL_PROCESSOR_VERSION
 from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
 
 
@@ -61,6 +64,8 @@ def test_first_passport_assertion_becomes_active_claim() -> None:
     assert claim.active_memory_id == item.id
     assert claim.status == "active"
     assert revision.status == "activated"
+    assert revision.schema_version == CLAIM_SCHEMA_VERSION
+    assert revision.processor_version == CLAIM_PROCESSOR_VERSION
 
 
 def test_conflicting_agent_assertion_is_audited_but_not_retrievable() -> None:
@@ -154,6 +159,10 @@ def test_backfill_advances_only_backfill_managed_claim_to_newer_legacy_memory() 
     assert claim.active_value == "growth"
     assert older_revision.status == "superseded"
     assert newer_revision.status == "activated"
+    assert newer_revision.schema_version == CLAIM_SCHEMA_VERSION
+    assert newer_revision.processor_version == PASSPORT_BACKFILL_PROCESSOR_VERSION
+    assert newer_revision.schema_version == CLAIM_SCHEMA_VERSION
+    assert newer_revision.processor_version == PASSPORT_BACKFILL_PROCESSOR_VERSION
     assert older.is_archived is False
     assert newer.is_archived is False
 
