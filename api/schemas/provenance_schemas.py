@@ -27,7 +27,9 @@ class AuthorityRules(BaseModel):
 
 
 class ServiceWriterCreateRequest(BaseModel):
-    service_key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    service_key: str = Field(
+        min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._-]*$"
+    )
     display_name: str = Field(min_length=1, max_length=200)
     api_key_id: str | None = None
     authority_rules: AuthorityRules = Field(default_factory=AuthorityRules)
@@ -77,3 +79,54 @@ class MemorySourceEventData(BaseModel):
 
 class MemorySourceEventListResponse(ResponseEnvelope):
     data: list[MemorySourceEventData]
+
+
+class MemoryClaimRevisionData(BaseModel):
+    id: str
+    memory_id: str | None = None
+    source_event_id: str | None = None
+    source_writer_id: str | None = None
+    source_domain: str | None = None
+    source_domain_record_id: str | None = None
+    source_field: str | None = None
+    source_service: str | None = None
+    source_event_key: str | None = None
+    asserted_value: str
+    status: str
+    authority_priority: int
+    confidence_score: float
+    observed_at: datetime | None = None
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    resolution_reason: str | None = None
+    schema_version: int = 1
+    processor_version: str = "legacy"
+    created_at: datetime
+
+
+class MemoryClaimData(BaseModel):
+    id: str
+    external_user_id: str
+    category: str
+    claim_fingerprint: str
+    subject_key: str
+    predicate_key: str
+    scope: dict[str, Any] = Field(default_factory=dict)
+    active_value: str | None = None
+    status: str
+    active_memory_id: str | None = None
+    winning_revision_id: str | None = None
+    authority_priority: int
+    confidence_score: float
+    observed_at: datetime | None = None
+    effective_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    revisions: list[MemoryClaimRevisionData] = Field(default_factory=list)
+
+
+class MemoryClaimListResponse(ResponseEnvelope):
+    data: list[MemoryClaimData]
+
+
+class MemoryClaimResponse(ResponseEnvelope):
+    data: MemoryClaimData
