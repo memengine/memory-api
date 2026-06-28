@@ -17,40 +17,67 @@ def build_edtech_universal_projections(memory: EdTechMemory) -> list[DomainMemor
     record_id = str(memory.id)
     projections: list[DomainMemoryProjection] = []
 
-    if memory.grade_level:
+    learner_type = getattr(memory, "learner_type", None)
+    if learner_type:
+        projections.append(
+            _projection(
+                record_id,
+                "learner_profile.learner_type",
+                f"Learner type is {learner_type.replace('_', ' ')}.",
+                "fact",
+                8.0,
+            )
+        )
+
+    primary_goal = getattr(memory, "primary_goal", None)
+    if primary_goal:
+        projections.append(
+            _projection(
+                record_id,
+                "learner_profile.primary_goal",
+                f"Learning goal: {primary_goal}.",
+                "goal",
+                8.5,
+            )
+        )
+
+    grade_level = getattr(memory, "grade_level", None)
+    if grade_level:
         projections.append(
             _projection(
                 record_id,
                 "academic_profile.grade_level",
-                f"Student is in {memory.grade_level}.",
+                f"Student is in {grade_level}.",
                 "fact",
                 7.0,
             )
         )
 
-    if memory.board_or_curriculum:
+    board_or_curriculum = getattr(memory, "board_or_curriculum", None)
+    if board_or_curriculum:
         projections.append(
             _projection(
                 record_id,
                 "academic_profile.board_or_curriculum",
-                f"Student follows {memory.board_or_curriculum}.",
+                f"Student follows {board_or_curriculum}.",
                 "fact",
                 6.5,
             )
         )
 
-    if memory.exam_name:
+    deadline_event = getattr(memory, "primary_deadline_event", None) or getattr(memory, "exam_name", None)
+    if deadline_event:
         projections.append(
             _projection(
                 record_id,
-                "exam_context.exam_name",
-                f"Student is preparing for {memory.exam_name}.",
+                "deadline_context.primary_event",
+                f"Student is preparing for {deadline_event}.",
                 "goal",
                 8.0,
             )
         )
 
-    explanation_style = memory.explanation_style or {}
+    explanation_style = getattr(memory, "explanation_style", None) or {}
     primary_style = _string_value(explanation_style.get("primary"))
     if primary_style:
         projections.append(
@@ -63,7 +90,7 @@ def build_edtech_universal_projections(memory: EdTechMemory) -> list[DomainMemor
             )
         )
 
-    language_profile = memory.language_profile or {}
+    language_profile = getattr(memory, "language_profile", None) or {}
     language_preference = _string_value(
         language_profile.get("explanation_preference")
         or language_profile.get("primary")
@@ -80,7 +107,7 @@ def build_edtech_universal_projections(memory: EdTechMemory) -> list[DomainMemor
             )
         )
 
-    for topic_record in _top_topic_records(memory.strong_topics, limit=3):
+    for topic_record in _top_topic_records(getattr(memory, "strong_topics", None), limit=3):
         topic = _topic_name(topic_record)
         if not topic:
             continue
@@ -95,7 +122,7 @@ def build_edtech_universal_projections(memory: EdTechMemory) -> list[DomainMemor
             )
         )
 
-    for topic_record in _top_topic_records(memory.weak_topics, limit=3):
+    for topic_record in _top_topic_records(getattr(memory, "weak_topics", None), limit=3):
         topic = _topic_name(topic_record)
         if not topic:
             continue
