@@ -19,6 +19,8 @@ class CrossUserConflictData(BaseModel):
     user_b_id: str | None = None
     memory_a_content: str | None = None
     memory_b_content: str | None = None
+    source_service_a: str | None = None
+    source_service_b: str | None = None
     memory_a_created_at: datetime | None = None
     memory_b_created_at: datetime | None = None
     detected_at: datetime
