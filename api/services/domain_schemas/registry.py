@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from api.services.domain_schemas.base import BaseDomainSchema
 from api.services.domain_schemas.edtech import EdTechDomainSchema
+from api.services.domain_schemas.support import SupportDomainSchema
 
 
 DOMAIN_SCHEMAS: dict[str, BaseDomainSchema] = {
     "edtech": EdTechDomainSchema(),
+    "support": SupportDomainSchema(),
 }
 
 
