@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+import uuid
 from typing import Any
 from typing import Literal
 
@@ -35,11 +37,26 @@ class ConversationMessageRequest(BaseModel):
         return stripped
 
 
+class EvidenceReferenceRequest(BaseModel):
+    source_type: str = Field(min_length=1, max_length=50)
+    reference: str = Field(min_length=1, max_length=500)
+    content_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class MemorySourceRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=255)
+    service: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    observed_at: datetime
+    scope: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[EvidenceReferenceRequest] = Field(default_factory=list, max_length=20)
+
+
 class MemoryAddRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     agent_id: str | None = None
     messages: list[ConversationMessageRequest] = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    source: MemorySourceRequest | None = None
 
 
 class MemoryRetrieveRequest(BaseModel):
@@ -51,6 +68,35 @@ class MemoryRetrieveRequest(BaseModel):
     time_filter_days: int | None = Field(default=None, ge=1, le=3650)
     format: MemoryFormat = "bullets"
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
+
+
+RetrievalFeedbackOutcome = Literal[
+    "used_successfully",
+    "used_partially",
+    "ignored",
+    "not_useful",
+    "user_corrected",
+    "clarification_needed",
+]
+
+
+class RetrievalFeedbackRequest(BaseModel):
+    retrieval_id: uuid.UUID
+    outcome: RetrievalFeedbackOutcome
+    used_memory_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+    correction: str | None = Field(default=None, min_length=1, max_length=4000)
+    agent_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("correction")
+    @classmethod
+    def strip_correction(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Correction must not be empty when provided.")
+        return stripped
 
 
 class MemoryUpdateRequest(BaseModel):
