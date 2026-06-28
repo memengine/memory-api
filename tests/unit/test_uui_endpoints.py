@@ -53,7 +53,11 @@ def test_send_otp_endpoint_returns_sent(monkeypatch) -> None:
     async def fake_send_otp(self, email: str):
         return email == "alex@example.com"
 
+    async def fake_resolve_by_email(self, email: str):
+        return SimpleNamespace(email=email)
+
     monkeypatch.setattr(UUIService, "is_otp_rate_limited", fake_is_rate_limited)
+    monkeypatch.setattr(UUIService, "resolve_by_email", fake_resolve_by_email)
     monkeypatch.setattr(UUIService, "send_otp", fake_send_otp)
 
     with TestClient(app) as client:
@@ -78,6 +82,26 @@ def test_send_otp_endpoint_rate_limited(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["sent"] is False
     assert response.json()["data"]["reason"] == "rate_limited"
+
+
+def test_send_otp_endpoint_explains_missing_passport(monkeypatch) -> None:
+    app = _build_test_app()
+
+    async def fake_is_rate_limited(self, email: str):
+        return False
+
+    async def fake_resolve_by_email(self, email: str):
+        return None
+
+    monkeypatch.setattr(UUIService, "is_otp_rate_limited", fake_is_rate_limited)
+    monkeypatch.setattr(UUIService, "resolve_by_email", fake_resolve_by_email)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/uui/otp/send", json={"email": "new@example.com"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["sent"] is False
+    assert response.json()["data"]["reason"] == "passport_not_found"
 
 
 def test_verify_otp_endpoint_returns_session_token(monkeypatch) -> None:
