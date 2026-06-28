@@ -17,7 +17,6 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 from sqlalchemy import Float
-from sqlalchemy import Numeric
 from sqlalchemy import String
 from sqlalchemy import and_
 from sqlalchemy import case
@@ -44,6 +43,7 @@ from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import GlobalAgent
 from api.db.models import Memory
+from api.db.models import OrganisationDirectory
 from api.db.models import OveragePolicy
 from api.db.models import PermissionGrant
 from api.db.models import PlanTier
@@ -51,6 +51,7 @@ from api.db.models import ProxyUser
 from api.db.models import QuotaMode
 from api.db.models import Tenant
 from api.db.models import TenantBudget
+from api.db.models import VerifiedOrgConnection
 from api.config.plan_limits import apply_plan_limits
 from api.dependencies import get_cache_service
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
@@ -61,6 +62,8 @@ from api.schemas.internal_schemas import AllTenantsResponse
 from api.schemas.internal_schemas import AuditLogsResponse
 from api.schemas.internal_schemas import BackfillJobResponse
 from api.schemas.internal_schemas import CircuitStatus
+from api.schemas.internal_schemas import ClaimVersionBucket
+from api.schemas.internal_schemas import ClaimVersionDistributionResponse
 from api.schemas.internal_schemas import CostSummaryResponse
 from api.schemas.internal_schemas import CostSummaryTenant
 from api.schemas.internal_schemas import DeadLetterDiscardResponse
@@ -68,9 +71,15 @@ from api.schemas.internal_schemas import GlobalAgentVerificationRecord
 from api.schemas.internal_schemas import GlobalAgentVerificationResponse
 from api.schemas.internal_schemas import GlobalAgentVerificationUpdateRequest
 from api.schemas.internal_schemas import InternalTenantRecord
+from api.schemas.internal_schemas import OrganisationVerificationRecord
+from api.schemas.internal_schemas import OrganisationVerificationResponse
+from api.schemas.internal_schemas import OrganisationVerificationUpdateRequest
 from api.schemas.internal_schemas import QueueStatus
 from api.schemas.internal_schemas import ProviderUsageData
 from api.schemas.internal_schemas import ProviderUsageResponse
+from api.schemas.internal_schemas import ProvenanceHealthResponse
+from api.schemas.internal_schemas import ProvenanceIssueRecord
+from api.schemas.internal_schemas import ProvenanceIssuesResponse
 from api.schemas.internal_schemas import QualitySummary
 from api.schemas.internal_schemas import RecentExtractionJob
 from api.schemas.internal_schemas import SystemHealthResponse
@@ -81,10 +90,14 @@ from api.schemas.internal_schemas import TenantBudgetRecord
 from api.schemas.internal_schemas import TenantSummary
 from api.schemas.lifecycle_schemas import LifecycleReportsResponse
 from api.schemas.tenant_schemas import TenantUsageData
+from api.services.claim_versions import CLAIM_PROCESSOR_VERSION
+from api.services.claim_versions import CLAIM_SCHEMA_VERSION
 from api.services.embedding_service import EmbeddingService
 from api.services.llm_service import get_llm_provider_health
 from api.services.quota_manager import QuotaManager
 from api.tasks.backfill_tasks import run_backfill_proxy_user_ids
+from api.tasks.backfill_tasks import run_backfill_tenant_provenance
+from api.tasks.backfill_tasks import run_backfill_universal_provenance
 from api.tasks.extraction_tasks import EXTRACTION_TASK_NAME
 from api.tasks.queue_router import ENTERPRISE_QUEUE
 from api.tasks.queue_router import FREE_QUEUE
@@ -330,6 +343,261 @@ async def _get_system_health(cache_service: CacheService) -> SystemHealthRespons
         generated_at=_utc_now(),
     )
 
+
+PROVENANCE_HEALTH_CACHE_KEY = "internal:provenance-health:v3"
+PROVENANCE_HEALTH_CACHE_SECONDS = 60
+
+
+async def _get_provenance_health(
+    session: AsyncSession,
+    cache_service: CacheService,
+) -> ProvenanceHealthResponse:
+    try:
+        cached = await cache_service.client.get(PROVENANCE_HEALTH_CACHE_KEY)
+        if cached:
+            return ProvenanceHealthResponse.model_validate_json(cached)
+    except Exception:
+        # Redis health is reported separately; operators still need database visibility.
+        pass
+
+    result = await session.execute(
+        text(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM memories WHERE is_archived = false)
+                AS tenant_memories_total,
+              (SELECT COUNT(DISTINCT r.memory_id)
+                 FROM memory_claim_revisions r
+                 JOIN memories m ON m.id = r.memory_id
+                WHERE r.memory_id IS NOT NULL AND m.is_archived = false)
+                AS tenant_memories_with_provenance,
+              (SELECT COUNT(*) FROM universal_memories WHERE is_archived = false)
+                AS passport_memories_total,
+              (SELECT COUNT(DISTINCT r.universal_memory_id)
+                 FROM universal_memory_claim_revisions r
+                 JOIN universal_memories m ON m.id = r.universal_memory_id
+                WHERE r.universal_memory_id IS NOT NULL AND m.is_archived = false)
+                AS passport_memories_with_provenance,
+              (SELECT COUNT(*) FROM memory_claims WHERE status = 'disputed')
+                AS tenant_claims_disputed,
+              (SELECT COUNT(*) FROM universal_memory_claims WHERE status = 'disputed')
+                AS passport_claims_disputed,
+              (SELECT COUNT(DISTINCT r.universal_memory_id)
+                 FROM universal_memory_claim_revisions r
+                 JOIN permission_grants g ON g.id = r.permission_grant_id
+                WHERE r.universal_memory_id IS NOT NULL
+                  AND (g.is_active = false OR g.revoked_at IS NOT NULL))
+                AS revoked_grant_memories,
+              (SELECT COUNT(*) FROM memory_claim_revisions r
+                 JOIN memory_source_events e ON e.id = r.source_event_id
+                WHERE r.source_writer_id IS NULL AND e.writer_id IS NULL)
+                AS missing_service_writers,
+              (SELECT COUNT(DISTINCT r.memory_id) FROM memory_claim_revisions r
+                 JOIN memories m ON m.id = r.memory_id
+                WHERE r.resolution_reason = 'legacy_unknown' AND m.is_archived = false)
+                AS tenant_legacy_unknown_memories,
+              (SELECT COUNT(*) FROM universal_memory_claim_revisions
+                WHERE (source_type = 'passport_agent' AND source_agent_id IS NULL)
+                   OR (source_type = 'org_connection' AND source_org_connection_id IS NULL))
+                AS missing_passport_sources,
+              (SELECT COUNT(*) FROM backfill_jobs
+                WHERE (task_name LIKE 'backfill_universal_provenance%' OR task_name LIKE 'backfill_tenant_provenance%')
+                  AND status = 'failed'
+                  AND started_at >= NOW() - INTERVAL '30 days')
+                AS failed_backfills_30d
+            """
+        )
+    )
+    row = result.mappings().one()
+    tenant_total = int(row["tenant_memories_total"] or 0)
+    tenant_covered = int(row["tenant_memories_with_provenance"] or 0)
+    passport_total = int(row["passport_memories_total"] or 0)
+    passport_covered = int(row["passport_memories_with_provenance"] or 0)
+    memories_total = tenant_total + passport_total
+    memories_with_provenance = tenant_covered + passport_covered
+
+    def coverage(covered: int, total: int) -> float:
+        return round((covered / total) * 100, 2) if total > 0 else 100.0
+
+    tenant_coverage_pct = coverage(tenant_covered, tenant_total)
+    passport_coverage_pct = coverage(passport_covered, passport_total)
+    coverage_pct = coverage(memories_with_provenance, memories_total)
+    issue_count = sum(
+        int(row[name] or 0)
+        for name in (
+            "tenant_claims_disputed",
+            "passport_claims_disputed",
+            "missing_service_writers",
+            "tenant_legacy_unknown_memories",
+            "missing_passport_sources",
+            "failed_backfills_30d",
+        )
+    )
+    status_value = "HEALTHY"
+    if min(tenant_coverage_pct, passport_coverage_pct) < 95 or int(row["failed_backfills_30d"] or 0) > 0:
+        status_value = "CRITICAL"
+    elif min(tenant_coverage_pct, passport_coverage_pct) < 100 or issue_count > 0 or int(row["revoked_grant_memories"] or 0) > 0:
+        status_value = "ATTENTION"
+
+    response = ProvenanceHealthResponse(
+        memories_total=memories_total,
+        memories_with_provenance=memories_with_provenance,
+        coverage_pct=coverage_pct,
+        tenant_memories_total=tenant_total,
+        tenant_memories_with_provenance=tenant_covered,
+        tenant_coverage_pct=tenant_coverage_pct,
+        passport_memories_total=passport_total,
+        passport_memories_with_provenance=passport_covered,
+        passport_coverage_pct=passport_coverage_pct,
+        tenant_claims_disputed=int(row["tenant_claims_disputed"] or 0),
+        passport_claims_disputed=int(row["passport_claims_disputed"] or 0),
+        revoked_grant_memories=int(row["revoked_grant_memories"] or 0),
+        missing_service_writers=int(row["missing_service_writers"] or 0),
+        tenant_legacy_unknown_memories=int(row["tenant_legacy_unknown_memories"] or 0),
+        missing_passport_sources=int(row["missing_passport_sources"] or 0),
+        failed_backfills_30d=int(row["failed_backfills_30d"] or 0),
+        status=status_value,
+        generated_at=_utc_now(),
+    )
+    try:
+        await cache_service.client.set(
+            PROVENANCE_HEALTH_CACHE_KEY,
+            response.model_dump_json(),
+            ex=PROVENANCE_HEALTH_CACHE_SECONDS,
+        )
+    except Exception:
+        pass
+    return response
+
+
+async def _list_provenance_issues(
+    session: AsyncSession,
+    *,
+    issue_type: str,
+    tenant_id: str | None,
+    search: str,
+    cursor: str | None,
+    limit: int,
+) -> ProvenanceIssuesResponse:
+    normalized_type = issue_type.strip().lower()
+    if normalized_type not in {"all", "service_writer", "legacy_event", "passport_source"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_issue_type")
+    tenant_uuid: uuid.UUID | None = None
+    if tenant_id:
+        try:
+            tenant_uuid = uuid.UUID(tenant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_tenant_id") from exc
+    try:
+        offset = max(0, int(cursor or "0"))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_cursor") from exc
+    limit = max(1, min(limit, 100))
+    normalized_search = search.strip()[:100]
+
+    result = await session.execute(
+        text(
+            """
+            WITH issues AS (
+              SELECT
+                CONCAT(CASE WHEN e.api_key_id IS NULL OR e.source_service = 'api-key-legacy' THEN 'legacy_event:' ELSE 'service_writer:' END, t.id::text, ':', e.source_service, ':', COALESCE(e.api_key_id::text, 'none')) AS issue_key,
+                CASE WHEN e.api_key_id IS NULL OR e.source_service = 'api-key-legacy' THEN 'legacy_event' ELSE 'service_writer' END AS issue_type,
+                t.id AS tenant_id,
+                t.company_name AS tenant_name,
+                e.source_service AS source_label,
+                k.name AS api_key_name,
+                k.key_prefix AS api_key_prefix,
+                LEFT(MIN(e.source_event_id), 24) AS sample_reference,
+                COUNT(DISTINCT r.id)::bigint AS occurrences,
+                MIN(e.received_at) AS first_seen,
+                MAX(e.received_at) AS last_seen
+              FROM memory_claim_revisions r
+              JOIN memory_source_events e ON e.id = r.source_event_id
+              JOIN tenants t ON t.id = e.tenant_id
+              LEFT JOIN api_keys k ON k.id = e.api_key_id
+              WHERE r.source_writer_id IS NULL AND e.writer_id IS NULL
+              GROUP BY t.id, t.company_name, e.source_service, e.api_key_id, k.name, k.key_prefix, CASE WHEN e.api_key_id IS NULL OR e.source_service = 'api-key-legacy' THEN 'legacy_event' ELSE 'service_writer' END
+
+              UNION ALL
+
+              SELECT
+                CONCAT('passport_source:', COALESCE(r.source_tenant_id::text, 'none'), ':', r.source_type) AS issue_key,
+                'passport_source'::text AS issue_type,
+                r.source_tenant_id AS tenant_id,
+                COALESCE(t.company_name, 'Unknown or deleted source tenant') AS tenant_name,
+                r.source_type AS source_label,
+                NULL::text AS api_key_name,
+                NULL::text AS api_key_prefix,
+                LEFT(MIN(r.id::text), 12) AS sample_reference,
+                COUNT(*)::bigint AS occurrences,
+                MIN(r.created_at) AS first_seen,
+                MAX(r.created_at) AS last_seen
+              FROM universal_memory_claim_revisions r
+              LEFT JOIN tenants t ON t.id = r.source_tenant_id
+              WHERE (r.source_type = 'passport_agent' AND r.source_agent_id IS NULL)
+                 OR (r.source_type = 'org_connection' AND r.source_org_connection_id IS NULL)
+              GROUP BY r.source_tenant_id, t.company_name, r.source_type
+            ), filtered AS (
+              SELECT * FROM issues
+              WHERE (:issue_type = 'all' OR issue_type = :issue_type)
+                AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS uuid))
+                AND (
+                  :search = ''
+                  OR tenant_name ILIKE :search_pattern
+                  OR source_label ILIKE :search_pattern
+                  OR COALESCE(api_key_name, '') ILIKE :search_pattern
+                )
+            )
+            SELECT *, COUNT(*) OVER() AS total_count
+            FROM filtered
+            ORDER BY last_seen DESC, issue_key ASC
+            LIMIT :limit OFFSET :offset
+            """
+        ),
+        {
+            "issue_type": normalized_type,
+            "tenant_id": str(tenant_uuid) if tenant_uuid else None,
+            "search": normalized_search,
+            "search_pattern": f"%{normalized_search}%",
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+    rows = list(result.mappings().all())
+    total_count = int(rows[0]["total_count"] or 0) if rows else 0
+    records = [
+        ProvenanceIssueRecord(
+            issue_key=row["issue_key"],
+            issue_type=row["issue_type"],
+            tenant_id=row["tenant_id"],
+            tenant_name=row["tenant_name"],
+            source_label=row["source_label"],
+            api_key_name=row["api_key_name"],
+            api_key_prefix=row["api_key_prefix"],
+            sample_reference=row["sample_reference"],
+            occurrences=int(row["occurrences"] or 0),
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            recommended_action=(
+                "Ask the tenant to register this service writer and bind the listed API key. Existing matching events are repaired automatically."
+                if row["issue_type"] == "service_writer"
+                else (
+                    "This is legacy unattributed traffic, not a tenant registration failure. Trace the historical ingestion path and migrate it to an authenticated service writer."
+                    if row["issue_type"] == "legacy_event"
+                    else "Inspect the source tenant audit trail. Restore the deleted agent or organisation mapping only after verifying ownership."
+                )
+            ),
+        )
+        for row in rows
+    ]
+    next_cursor = str(offset + limit) if offset + limit < total_count else None
+    return ProvenanceIssuesResponse(
+        data=records,
+        next_cursor=next_cursor,
+        total_count=total_count,
+        limit=limit,
+        generated_at=_utc_now(),
+    )
 
 async def _get_provider_usage(cache_service: CacheService) -> ProviderUsageResponse:
     providers = ["gemini", "openai", "anthropic"]
@@ -1080,12 +1348,105 @@ def _global_agent_verification_record(
     )
 
 
+def _organisation_verification_record(
+    organisation: OrganisationDirectory,
+    tenant_name: str,
+    connections_count: int,
+) -> OrganisationVerificationRecord:
+    return OrganisationVerificationRecord(
+        id=organisation.id,
+        tenant_id=organisation.tenant_id,
+        tenant_name=tenant_name,
+        display_name=organisation.display_name,
+        logo_url=organisation.logo_url,
+        website_url=organisation.website_url,
+        category=organisation.category,
+        oauth_enabled=bool(organisation.oauth_enabled),
+        link_token_enabled=bool(organisation.link_token_enabled),
+        is_verified=bool(organisation.is_verified),
+        is_public=bool(organisation.is_public),
+        connections_count=int(connections_count or 0),
+        created_at=organisation.created_at,
+    )
+
+
 @router.get("/system-health", response_model=SystemHealthResponse)
 async def system_health(
     cache_service: CacheService = Depends(get_cache_service),
 ) -> SystemHealthResponse:
     return await _get_system_health(cache_service)
 
+
+@router.get("/provenance-health", response_model=ProvenanceHealthResponse)
+async def provenance_health(
+    session: AsyncSession = Depends(get_db_session),
+    cache_service: CacheService = Depends(get_cache_service),
+) -> ProvenanceHealthResponse:
+    return await _get_provenance_health(session, cache_service)
+
+
+@router.get("/provenance-issues", response_model=ProvenanceIssuesResponse)
+async def provenance_issues(
+    session: AsyncSession = Depends(get_db_session),
+    issue_type: str = "all",
+    tenant_id: str | None = None,
+    search: str = "",
+    cursor: str | None = None,
+    limit: int = 50,
+) -> ProvenanceIssuesResponse:
+    return await _list_provenance_issues(
+        session,
+        issue_type=issue_type,
+        tenant_id=tenant_id,
+        search=search,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/provenance-versions",
+    response_model=ClaimVersionDistributionResponse,
+)
+async def provenance_versions(
+    session: AsyncSession = Depends(get_db_session),
+) -> ClaimVersionDistributionResponse:
+    result = await session.execute(
+        text(
+            """
+            SELECT
+                'tenant' AS scope,
+                schema_version,
+                processor_version,
+                COUNT(*)::bigint AS revision_count
+            FROM memory_claim_revisions
+            GROUP BY schema_version, processor_version
+            UNION ALL
+            SELECT
+                'passport' AS scope,
+                schema_version,
+                processor_version,
+                COUNT(*)::bigint AS revision_count
+            FROM universal_memory_claim_revisions
+            GROUP BY schema_version, processor_version
+            ORDER BY scope, schema_version DESC, processor_version
+            """
+        )
+    )
+    return ClaimVersionDistributionResponse(
+        data=[
+            ClaimVersionBucket(
+                scope=row["scope"],
+                schema_version=int(row["schema_version"]),
+                processor_version=str(row["processor_version"]),
+                revision_count=int(row["revision_count"]),
+            )
+            for row in result.mappings().all()
+        ],
+        current_schema_version=CLAIM_SCHEMA_VERSION,
+        current_processor_version=CLAIM_PROCESSOR_VERSION,
+        generated_at=_utc_now(),
+    )
 
 @router.get("/provider-usage", response_model=ProviderUsageResponse)
 async def provider_usage(
@@ -1195,7 +1556,7 @@ async def global_agents_for_verification(
 ) -> GlobalAgentVerificationResponse:
     normalized_status = status_filter.strip().lower()
     if normalized_status not in {"pending", "verified", "all"}:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_status_filter")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_status_filter")
 
     stmt = (
         select(
@@ -1232,7 +1593,7 @@ async def update_global_agent_verification(
     try:
         parsed_agent_id = uuid.UUID(agent_id)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_agent_id") from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_agent_id") from exc
 
     result = await session.execute(
         select(
@@ -1254,6 +1615,89 @@ async def update_global_agent_verification(
     await session.commit()
     await session.refresh(agent)
     return _global_agent_verification_record(agent, tenant_name, grants_count)
+
+
+@router.get("/organisations", response_model=OrganisationVerificationResponse)
+async def organisations_for_verification(
+    session: AsyncSession = Depends(get_db_session),
+    status_filter: str = "pending",
+) -> OrganisationVerificationResponse:
+    normalized_status = status_filter.strip().lower()
+    if normalized_status not in {"pending", "verified", "all"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_status_filter")
+
+    stmt = (
+        select(
+            OrganisationDirectory,
+            Tenant.company_name.label("tenant_name"),
+            func.count(VerifiedOrgConnection.id).label("connections_count"),
+        )
+        .join(Tenant, OrganisationDirectory.tenant_id == Tenant.id)
+        .outerjoin(
+            VerifiedOrgConnection,
+            VerifiedOrgConnection.org_directory_id == OrganisationDirectory.id,
+        )
+        .group_by(OrganisationDirectory.id, Tenant.company_name)
+        .order_by(OrganisationDirectory.is_verified.asc(), OrganisationDirectory.created_at.desc())
+        .limit(250)
+    )
+    if normalized_status == "pending":
+        stmt = stmt.where(OrganisationDirectory.is_verified.is_(False))
+    elif normalized_status == "verified":
+        stmt = stmt.where(OrganisationDirectory.is_verified.is_(True))
+
+    result = await session.execute(stmt)
+    records = [
+        _organisation_verification_record(organisation, tenant_name, connections_count)
+        for organisation, tenant_name, connections_count in result.all()
+    ]
+    return OrganisationVerificationResponse(data=records, generated_at=datetime.now(UTC))
+
+
+@router.patch(
+    "/organisations/{organisation_id}/verification",
+    response_model=OrganisationVerificationRecord,
+)
+async def update_organisation_verification(
+    organisation_id: str,
+    payload: OrganisationVerificationUpdateRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> OrganisationVerificationRecord:
+    try:
+        parsed_organisation_id = uuid.UUID(organisation_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="invalid_organisation_id",
+        ) from exc
+
+    result = await session.execute(
+        select(
+            OrganisationDirectory,
+            Tenant.company_name.label("tenant_name"),
+            func.count(VerifiedOrgConnection.id).label("connections_count"),
+        )
+        .join(Tenant, OrganisationDirectory.tenant_id == Tenant.id)
+        .outerjoin(
+            VerifiedOrgConnection,
+            VerifiedOrgConnection.org_directory_id == OrganisationDirectory.id,
+        )
+        .where(OrganisationDirectory.id == parsed_organisation_id)
+        .group_by(OrganisationDirectory.id, Tenant.company_name)
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="organisation_not_found")
+
+    organisation, tenant_name, connections_count = row
+    organisation.is_verified = payload.is_verified
+    await session.commit()
+    await session.refresh(organisation)
+    return _organisation_verification_record(
+        organisation,
+        tenant_name,
+        connections_count,
+    )
 
 
 @router.get("/cross-user-conflicts", response_model=CrossUserConflictsResponse)
@@ -1501,12 +1945,12 @@ async def trigger_backfill_proxy_user_ids(
 ) -> dict[str, object]:
     if batch_size <= 0:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="batch_size must be greater than zero",
         )
     if sleep_between_batches_ms < 0:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="sleep_between_batches_ms must be zero or greater",
         )
 
@@ -1519,6 +1963,79 @@ async def trigger_backfill_proxy_user_ids(
             "task_name": "backfill_proxy_user_ids",
             "task_id": task.id,
             "status": "queued",
+            "batch_size": batch_size,
+            "sleep_between_batches_ms": sleep_between_batches_ms,
+        },
+        "request_id": get_request_id(request),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.post("/backfill/run/tenant-provenance")
+async def trigger_backfill_tenant_provenance(
+    request: Request,
+    dry_run: bool = True,
+    batch_size: int = 250,
+    sleep_between_batches_ms: int = 100,
+) -> dict[str, object]:
+    if batch_size <= 0 or batch_size > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="batch_size must be between 1 and 1000",
+        )
+    if sleep_between_batches_ms < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="sleep_between_batches_ms must be zero or greater",
+        )
+
+    task = run_backfill_tenant_provenance.delay(
+        batch_size=batch_size,
+        sleep_between_batches_ms=sleep_between_batches_ms,
+        dry_run=dry_run,
+    )
+    return {
+        "data": {
+            "task_name": "backfill_tenant_provenance_dry_run" if dry_run else "backfill_tenant_provenance",
+            "task_id": task.id,
+            "status": "queued",
+            "dry_run": dry_run,
+            "batch_size": batch_size,
+            "sleep_between_batches_ms": sleep_between_batches_ms,
+        },
+        "request_id": get_request_id(request),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+@router.post("/backfill/run/universal-provenance")
+async def trigger_backfill_universal_provenance(
+    request: Request,
+    dry_run: bool = True,
+    batch_size: int = 250,
+    sleep_between_batches_ms: int = 100,
+) -> dict[str, object]:
+    if batch_size <= 0 or batch_size > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="batch_size must be between 1 and 1000",
+        )
+    if sleep_between_batches_ms < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="sleep_between_batches_ms must be zero or greater",
+        )
+
+    task = run_backfill_universal_provenance.delay(
+        batch_size=batch_size,
+        sleep_between_batches_ms=sleep_between_batches_ms,
+        dry_run=dry_run,
+    )
+    return {
+        "data": {
+            "task_name": "backfill_universal_provenance_dry_run" if dry_run else "backfill_universal_provenance",
+            "task_id": task.id,
+            "status": "queued",
+            "dry_run": dry_run,
             "batch_size": batch_size,
             "sleep_between_batches_ms": sleep_between_batches_ms,
         },
