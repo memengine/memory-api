@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_dimensions: str = Field(default="", alias="EMBEDDING_DIMENSIONS")
     qdrant_collection: str = Field(default="", alias="QDRANT_COLLECTION")
+    extraction_payload_retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+        alias="EXTRACTION_PAYLOAD_RETENTION_DAYS",
+    )
+    oauth_credential_encryption_key: str = Field(
+        default="",
+        alias="OAUTH_CREDENTIAL_ENCRYPTION_KEY",
+    )
 
 
 @lru_cache(maxsize=1)
