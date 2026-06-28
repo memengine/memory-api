@@ -11,6 +11,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Annotated
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter
 from fastapi import BackgroundTasks
@@ -19,6 +20,7 @@ from fastapi import Depends
 from fastapi import Header
 from fastapi import Query
 from fastapi import Request
+from fastapi.responses import RedirectResponse
 from jose import JWTError
 from jose import jwt
 from sqlalchemy import desc
@@ -35,10 +37,12 @@ from api.db.models import CrossUserConflictStatus
 from api.db.models import GlobalAgent
 from api.db.models import Memory
 from api.db.models import PermissionGrant
+from api.db.models import OrganisationDirectory
 from api.db.models import UUIProxyLink
 from api.db.models import UniversalMemory
 from api.db.models import UniversalMemoryVersion
 from api.db.models import UniversalUser
+from api.db.models import VerifiedOrgConnection
 from api.dependencies import DbSession
 from api.dependencies import get_cache_service
 from api.dependencies import get_qdrant_service
@@ -47,7 +51,6 @@ from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
-from api.schemas.uui_schemas import OTPLoginResponse
 from api.schemas.uui_schemas import OTPSendData
 from api.schemas.uui_schemas import OTPSendResponse
 from api.schemas.uui_schemas import OTPVerifyData
@@ -64,6 +67,11 @@ from api.schemas.uui_schemas import EdTechTopicSummary
 from api.schemas.uui_schemas import EdTechUserProfile
 from api.schemas.uui_schemas import MemoryPreviewData
 from api.schemas.uui_schemas import MemoryPreviewResponse
+from api.schemas.uui_schemas import OAuthInitiateData
+from api.schemas.uui_schemas import OAuthInitiateRequest
+from api.schemas.uui_schemas import OAuthInitiateResponse
+from api.schemas.uui_schemas import OrgDirectoryListResponse
+from api.schemas.uui_schemas import OrgDirectoryPublic
 from api.schemas.uui_schemas import PermissionGrantData
 from api.schemas.uui_schemas import PermissionGrantListData
 from api.schemas.uui_schemas import PermissionGrantListResponse
@@ -71,6 +79,8 @@ from api.schemas.uui_schemas import PermissionGrantResponse
 from api.schemas.uui_schemas import PartialGrantUpdate
 from api.schemas.uui_schemas import RevokeGrantData
 from api.schemas.uui_schemas import RevokeGrantResponse
+from api.schemas.uui_schemas import DisconnectConnectionData
+from api.schemas.uui_schemas import DisconnectConnectionResponse
 from api.schemas.uui_schemas import SendOTPRequest
 from api.schemas.uui_schemas import SessionUserData
 from api.schemas.uui_schemas import SessionUserResponse
@@ -96,10 +106,17 @@ from api.schemas.uui_schemas import UniversalUserData
 from api.schemas.uui_schemas import UniversalUserDeleteData
 from api.schemas.uui_schemas import UniversalUserDeleteResponse
 from api.schemas.uui_schemas import UniversalUserResponse
+from api.schemas.uui_schemas import VerifiedConnectionData
+from api.schemas.uui_schemas import VerifiedConnectionListResponse
 from api.schemas.uui_schemas import VerifyOTPRequest
 from api.services.email_service import EmailService
 from api.services.embedding_service import EmbeddingService
+from api.services.conflict_resolution_service import apply_conflict_selection
+from api.services.passport_link_service import PassportLinkService
+from api.services.organisation_connection_service import OrganisationConnectionService
 from api.services.uui_service import UUIService
+from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
+from api.services.universal_claim_ledger_service import UniversalClaimProvenance
 from api.services.version_service import VersionService
 
 
@@ -181,9 +198,16 @@ def _universal_memory_payload(memory: UniversalMemory, *, vector_size: int | Non
     return {
         "memory_id": str(memory.id),
         "user_uui_id": str(memory.user_uui_id),
-        "source_agent_id": str(memory.source_agent_id),
+        "source_agent_id": str(memory.source_agent_id) if memory.source_agent_id else None,
+        "source_org_connection_id": (
+            str(memory.source_org_connection_id)
+            if memory.source_org_connection_id
+            else None
+        ),
+        "source_type": str(getattr(memory, "source_type", None) or "passport_agent"),
         "category": memory.category,
         "importance_score": float(memory.importance_score or 0.0),
+        "claim_status": (memory.metadata_json or {}).get("claim_status", "active"),
         "is_archived": bool(memory.is_archived),
         "created_at": memory.created_at.isoformat() if memory.created_at else datetime.now(UTC).isoformat(),
         **({"vector_size": vector_size} if vector_size else {}),
@@ -332,9 +356,16 @@ async def send_uui_otp(
             timestamp=utc_now(),
         )
 
+    if await uui_service.resolve_by_email(payload.email) is None:
+        return OTPSendResponse(
+            data=OTPSendData(sent=False, reason="passport_not_found"),
+            request_id=get_request_id(request),
+            timestamp=utc_now(),
+        )
+
     sent = await uui_service.send_otp(payload.email)
     return OTPSendResponse(
-        data=OTPSendData(sent=sent, reason=None),
+        data=OTPSendData(sent=sent, reason=None if sent else "delivery_failed"),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
@@ -388,6 +419,192 @@ async def get_current_uui_user(
     )
 
 
+@router.get("/organisations", response_model=OrgDirectoryListResponse)
+async def list_public_organisations(
+    request: Request,
+    session: DbSession,
+    category: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> OrgDirectoryListResponse:
+    conditions = [OrganisationDirectory.is_public.is_(True)]
+    if category:
+        conditions.append(OrganisationDirectory.category == category)
+    if search and search.strip():
+        conditions.append(OrganisationDirectory.display_name.ilike(f"%{search.strip()}%"))
+    organisations = (
+        await session.execute(
+            select(OrganisationDirectory)
+            .where(*conditions)
+            .order_by(
+                OrganisationDirectory.is_verified.desc(),
+                OrganisationDirectory.display_name.asc(),
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    return OrgDirectoryListResponse(
+        data=[
+            OrgDirectoryPublic(
+                id=organisation.id,
+                display_name=organisation.display_name,
+                logo_url=organisation.logo_url,
+                website_url=organisation.website_url,
+                category=organisation.category,
+                oauth_enabled=bool(organisation.oauth_enabled),
+                link_token_enabled=bool(organisation.link_token_enabled),
+                is_verified=bool(organisation.is_verified),
+            )
+            for organisation in organisations
+        ],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/me/connections", response_model=VerifiedConnectionListResponse)
+async def list_my_organisation_connections(
+    request: Request,
+    session: DbSession,
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    universal_user: Annotated[UniversalUser, Depends(_current_universal_user)],
+) -> VerifiedConnectionListResponse:
+    connections = (
+        await session.execute(
+            select(VerifiedOrgConnection)
+            .options(selectinload(VerifiedOrgConnection.organisation))
+            .where(
+                VerifiedOrgConnection.user_uui_id == universal_user.id,
+                VerifiedOrgConnection.is_active.is_(True),
+            )
+            .order_by(VerifiedOrgConnection.last_verified_at.desc())
+        )
+    ).scalars().all()
+    service = OrganisationConnectionService(session=session, cache_service=cache_service)
+    data: list[VerifiedConnectionData] = []
+    for connection in connections:
+        organisation = connection.organisation
+        data.append(
+            VerifiedConnectionData(
+                id=connection.id,
+                organisation_id=organisation.id,
+                organisation_name=organisation.display_name,
+                organisation_logo_url=organisation.logo_url,
+                category=organisation.category,
+                organisation_is_verified=bool(organisation.is_verified),
+                connection_method=connection.connection_method,
+                verified_at=connection.verified_at,
+                last_verified_at=connection.last_verified_at,
+                is_active=bool(connection.is_active),
+                memory_count=await service.connection_memory_count(connection.id),
+            )
+        )
+    return VerifiedConnectionListResponse(
+        data=data,
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post("/oauth/initiate", response_model=OAuthInitiateResponse)
+async def initiate_organisation_oauth(
+    request: Request,
+    payload: OAuthInitiateRequest,
+    session: DbSession,
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    universal_user: Annotated[UniversalUser, Depends(_current_universal_user)],
+) -> OAuthInitiateResponse:
+    callback_uri = str(request.url_for("complete_organisation_oauth"))
+    authorization_url = await OrganisationConnectionService(
+        session=session,
+        cache_service=cache_service,
+    ).initiate_oauth(
+        universal_user_id=universal_user.id,
+        organisation_id=payload.org_directory_id,
+        redirect_uri=callback_uri,
+    )
+    return OAuthInitiateResponse(
+        data=OAuthInitiateData(authorization_url=authorization_url),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/oauth/callback", name="complete_organisation_oauth")
+async def complete_organisation_oauth(
+    request: Request,
+    session: DbSession,
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> RedirectResponse:
+    consent_base = str(os.getenv("CONSENT_APP_BASE_URL") or "").rstrip("/")
+    if not consent_base:
+        raise APIError(status_code=503, code="ORG_OAUTH_503", error="consent_app_not_configured")
+    if error:
+        return RedirectResponse(
+            f"{consent_base}/manage?{urlencode({'connection': 'failed', 'reason': error})}",
+            status_code=303,
+        )
+    if not code or not state:
+        return RedirectResponse(
+            f"{consent_base}/manage?connection=failed&reason=missing_oauth_response",
+            status_code=303,
+        )
+    try:
+        organisation = await OrganisationConnectionService(
+            session=session,
+            cache_service=cache_service,
+        ).complete_oauth(code=code, state=state)
+    except APIError as exc:
+        reason = str(getattr(exc, "error", None) or "connection_failed")
+        return RedirectResponse(
+            f"{consent_base}/manage?{urlencode({'connection': 'failed', 'reason': reason})}",
+            status_code=303,
+        )
+    return RedirectResponse(
+        f"{consent_base}/manage?{urlencode({'connection': 'success', 'org': organisation.display_name})}",
+        status_code=303,
+    )
+
+
+@router.delete(
+    "/me/connections/{connection_id}",
+    response_model=DisconnectConnectionResponse,
+)
+async def disconnect_my_organisation(
+    request: Request,
+    connection_id: str,
+    session: DbSession,
+    universal_user: Annotated[UniversalUser, Depends(_current_universal_user)],
+) -> DisconnectConnectionResponse:
+    try:
+        connection_uuid = uuid.UUID(connection_id)
+    except ValueError:
+        raise APIError(status_code=404, code="ORG_CONN_404", error="connection_not_found") from None
+    connection = (
+        await session.execute(
+            select(VerifiedOrgConnection).where(
+                VerifiedOrgConnection.id == connection_uuid,
+                VerifiedOrgConnection.user_uui_id == universal_user.id,
+                VerifiedOrgConnection.is_active.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if connection is None:
+        raise APIError(status_code=404, code="ORG_CONN_404", error="connection_not_found")
+    connection.is_active = False
+    connection.revoked_at = datetime.now(UTC)
+    connection.revoked_by = "user"
+    await session.commit()
+    return DisconnectConnectionResponse(
+        data=DisconnectConnectionData(disconnected=True),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
 @router.get("/me/grants", response_model=PermissionGrantListResponse)
 async def list_my_grants(
     request: Request,
@@ -422,6 +639,16 @@ async def create_my_grant(
     expires_at = payload.expires_at
     if expires_at is None and payload.duration_days is not None:
         expires_at = datetime.now(UTC) + timedelta(days=payload.duration_days)
+
+    if payload.link_token:
+        await PassportLinkService(
+            session=session,
+            cache_service=cache_service,
+        ).consume(
+            token=payload.link_token,
+            agent_id=str(payload.agent_id),
+            user_uui_id=str(universal_user.id),
+        )
 
     grant = await UUIService(session=session, cache_service=cache_service).create_grant(
         user_uui_id=str(universal_user.id),
@@ -590,7 +817,12 @@ async def preview_my_memories_for_agent(
     )
 
 
-def _memory_to_view(memory: UniversalMemory, *, active_agent_ids: set[str]) -> UserMemoryView:
+def _memory_to_view(
+    memory: UniversalMemory,
+    *,
+    active_agent_ids: set[str],
+    provenance: UniversalClaimProvenance | None = None,
+) -> UserMemoryView:
     metadata = getattr(memory, "metadata_json", None) or {}
     stored_days = _days_ago(memory.created_at)
     last_accessed_days = _days_ago(memory.last_accessed_at)
@@ -604,9 +836,25 @@ def _memory_to_view(memory: UniversalMemory, *, active_agent_ids: set[str]) -> U
         stored_days_ago=stored_days if stored_days is not None else 0,
         last_accessed_days_ago=last_accessed_days,
         source_agent_name=getattr(getattr(memory, "source_agent", None), "name", None),
-        source_agent_access_revoked=str(memory.source_agent_id) not in active_agent_ids,
+        source_agent_access_revoked=(
+            bool(memory.source_agent_id)
+            and str(memory.source_agent_id) not in active_agent_ids
+        ),
+        source_type=str(getattr(memory, "source_type", None) or "passport_agent"),
+        source_organisation_name=getattr(
+            getattr(getattr(memory, "source_org_connection", None), "organisation", None),
+            "display_name",
+            None,
+        ),
         stored_at=memory.created_at,
         is_flagged=bool(getattr(memory, "is_flagged", False)),
+        claim_status=provenance.claim_status if provenance else None,
+        claim_revision_status=provenance.revision_status if provenance else None,
+        source_access_status=provenance.grant_status if provenance else None,
+        provenance_recorded_at=provenance.recorded_at if provenance else None,
+        provenance_reason=provenance.resolution_reason if provenance else None,
+        claim_schema_version=provenance.schema_version if provenance else None,
+        claim_processor_version=provenance.processor_version if provenance else None,
     )
 
 
@@ -846,18 +1094,35 @@ async def list_my_universal_memories(
 
     memory_result = await session.execute(
         select(UniversalMemory)
-        .options(selectinload(UniversalMemory.source_agent))
+        .options(
+            selectinload(UniversalMemory.source_agent),
+            selectinload(UniversalMemory.source_org_connection).selectinload(
+                VerifiedOrgConnection.organisation
+            ),
+        )
         .where(*conditions)
         .order_by(*order_by)
         .offset(offset)
         .limit(limit)
     )
     memories = list(memory_result.scalars().all())
+    provenance_by_memory = await UniversalClaimLedgerService.provenance_for_memories(
+        session,
+        user_uui_id=universal_user.id,
+        memory_ids=[memory.id for memory in memories],
+    )
     next_offset = offset + len(memories)
     next_cursor = str(next_offset) if next_offset < total else None
 
     return UserMemoryListResponse(
-        data=[_memory_to_view(memory, active_agent_ids=active_agent_ids) for memory in memories],
+        data=[
+            _memory_to_view(
+                memory,
+                active_agent_ids=active_agent_ids,
+                provenance=provenance_by_memory.get(memory.id),
+            )
+            for memory in memories
+        ],
         next_cursor=next_cursor,
         total_count=total,
         request_id=get_request_id(request),
@@ -1051,6 +1316,8 @@ async def correct_my_memory(
         id=new_memory_id,
         user_uui_id=universal_user.id,
         source_agent_id=memory.source_agent_id,
+        source_org_connection_id=memory.source_org_connection_id,
+        source_type="user_correction",
         content=corrected_content,
         category=memory.category,
         importance_score=float(memory.importance_score or 1.0),
@@ -1070,6 +1337,29 @@ async def correct_my_memory(
         },
     )
     session.add(new_memory)
+    await session.flush()
+    await UniversalClaimLedgerService.archive_memory_async(
+        session,
+        memory=memory,
+        reason="Superseded by a direct user correction",
+    )
+    source_tenant_id = (
+        memory.source_agent.owner_tenant_id
+        if memory.source_agent is not None
+        else None
+    )
+    claim_decision = await UniversalClaimLedgerService.record_async(
+        session,
+        new_memory,
+        grant=None,
+        source_tenant_id=source_tenant_id,
+        resolution_reason="User corrected this memory in the Permission Center",
+    )
+    new_memory.metadata_json = {
+        **dict(new_memory.metadata_json or {}),
+        "claim_id": str(claim_decision.claim_id),
+        "claim_status": claim_decision.status,
+    }
     version_service = VersionService(session)
     await version_service.record_universal_version(
         memory,
@@ -1164,6 +1454,11 @@ async def delete_my_memory(
             UserMemoryFlag.status == "pending",
         )
         .values(status="dismissed", resolved_at=datetime.now(UTC))
+    )
+    await UniversalClaimLedgerService.archive_memory_async(
+        session,
+        memory=memory,
+        reason="Removed by the Passport owner",
     )
     universal_user.memory_count = max(0, int(universal_user.memory_count or 0) - 1)
     await session.commit()
@@ -1304,29 +1599,46 @@ async def answer_my_clarification(
         raise APIError(status_code=404, code="CLR_404", error="clarification_not_found")
 
     conflict = clarification.conflict
-    if conflict is not None and payload.answer in {"A", "B"}:
-        losing_memory = conflict.user_b_memory if payload.answer == "A" else conflict.user_a_memory
-        if losing_memory is not None:
-            losing_memory.is_archived = True
-        conflict.status = CrossUserConflictStatus.resolved
+    if conflict is not None:
+        if conflict.status in {
+            CrossUserConflictStatus.resolved,
+            CrossUserConflictStatus.ignored,
+        }:
+            raise APIError(
+                status_code=409,
+                code="CLR_409",
+                error="clarification_already_resolved",
+            )
+        answer = payload.answer if payload.answer in {"A", "B", "both"} else "neither"
+        reason = payload.free_text or {
+            "A": "User confirmed memory A.",
+            "B": "User confirmed memory B.",
+            "both": "User said both versions are correct.",
+            "neither": "User said neither version is correct.",
+        }[answer]
+        try:
+            await apply_conflict_selection(
+                session,
+                conflict=conflict,
+                selection=answer,
+                changed_by="user",
+                reason=reason,
+            )
+        except ValueError as exc:
+            raise APIError(
+                status_code=400,
+                code="CLR_400",
+                error=str(exc),
+            ) from exc
+        conflict.status = (
+            CrossUserConflictStatus.ignored
+            if answer == "neither"
+            else CrossUserConflictStatus.resolved
+        )
         conflict.resolved_at = datetime.now(UTC)
         conflict.resolved_by = "user_session"
-        conflict.resolution = payload.answer
-        conflict.resolution_reason = payload.free_text or "User answered clarification."
-        conflict.requires_attention = False
-    elif conflict is not None and payload.answer == "both":
-        conflict.status = CrossUserConflictStatus.resolved
-        conflict.resolved_at = datetime.now(UTC)
-        conflict.resolved_by = "user_session"
-        conflict.resolution = "both"
-        conflict.resolution_reason = payload.free_text or "User said both versions are correct."
-        conflict.requires_attention = False
-    elif conflict is not None:
-        conflict.status = CrossUserConflictStatus.ignored
-        conflict.resolved_at = datetime.now(UTC)
-        conflict.resolved_by = "user_session"
-        conflict.resolution = "neither"
-        conflict.resolution_reason = payload.free_text or "User said neither version is correct."
+        conflict.resolution = "both_valid" if answer == "both" else answer
+        conflict.resolution_reason = reason
         conflict.requires_attention = False
 
     clarification.status = ClarificationQueueStatus.resolved
