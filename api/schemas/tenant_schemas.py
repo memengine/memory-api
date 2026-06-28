@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import date
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import model_validator
 
 from api.schemas.responses import CursorPage
 from api.schemas.responses import ResponseEnvelope
@@ -161,6 +163,59 @@ class TenantTestWebhookData(BaseModel):
 
 class TenantTestWebhookResponse(ResponseEnvelope):
     data: TenantTestWebhookData
+
+
+class PassportLinkTokenRequest(BaseModel):
+    agent_id: UUID
+    external_user_id: str = Field(min_length=1, max_length=255)
+
+
+class PassportLinkTokenData(BaseModel):
+    link_token: str
+    expires_in_seconds: int
+
+
+class PassportLinkTokenResponse(ResponseEnvelope):
+    data: PassportLinkTokenData
+
+
+class OrganisationDirectoryRegisterRequest(BaseModel):
+    display_name: str = Field(min_length=2, max_length=200)
+    logo_url: str | None = Field(default=None, max_length=500)
+    website_url: str | None = Field(default=None, max_length=500)
+    category: Literal["ecommerce", "banking", "travel", "telecom", "edtech", "saas", "other"]
+    oauth_client_id: str | None = Field(default=None, max_length=500)
+    oauth_client_secret: str | None = Field(default=None, max_length=2000)
+    oauth_authorization_url: str | None = Field(default=None, max_length=1000)
+    oauth_token_url: str | None = Field(default=None, max_length=1000)
+    oauth_userinfo_url: str | None = Field(default=None, max_length=1000)
+    oauth_scopes: list[str] = Field(default_factory=list, max_length=20)
+    link_token_enabled: bool = True
+    is_public: bool = True
+
+    @model_validator(mode="after")
+    def validate_oauth_configuration(self) -> "OrganisationDirectoryRegisterRequest":
+        oauth_values = [
+            self.oauth_client_id,
+            self.oauth_client_secret,
+            self.oauth_authorization_url,
+            self.oauth_token_url,
+            self.oauth_userinfo_url,
+        ]
+        if any(oauth_values) and not all(oauth_values):
+            raise ValueError(
+                "OAuth requires client ID, client secret, authorization URL, token URL, and userinfo URL."
+            )
+        return self
+
+
+class OrganisationDirectoryRegisterData(BaseModel):
+    directory_id: UUID
+    status: Literal["pending_review"]
+
+
+class OrganisationDirectoryRegisterResponse(ResponseEnvelope):
+    data: OrganisationDirectoryRegisterData
 
 
 class TenantDeprecationUsageEntry(BaseModel):
