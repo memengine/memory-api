@@ -22,14 +22,19 @@ from sqlalchemy import func
 from sqlalchemy import literal
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from api.dependencies import DbSession
 from api.dependencies import get_authenticated_tenant_id
+from api.dependencies import get_cache_service
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_quota_manager
+from api.db.cache import CacheService
 from api.db.models import ApiDeprecatedField
+from api.db.models import ApiKey
 from api.db.models import AuditAction
 from api.db.models import AuditLog
 from api.db.models import CallQualityLog
@@ -41,9 +46,14 @@ from api.db.models import EdTechMemory
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
+from api.db.models import MemoryClaim
+from api.db.models import MemoryClaimRevision
+from api.db.models import MemorySourceEvent
+from api.db.models import OrganisationDirectory
 from api.db.models import OveragePolicy
 from api.db.models import ProxyUser
 from api.db.models import SharedContextSignal
+from api.db.models import ServiceWriter
 from api.db.models import SupportMemory
 from api.db.models import Tenant
 from api.db.models import TenantBudget
@@ -69,6 +79,17 @@ from api.schemas.support_schemas import TenantSupportTypeData
 from api.schemas.support_schemas import TenantSupportTypePatchRequest
 from api.schemas.support_schemas import TenantSupportTypeResponse
 from api.schemas.responses import CursorPage
+from api.schemas.provenance_schemas import ServiceWriterCreateRequest
+from api.schemas.provenance_schemas import ServiceWriterData
+from api.schemas.provenance_schemas import ServiceWriterListResponse
+from api.schemas.provenance_schemas import ServiceWriterResponse
+from api.schemas.provenance_schemas import ServiceWriterUpdateRequest
+from api.schemas.provenance_schemas import MemorySourceEventData
+from api.schemas.provenance_schemas import MemorySourceEventListResponse
+from api.schemas.provenance_schemas import MemoryClaimData
+from api.schemas.provenance_schemas import MemoryClaimListResponse
+from api.schemas.provenance_schemas import MemoryClaimResponse
+from api.schemas.provenance_schemas import MemoryClaimRevisionData
 from api.schemas.responses import ProxyUserBlockData
 from api.schemas.responses import ProxyUserBlockResponse
 from api.schemas.responses import ProxyUserDeleteData
@@ -76,6 +97,12 @@ from api.schemas.responses import ProxyUserDeleteResponse
 from api.schemas.tenant_schemas import BlockEvent
 from api.schemas.tenant_schemas import CostSummary
 from api.schemas.tenant_schemas import CostSummaryResponse
+from api.schemas.tenant_schemas import PassportLinkTokenData
+from api.schemas.tenant_schemas import PassportLinkTokenRequest
+from api.schemas.tenant_schemas import PassportLinkTokenResponse
+from api.schemas.tenant_schemas import OrganisationDirectoryRegisterData
+from api.schemas.tenant_schemas import OrganisationDirectoryRegisterRequest
+from api.schemas.tenant_schemas import OrganisationDirectoryRegisterResponse
 from api.schemas.tenant_schemas import AvailableDomain
 from api.schemas.tenant_schemas import StudentSummary
 from api.schemas.tenant_schemas import TenantDomainSchemaData
@@ -100,15 +127,21 @@ from api.schemas.tenant_schemas import TenantUsageData
 from api.schemas.tenant_schemas import TenantUsageResponse
 from api.schemas.tenant_schemas import TenantUsersListResponse
 from api.services.proxy_user_service import ProxyUserService
+from api.services.passport_link_service import PassportLinkService
+from api.services.organisation_connection_service import OrganisationCredentialCipher
 from api.services.quota_manager import QuotaManager
-from api.services.version_service import VersionService
+from api.services.conflict_resolution_service import apply_conflict_selection
 from api.middleware.versioning import register_deprecated_field
 
 
 router = APIRouter(prefix="/v1/tenant", tags=["tenant"])
 DEPRECATED_PROXY_USER_STATS_FIELD_SUNSET = datetime(2026, 10, 1, tzinfo=UTC)
-DEPRECATED_PROXY_USER_STATS_FIELD_PATH = "GET /v1/tenant/users/{external_user_id}/stats response.data.user_id"
-DEPRECATED_PROXY_USER_STATS_FIELD_GUIDE = "https://docs.memoryos.io/migration/user-id-to-external-user-id"
+DEPRECATED_PROXY_USER_STATS_FIELD_PATH = (
+    "GET /v1/tenant/users/{external_user_id}/stats response.data.user_id"
+)
+DEPRECATED_PROXY_USER_STATS_FIELD_GUIDE = (
+    "https://docs.memoryos.io/migration/user-id-to-external-user-id"
+)
 
 
 AVAILABLE_DOMAIN_OPTIONS = [
@@ -166,6 +199,118 @@ def _domain_schema_data(tenant: Tenant) -> TenantDomainSchemaData:
     )
 
 
+def _service_writer_data(writer: ServiceWriter) -> ServiceWriterData:
+    return ServiceWriterData(
+        id=str(writer.id),
+        service_key=writer.service_key,
+        display_name=writer.display_name,
+        api_key_id=str(writer.api_key_id) if writer.api_key_id else None,
+        authority_rules=dict(writer.authority_rules or {}),
+        is_active=bool(writer.is_active),
+        created_at=writer.created_at,
+        updated_at=writer.updated_at,
+    )
+
+
+def _claim_revision_data(revision: MemoryClaimRevision) -> MemoryClaimRevisionData:
+    source_event = revision.source_event
+    writer = revision.source_writer or (source_event.writer if source_event else None)
+    return MemoryClaimRevisionData(
+        id=str(revision.id),
+        memory_id=str(revision.memory_id) if revision.memory_id else None,
+        source_event_id=str(revision.source_event_id)
+        if revision.source_event_id
+        else None,
+        source_writer_id=str(revision.source_writer_id)
+        if revision.source_writer_id
+        else None,
+        source_domain=revision.source_domain,
+        source_domain_record_id=revision.source_domain_record_id,
+        source_field=revision.source_field,
+        source_service=(
+            writer.display_name
+            if writer is not None
+            else (source_event.source_service if source_event is not None else None)
+        ),
+        source_event_key=(
+            source_event.source_event_id if source_event is not None else None
+        ),
+        asserted_value=revision.asserted_value,
+        status=revision.status,
+        authority_priority=int(revision.authority_priority or 50),
+        confidence_score=float(revision.confidence_score or 0.0),
+        observed_at=revision.observed_at,
+        evidence_refs=list(revision.evidence_refs or []),
+        resolution_reason=revision.resolution_reason,
+        schema_version=int(revision.schema_version or 1),
+        processor_version=str(revision.processor_version or "legacy"),
+        created_at=revision.created_at,
+    )
+
+
+def _claim_data(claim: MemoryClaim, external_user_id: str) -> MemoryClaimData:
+    revisions = sorted(
+        list(claim.revisions or []),
+        key=lambda revision: revision.created_at,
+        reverse=True,
+    )
+    return MemoryClaimData(
+        id=str(claim.id),
+        external_user_id=external_user_id,
+        category=claim.category.value
+        if hasattr(claim.category, "value")
+        else str(claim.category),
+        claim_fingerprint=claim.claim_fingerprint,
+        subject_key=claim.subject_key,
+        predicate_key=claim.predicate_key,
+        scope=dict(claim.scope or {}),
+        active_value=claim.active_value,
+        status=claim.status,
+        active_memory_id=str(claim.active_memory_id)
+        if claim.active_memory_id
+        else None,
+        winning_revision_id=str(claim.winning_revision_id)
+        if claim.winning_revision_id
+        else None,
+        authority_priority=int(claim.authority_priority or 50),
+        confidence_score=float(claim.confidence_score or 0.0),
+        observed_at=claim.observed_at,
+        effective_at=claim.effective_at,
+        created_at=claim.created_at,
+        updated_at=claim.updated_at,
+        revisions=[_claim_revision_data(revision) for revision in revisions[:10]],
+    )
+
+
+def _require_dashboard_auth(request: Request) -> None:
+    if getattr(request.state, "auth_method", None) != "clerk_jwt":
+        raise APIError(
+            status_code=403,
+            code="AUTH_403",
+            error="dashboard_auth_required",
+        )
+
+
+async def _validate_writer_api_key(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    api_key_id: str | None,
+) -> uuid.UUID | None:
+    if not api_key_id:
+        return None
+    try:
+        key_uuid = uuid.UUID(api_key_id)
+    except ValueError as exc:
+        raise APIError(
+            status_code=422, code="PROV_422", error="invalid_api_key_id"
+        ) from exc
+    api_key = await session.get(ApiKey, key_uuid)
+    if api_key is None or str(api_key.tenant_id) != str(tenant_id):
+        raise APIError(status_code=422, code="PROV_422", error="invalid_writer_api_key")
+    return key_uuid
+
+
 def _count_forgetting_risk(forgetting_stages: dict | None) -> int:
     if not forgetting_stages:
         return 0
@@ -199,7 +344,9 @@ def _encode_cursor(sort_at: datetime | None, row_id: uuid.UUID) -> str:
 
 def _decode_cursor(cursor: str) -> tuple[datetime | None, uuid.UUID]:
     try:
-        payload = json.loads(base64.urlsafe_b64decode(cursor.encode("utf-8")).decode("utf-8"))
+        payload = json.loads(
+            base64.urlsafe_b64decode(cursor.encode("utf-8")).decode("utf-8")
+        )
         sort_at_raw = payload.get("sort_at")
         row_id = uuid.UUID(payload["id"])
         return (datetime.fromisoformat(sort_at_raw) if sort_at_raw else None, row_id)
@@ -212,7 +359,9 @@ def _decode_cursor(cursor: str) -> tuple[datetime | None, uuid.UUID]:
         ) from exc
 
 
-async def _load_tenant_budget(session: AsyncSession, tenant_id: str) -> TenantBudget | None:
+async def _load_tenant_budget(
+    session: AsyncSession, tenant_id: str
+) -> TenantBudget | None:
     result = await session.execute(
         select(TenantBudget).where(TenantBudget.tenant_id == uuid.UUID(tenant_id))
     )
@@ -249,18 +398,23 @@ async def _list_proxy_users(
         )
         .where(ProxyUser.tenant_id == tenant_uuid)
     )
-    count_stmt = select(func.count(ProxyUser.id)).where(ProxyUser.tenant_id == tenant_uuid)
+    count_stmt = select(func.count(ProxyUser.id)).where(
+        ProxyUser.tenant_id == tenant_uuid
+    )
 
     if cursor:
         cursor_last_active_at, cursor_id = _decode_cursor(cursor)
         stmt = stmt.where(
             or_(
                 ProxyUser.last_active_at < cursor_last_active_at,
-                (ProxyUser.last_active_at == cursor_last_active_at) & (ProxyUser.id < cursor_id),
+                (ProxyUser.last_active_at == cursor_last_active_at)
+                & (ProxyUser.id < cursor_id),
             )
         )
 
-    stmt = stmt.order_by(ProxyUser.last_active_at.desc(), ProxyUser.id.desc()).limit(limit + 1)
+    stmt = stmt.order_by(ProxyUser.last_active_at.desc(), ProxyUser.id.desc()).limit(
+        limit + 1
+    )
     items = list((await session.execute(stmt)).all())
     total = int((await session.execute(count_stmt)).scalar_one() or 0)
 
@@ -279,19 +433,26 @@ async def _list_quality_logs(
     cursor: str | None,
     limit: int,
 ) -> tuple[list[CallQualityLog], str | None, int]:
-    stmt = select(CallQualityLog).where(CallQualityLog.tenant_id == uuid.UUID(tenant_id))
-    count_stmt = select(CallQualityLog.id).where(CallQualityLog.tenant_id == uuid.UUID(tenant_id))
+    stmt = select(CallQualityLog).where(
+        CallQualityLog.tenant_id == uuid.UUID(tenant_id)
+    )
+    count_stmt = select(CallQualityLog.id).where(
+        CallQualityLog.tenant_id == uuid.UUID(tenant_id)
+    )
 
     if cursor:
         cursor_created_at, cursor_id = _decode_cursor(cursor)
         stmt = stmt.where(
             or_(
                 CallQualityLog.created_at < cursor_created_at,
-                (CallQualityLog.created_at == cursor_created_at) & (CallQualityLog.id < cursor_id),
+                (CallQualityLog.created_at == cursor_created_at)
+                & (CallQualityLog.id < cursor_id),
             )
         )
 
-    stmt = stmt.order_by(CallQualityLog.created_at.desc(), CallQualityLog.id.desc()).limit(limit + 1)
+    stmt = stmt.order_by(
+        CallQualityLog.created_at.desc(), CallQualityLog.id.desc()
+    ).limit(limit + 1)
     items = list((await session.execute(stmt)).scalars().all())
     total = len((await session.execute(count_stmt)).scalars().all())
 
@@ -368,7 +529,11 @@ async def _list_deprecation_usage(
 def _quality_log_external_user_hash():
     return func.encode(
         func.digest(
-            func.concat(cast(CallQualityLog.tenant_id, String), literal(":"), CallQualityLog.external_user_id),
+            func.concat(
+                cast(CallQualityLog.tenant_id, String),
+                literal(":"),
+                CallQualityLog.external_user_id,
+            ),
             literal("sha256"),
         ),
         literal("hex"),
@@ -382,7 +547,9 @@ async def _get_proxy_user_detail(
     external_user_id: str,
 ) -> ProxyUserDetail:
     tenant_uuid = uuid.UUID(tenant_id)
-    external_user_id_hash = ProxyUserService.hash_external_user_id(tenant_id, external_user_id)
+    external_user_id_hash = ProxyUserService.hash_external_user_id(
+        tenant_id, external_user_id
+    )
     proxy_user = (
         await session.execute(
             select(ProxyUser).where(
@@ -412,7 +579,10 @@ async def _get_proxy_user_detail(
                 func.coalesce(
                     func.sum(
                         case(
-                            (cast(CallQualityLog.layer_blocked_at, String) != "NONE", 1),
+                            (
+                                cast(CallQualityLog.layer_blocked_at, String) != "NONE",
+                                1,
+                            ),
                             else_=0,
                         )
                     ),
@@ -489,7 +659,10 @@ async def _get_cost_summary(
                 func.coalesce(
                     func.sum(
                         case(
-                            (cast(CallQualityLog.layer_blocked_at, String) != "NONE", 1),
+                            (
+                                cast(CallQualityLog.layer_blocked_at, String) != "NONE",
+                                1,
+                            ),
                             else_=0,
                         )
                     ),
@@ -513,7 +686,9 @@ async def _get_cost_summary(
     )
     total_calls = int(monthly_counts.total_calls or 0)
     blocked_calls = int(monthly_counts.blocked_calls or 0)
-    gate_block_rate = round((blocked_calls / total_calls), 4) if total_calls > 0 else 0.0
+    gate_block_rate = (
+        round((blocked_calls / total_calls), 4) if total_calls > 0 else 0.0
+    )
     days_in_month = calendar.monthrange(now.year, now.month)[1]
     projected_month_cost_usd = round((estimated_cost_usd / now.day) * days_in_month, 4)
     savings_from_gate_usd = (
@@ -565,18 +740,34 @@ def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConfli
     memory_b = conflict.user_b_memory
     proxy_a = memory_a.proxy_user if memory_a is not None else None
     proxy_b = memory_b.proxy_user if memory_b is not None else None
+    provenance_a = (
+        dict(memory_a.metadata_json or {}).get("provenance", {})
+        if memory_a is not None
+        else {}
+    )
+    provenance_b = (
+        dict(memory_b.metadata_json or {}).get("provenance", {})
+        if memory_b is not None
+        else {}
+    )
     return CrossUserConflictData(
         id=str(conflict.id),
         tenant_id=str(conflict.tenant_id),
         entity_type=conflict.entity_type.value,
         entity_value_a=conflict.entity_value_a,
         entity_value_b=conflict.entity_value_b,
-        user_a_memory_id=str(conflict.user_a_memory_id) if conflict.user_a_memory_id else None,
-        user_b_memory_id=str(conflict.user_b_memory_id) if conflict.user_b_memory_id else None,
+        user_a_memory_id=str(conflict.user_a_memory_id)
+        if conflict.user_a_memory_id
+        else None,
+        user_b_memory_id=str(conflict.user_b_memory_id)
+        if conflict.user_b_memory_id
+        else None,
         user_a_id=(proxy_a.external_user_id if proxy_a is not None else None),
         user_b_id=(proxy_b.external_user_id if proxy_b is not None else None),
         memory_a_content=(memory_a.content if memory_a is not None else None),
         memory_b_content=(memory_b.content if memory_b is not None else None),
+        source_service_a=provenance_a.get("service"),
+        source_service_b=provenance_b.get("service"),
         memory_a_created_at=(memory_a.created_at if memory_a is not None else None),
         memory_b_created_at=(memory_b.created_at if memory_b is not None else None),
         detected_at=conflict.detected_at,
@@ -597,7 +788,11 @@ def _cross_user_conflict_dedupe_key(
     *,
     include_status: bool = False,
 ) -> tuple[str, ...]:
-    entity_type = conflict.entity_type.value if hasattr(conflict.entity_type, "value") else str(conflict.entity_type)
+    entity_type = (
+        conflict.entity_type.value
+        if hasattr(conflict.entity_type, "value")
+        else str(conflict.entity_type)
+    )
     memory_ids = sorted(
         str(memory_id)
         for memory_id in (conflict.user_a_memory_id, conflict.user_b_memory_id)
@@ -613,7 +808,11 @@ def _cross_user_conflict_dedupe_key(
 
     parts: tuple[str, ...] = (entity_type, *memory_ids)
     if include_status:
-        status = conflict.status.value if hasattr(conflict.status, "value") else str(conflict.status)
+        status = (
+            conflict.status.value
+            if hasattr(conflict.status, "value")
+            else str(conflict.status)
+        )
         parts = (*parts, status, conflict.resolution_path or "")
     return parts
 
@@ -694,14 +893,21 @@ async def get_tenant_usage(
                 select(
                     func.count(ExtractionJob.id).label("completed_jobs"),
                     func.coalesce(
-                        func.sum(case((ExtractionJob.memories_created > 0, 1), else_=0)),
+                        func.sum(
+                            case((ExtractionJob.memories_created > 0, 1), else_=0)
+                        ),
                         0,
                     ).label("jobs_with_memories"),
                     func.coalesce(
                         func.sum(
                             case(
                                 (
-                                    cast(ExtractionJob.result["nothing_to_extract"].astext, String)
+                                    cast(
+                                        ExtractionJob.result[
+                                            "nothing_to_extract"
+                                        ].astext,
+                                        String,
+                                    )
                                     == "true",
                                     1,
                                 ),
@@ -720,9 +926,13 @@ async def get_tenant_usage(
         completed_jobs = int(extraction_counts.completed_jobs or 0)
         jobs_with_memories = int(extraction_counts.jobs_with_memories or 0)
         nothing_to_extract_jobs = int(extraction_counts.nothing_to_extract_jobs or 0)
-        extraction_success_rate = round(jobs_with_memories / completed_jobs, 4) if completed_jobs > 0 else 0.0
+        extraction_success_rate = (
+            round(jobs_with_memories / completed_jobs, 4) if completed_jobs > 0 else 0.0
+        )
         nothing_to_extract_rate = (
-            round(nothing_to_extract_jobs / completed_jobs, 4) if completed_jobs > 0 else 0.0
+            round(nothing_to_extract_jobs / completed_jobs, 4)
+            if completed_jobs > 0
+            else 0.0
         )
 
     return TenantUsageResponse(
@@ -780,11 +990,305 @@ async def list_tenant_proxy_users(
                 last_active_at=item.last_active_at,
                 created_at=item.created_at,
                 is_blocked=bool(item.is_blocked),
-                quality_score_avg=(float(quality_score_avg) if quality_score_avg is not None else None),
+                quality_score_avg=(
+                    float(quality_score_avg) if quality_score_avg is not None else None
+                ),
             )
             for item, quality_score_avg in proxy_users
         ],
         pagination=CursorPage(next_cursor=next_cursor, limit=limit, total=total),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/service-writers", response_model=ServiceWriterListResponse)
+async def list_service_writers(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> ServiceWriterListResponse:
+    _require_dashboard_auth(request)
+    writers = (
+        (
+            await session.execute(
+                select(ServiceWriter)
+                .where(ServiceWriter.tenant_id == uuid.UUID(tenant_id))
+                .order_by(ServiceWriter.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ServiceWriterListResponse(
+        data=[_service_writer_data(writer) for writer in writers],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+async def _repair_writer_attribution(
+    session: AsyncSession,
+    writer: ServiceWriter,
+) -> tuple[int, int]:
+    if not writer.is_active:
+        return (0, 0)
+    event_conditions = [
+        MemorySourceEvent.tenant_id == writer.tenant_id,
+        MemorySourceEvent.writer_id.is_(None),
+        MemorySourceEvent.source_service == writer.service_key,
+    ]
+    if writer.api_key_id is not None:
+        event_conditions.append(MemorySourceEvent.api_key_id == writer.api_key_id)
+    event_ids = select(MemorySourceEvent.id).where(*event_conditions)
+    revision_result = await session.execute(
+        update(MemoryClaimRevision)
+        .where(
+            MemoryClaimRevision.source_writer_id.is_(None),
+            MemoryClaimRevision.source_event_id.in_(event_ids),
+        )
+        .values(source_writer_id=writer.id)
+    )
+    event_result = await session.execute(
+        update(MemorySourceEvent).where(*event_conditions).values(writer_id=writer.id)
+    )
+    return (int(event_result.rowcount or 0), int(revision_result.rowcount or 0))
+
+
+@router.post("/service-writers", response_model=ServiceWriterResponse, status_code=201)
+async def create_service_writer(
+    request: Request,
+    payload: ServiceWriterCreateRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> ServiceWriterResponse:
+    _require_dashboard_auth(request)
+    key_uuid = await _validate_writer_api_key(
+        session,
+        tenant_id=tenant_id,
+        api_key_id=payload.api_key_id,
+    )
+    writer = ServiceWriter(
+        tenant_id=uuid.UUID(tenant_id),
+        api_key_id=key_uuid,
+        service_key=payload.service_key,
+        display_name=payload.display_name,
+        authority_rules=payload.authority_rules.model_dump(),
+    )
+    session.add(writer)
+    try:
+        await session.flush()
+        await _repair_writer_attribution(session, writer)
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise APIError(
+            status_code=409,
+            code="PROV_409",
+            error="service_writer_already_exists",
+        ) from exc
+    await session.refresh(writer)
+    return ServiceWriterResponse(
+        data=_service_writer_data(writer),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.patch("/service-writers/{writer_id}", response_model=ServiceWriterResponse)
+async def update_service_writer(
+    request: Request,
+    writer_id: str,
+    payload: ServiceWriterUpdateRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> ServiceWriterResponse:
+    _require_dashboard_auth(request)
+    try:
+        writer_uuid = uuid.UUID(writer_id)
+    except ValueError as exc:
+        raise APIError(
+            status_code=404, code="PROV_404", error="service_writer_not_found"
+        ) from exc
+    writer = (
+        await session.execute(
+            select(ServiceWriter).where(
+                ServiceWriter.id == writer_uuid,
+                ServiceWriter.tenant_id == uuid.UUID(tenant_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if writer is None:
+        raise APIError(
+            status_code=404, code="PROV_404", error="service_writer_not_found"
+        )
+
+    fields_set = payload.model_fields_set
+    if "display_name" in fields_set:
+        writer.display_name = str(payload.display_name)
+    if "api_key_id" in fields_set:
+        writer.api_key_id = await _validate_writer_api_key(
+            session,
+            tenant_id=tenant_id,
+            api_key_id=payload.api_key_id,
+        )
+    if "authority_rules" in fields_set:
+        writer.authority_rules = (
+            payload.authority_rules.model_dump()
+            if payload.authority_rules is not None
+            else {}
+        )
+    if "is_active" in fields_set:
+        writer.is_active = bool(payload.is_active)
+    try:
+        await session.flush()
+        await _repair_writer_attribution(session, writer)
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise APIError(
+            status_code=409,
+            code="PROV_409",
+            error="api_key_already_bound_to_writer",
+        ) from exc
+    await session.refresh(writer)
+    return ServiceWriterResponse(
+        data=_service_writer_data(writer),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/source-events", response_model=MemorySourceEventListResponse)
+async def list_memory_source_events(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    external_user_id: str | None = Query(default=None),
+    source_service: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> MemorySourceEventListResponse:
+    _require_dashboard_auth(request)
+    statement = (
+        select(
+            MemorySourceEvent,
+            ProxyUser.external_user_id,
+            ExtractionJob.id.label("extraction_job_id"),
+        )
+        .join(ProxyUser, ProxyUser.id == MemorySourceEvent.proxy_user_id)
+        .outerjoin(ExtractionJob, ExtractionJob.source_event_id == MemorySourceEvent.id)
+        .where(MemorySourceEvent.tenant_id == uuid.UUID(tenant_id))
+        .order_by(MemorySourceEvent.observed_at.desc(), MemorySourceEvent.id.desc())
+        .limit(limit)
+    )
+    if external_user_id:
+        statement = statement.where(ProxyUser.external_user_id == external_user_id)
+    if source_service:
+        statement = statement.where(MemorySourceEvent.source_service == source_service)
+    rows = (await session.execute(statement)).all()
+    return MemorySourceEventListResponse(
+        data=[
+            MemorySourceEventData(
+                id=str(event.id),
+                external_user_id=event_external_user_id,
+                writer_id=str(event.writer_id) if event.writer_id else None,
+                api_key_id=str(event.api_key_id) if event.api_key_id else None,
+                source_service=event.source_service,
+                source_event_id=event.source_event_id,
+                observed_at=event.observed_at,
+                received_at=event.received_at,
+                payload_hash=event.payload_hash,
+                scope=dict(event.scope or {}),
+                evidence_refs=list(event.evidence_refs or []),
+                processing_metadata=dict(event.processing_metadata or {}),
+                extraction_job_id=(
+                    str(extraction_job_id) if extraction_job_id else None
+                ),
+            )
+            for event, event_external_user_id, extraction_job_id in rows
+        ],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/claims", response_model=MemoryClaimListResponse)
+async def list_memory_claims(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    external_user_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> MemoryClaimListResponse:
+    _require_dashboard_auth(request)
+    statement = (
+        select(MemoryClaim, ProxyUser.external_user_id)
+        .join(ProxyUser, ProxyUser.id == MemoryClaim.proxy_user_id)
+        .where(MemoryClaim.tenant_id == uuid.UUID(tenant_id))
+        .options(
+            selectinload(MemoryClaim.revisions)
+            .selectinload(MemoryClaimRevision.source_event)
+            .selectinload(MemorySourceEvent.writer),
+            selectinload(MemoryClaim.revisions).selectinload(
+                MemoryClaimRevision.source_writer
+            ),
+        )
+        .order_by(MemoryClaim.updated_at.desc(), MemoryClaim.id.desc())
+        .limit(limit)
+    )
+    if external_user_id:
+        statement = statement.where(ProxyUser.external_user_id == external_user_id)
+    if status:
+        statement = statement.where(MemoryClaim.status == status)
+    if category:
+        statement = statement.where(MemoryClaim.category == category)
+    rows = (await session.execute(statement)).all()
+    return MemoryClaimListResponse(
+        data=[_claim_data(claim, external_user_id) for claim, external_user_id in rows],
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.get("/claims/{claim_id}", response_model=MemoryClaimResponse)
+async def get_memory_claim(
+    request: Request,
+    claim_id: str,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> MemoryClaimResponse:
+    _require_dashboard_auth(request)
+    try:
+        claim_uuid = uuid.UUID(claim_id)
+    except ValueError as exc:
+        raise APIError(
+            status_code=404, code="CLAIM_404", error="claim_not_found"
+        ) from exc
+    row = (
+        await session.execute(
+            select(MemoryClaim, ProxyUser.external_user_id)
+            .join(ProxyUser, ProxyUser.id == MemoryClaim.proxy_user_id)
+            .where(
+                MemoryClaim.id == claim_uuid,
+                MemoryClaim.tenant_id == uuid.UUID(tenant_id),
+            )
+            .options(
+                selectinload(MemoryClaim.revisions)
+                .selectinload(MemoryClaimRevision.source_event)
+                .selectinload(MemorySourceEvent.writer),
+                selectinload(MemoryClaim.revisions).selectinload(
+                    MemoryClaimRevision.source_writer
+                ),
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        raise APIError(status_code=404, code="CLAIM_404", error="claim_not_found")
+    claim, external_user_id = row
+    return MemoryClaimResponse(
+        data=_claim_data(claim, external_user_id),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
@@ -865,7 +1369,9 @@ async def update_tenant_support_type(
             status_code=400,
             code="TEN_400",
             error="support_schema_required",
-            details={"message": "Enable Customer Support schema before configuring support type."},
+            details={
+                "message": "Enable Customer Support schema before configuring support type."
+            },
         )
 
     if payload.support_type_mode == "single" and payload.support_type is None:
@@ -880,11 +1386,15 @@ async def update_tenant_support_type(
             status_code=400,
             code="TEN_400",
             error="support_types_allowed_required",
-            details={"message": "multi support mode requires at least one allowed support type."},
+            details={
+                "message": "multi support mode requires at least one allowed support type."
+            },
         )
 
     tenant.support_type_mode = payload.support_type_mode
-    tenant.support_type_configured = payload.support_type if payload.support_type_mode == "single" else None
+    tenant.support_type_configured = (
+        payload.support_type if payload.support_type_mode == "single" else None
+    )
     tenant.support_types_allowed = list(dict.fromkeys(payload.support_types_allowed))
     await session.commit()
     await session.refresh(tenant)
@@ -916,11 +1426,15 @@ async def list_tenant_support_customers(
             status_code=400,
             code="TEN_400",
             error="support_schema_required",
-            details={"message": "Enable Customer Support schema to access customer support data."},
+            details={
+                "message": "Enable Customer Support schema to access customer support data."
+            },
         )
 
     total_result = await session.execute(
-        select(func.count(SupportMemory.id)).where(SupportMemory.tenant_id == tenant_uuid)
+        select(func.count(SupportMemory.id)).where(
+            SupportMemory.tenant_id == tenant_uuid
+        )
     )
     total = int(total_result.scalar_one() or 0)
 
@@ -985,10 +1499,14 @@ async def get_tenant_support_stats(
             status_code=400,
             code="TEN_400",
             error="support_schema_required",
-            details={"message": "Enable Customer Support schema to access support stats."},
+            details={
+                "message": "Enable Customer Support schema to access support stats."
+            },
         )
 
-    result = await session.execute(select(SupportMemory).where(SupportMemory.tenant_id == tenant_uuid))
+    result = await session.execute(
+        select(SupportMemory).where(SupportMemory.tenant_id == tenant_uuid)
+    )
     memories = list(result.scalars().all())
     total = len(memories)
     sentiment_breakdown: dict[str, int] = {}
@@ -1000,7 +1518,9 @@ async def get_tenant_support_stats(
         sentiment = memory.sentiment_pattern or "unknown"
         sentiment_breakdown[sentiment] = sentiment_breakdown.get(sentiment, 0) + 1
         support_type = memory.support_type or "unknown"
-        support_type_distribution[support_type] = support_type_distribution.get(support_type, 0) + 1
+        support_type_distribution[support_type] = (
+            support_type_distribution.get(support_type, 0) + 1
+        )
         total_issues += len(memory.issue_history or [])
         if memory.current_open_issue:
             open_issues_count += 1
@@ -1170,7 +1690,9 @@ async def block_tenant_proxy_user(
     Parameters: external user id path value. It is hashed inside the proxy-user service before DB lookup.
     Responses: whether the proxy user is now blocked.
     """
-    blocked = await proxy_user_service.block(tenant_id=tenant_id, external_user_id=external_user_id)
+    blocked = await proxy_user_service.block(
+        tenant_id=tenant_id, external_user_id=external_user_id
+    )
     return ProxyUserBlockResponse(
         data=ProxyUserBlockData(blocked=blocked),
         request_id=get_request_id(request),
@@ -1225,7 +1747,9 @@ async def get_tenant_memory_additions(
 ) -> TenantMemoryAdditionsResponse:
     """List tenant memory additions grouped by day for dashboard trends."""
     return TenantMemoryAdditionsResponse(
-        data=await _get_tenant_memory_additions(session, tenant_id=tenant_id, limit=limit),
+        data=await _get_tenant_memory_additions(
+            session, tenant_id=tenant_id, limit=limit
+        ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
@@ -1279,7 +1803,8 @@ async def get_tenant_conflict_stats(
     requires_attention = sum(
         1
         for conflict in open_unique
-        if conflict.requires_attention and conflict.status == CrossUserConflictStatus.pending
+        if conflict.requires_attention
+        and conflict.status == CrossUserConflictStatus.pending
     )
     pending_user_session = sum(
         1
@@ -1325,8 +1850,7 @@ async def get_tenant_conflict_stats(
                         ClarificationQueue.conflict_id.in_(clarification_conflict_ids),
                     )
                 )
-            )
-            .scalar_one()
+            ).scalar_one()
             or 0
         )
     breakdown = {
@@ -1345,7 +1869,9 @@ async def get_tenant_conflict_stats(
         data=ConflictStatsData(
             total_detected_mtd=total_detected,
             auto_resolved_mtd=auto_resolved,
-            auto_resolution_rate=(auto_resolved / total_detected if total_detected else 0.0),
+            auto_resolution_rate=(
+                auto_resolved / total_detected if total_detected else 0.0
+            ),
             resolution_breakdown=breakdown,
             requires_attention=requires_attention,
             clarifications_pending=clarification_pending,
@@ -1353,6 +1879,86 @@ async def get_tenant_conflict_stats(
             pending_tenant_review=pending_tenant_review,
             resolved_by_user_session_mtd=resolved_by_user_session_mtd,
             resolved_by_tenant_mtd=resolved_by_tenant_mtd,
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post(
+    "/directory/register",
+    response_model=OrganisationDirectoryRegisterResponse,
+)
+async def register_tenant_organisation_directory(
+    request: Request,
+    payload: OrganisationDirectoryRegisterRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+) -> OrganisationDirectoryRegisterResponse:
+    tenant_uuid = uuid.UUID(tenant_id)
+    existing = (
+        await session.execute(
+            select(OrganisationDirectory).where(
+                OrganisationDirectory.tenant_id == tenant_uuid
+            )
+        )
+    ).scalar_one_or_none()
+    oauth_enabled = bool(payload.oauth_client_id)
+    encrypted_secret = (
+        OrganisationCredentialCipher.encrypt(payload.oauth_client_secret)
+        if payload.oauth_client_secret
+        else None
+    )
+    if existing is None:
+        existing = OrganisationDirectory(tenant_id=tenant_uuid)
+        session.add(existing)
+    existing.display_name = payload.display_name.strip()
+    existing.logo_url = payload.logo_url
+    existing.website_url = payload.website_url
+    existing.category = payload.category
+    existing.oauth_enabled = oauth_enabled
+    existing.oauth_client_id = payload.oauth_client_id
+    if encrypted_secret is not None:
+        existing.oauth_client_secret_ciphertext = encrypted_secret
+    existing.oauth_authorization_url = payload.oauth_authorization_url
+    existing.oauth_token_url = payload.oauth_token_url
+    existing.oauth_userinfo_url = payload.oauth_userinfo_url
+    existing.oauth_scopes = list(dict.fromkeys(payload.oauth_scopes))
+    existing.link_token_enabled = payload.link_token_enabled
+    existing.is_public = payload.is_public
+    existing.is_verified = False
+    await session.commit()
+    await session.refresh(existing)
+    return OrganisationDirectoryRegisterResponse(
+        data=OrganisationDirectoryRegisterData(
+            directory_id=existing.id,
+            status="pending_review",
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post("/memory-passport/link-token", response_model=PassportLinkTokenResponse)
+async def create_memory_passport_link_token(
+    request: Request,
+    payload: PassportLinkTokenRequest,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+) -> PassportLinkTokenResponse:
+    issued = await PassportLinkService(
+        session=session,
+        cache_service=cache_service,
+    ).issue(
+        tenant_id=tenant_id,
+        agent_id=str(payload.agent_id),
+        external_user_id=payload.external_user_id,
+    )
+    return PassportLinkTokenResponse(
+        data=PassportLinkTokenData(
+            link_token=issued.token,
+            expires_in_seconds=issued.expires_in_seconds,
         ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
@@ -1378,20 +1984,28 @@ async def get_tenant_shared_context_conflicts(
         ]
     )
     conflicts = (
-        await session.execute(
-            select(CrossUserConflict)
-            .options(
-                selectinload(CrossUserConflict.user_a_memory).selectinload(Memory.proxy_user),
-                selectinload(CrossUserConflict.user_b_memory).selectinload(Memory.proxy_user),
+        (
+            await session.execute(
+                select(CrossUserConflict)
+                .options(
+                    selectinload(CrossUserConflict.user_a_memory).selectinload(
+                        Memory.proxy_user
+                    ),
+                    selectinload(CrossUserConflict.user_b_memory).selectinload(
+                        Memory.proxy_user
+                    ),
+                )
+                .where(
+                    CrossUserConflict.tenant_id == uuid.UUID(tenant_id),
+                    CrossUserConflict.status.in_(status_filter),
+                )
+                .order_by(CrossUserConflict.detected_at.desc())
+                .limit(min(limit * 5, 2500))
             )
-            .where(
-                CrossUserConflict.tenant_id == uuid.UUID(tenant_id),
-                CrossUserConflict.status.in_(status_filter),
-            )
-            .order_by(CrossUserConflict.detected_at.desc())
-            .limit(min(limit * 5, 2500))
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     conflicts = _dedupe_cross_user_conflicts(conflicts, include_status=True)[:limit]
     return CrossUserConflictsResponse(
         data=[_cross_user_conflict_to_data(conflict) for conflict in conflicts],
@@ -1400,7 +2014,9 @@ async def get_tenant_shared_context_conflicts(
     )
 
 
-@router.patch("/shared-context-conflicts/{conflict_id}", response_model=CrossUserConflictsResponse)
+@router.patch(
+    "/shared-context-conflicts/{conflict_id}", response_model=CrossUserConflictsResponse
+)
 async def update_tenant_shared_context_conflict(
     request: Request,
     conflict_id: str,
@@ -1412,8 +2028,12 @@ async def update_tenant_shared_context_conflict(
         await session.execute(
             select(CrossUserConflict)
             .options(
-                selectinload(CrossUserConflict.user_a_memory).selectinload(Memory.proxy_user),
-                selectinload(CrossUserConflict.user_b_memory).selectinload(Memory.proxy_user),
+                selectinload(CrossUserConflict.user_a_memory).selectinload(
+                    Memory.proxy_user
+                ),
+                selectinload(CrossUserConflict.user_b_memory).selectinload(
+                    Memory.proxy_user
+                ),
             )
             .where(
                 CrossUserConflict.id == uuid.UUID(conflict_id),
@@ -1431,7 +2051,9 @@ async def update_tenant_shared_context_conflict(
         conflict.auto_resolution = conflict.auto_resolution or "marked_not_conflict"
         conflict.auto_resolution_at = utc_now()
     else:
-        raise APIError(status_code=400, code="CONFLICT_400", error="invalid_conflict_resolution")
+        raise APIError(
+            status_code=400, code="CONFLICT_400", error="invalid_conflict_resolution"
+        )
 
     await session.commit()
     return CrossUserConflictsResponse(
@@ -1441,7 +2063,9 @@ async def update_tenant_shared_context_conflict(
     )
 
 
-@router.post("/conflicts/{conflict_id}/resolve", response_model=TenantConflictResolveResponse)
+@router.post(
+    "/conflicts/{conflict_id}/resolve", response_model=TenantConflictResolveResponse
+)
 async def resolve_tenant_conflict(
     request: Request,
     conflict_id: str,
@@ -1453,8 +2077,12 @@ async def resolve_tenant_conflict(
         await session.execute(
             select(CrossUserConflict)
             .options(
-                selectinload(CrossUserConflict.user_a_memory).selectinload(Memory.proxy_user),
-                selectinload(CrossUserConflict.user_b_memory).selectinload(Memory.proxy_user),
+                selectinload(CrossUserConflict.user_a_memory).selectinload(
+                    Memory.proxy_user
+                ),
+                selectinload(CrossUserConflict.user_b_memory).selectinload(
+                    Memory.proxy_user
+                ),
             )
             .where(
                 CrossUserConflict.id == uuid.UUID(conflict_id),
@@ -1464,6 +2092,15 @@ async def resolve_tenant_conflict(
     ).scalar_one_or_none()
     if conflict is None:
         raise APIError(status_code=404, code="CONFLICT_404", error="conflict_not_found")
+    if conflict.status in {
+        CrossUserConflictStatus.resolved,
+        CrossUserConflictStatus.ignored,
+    }:
+        raise APIError(
+            status_code=409,
+            code="CONFLICT_409",
+            error="conflict_already_resolved",
+        )
     if conflict.resolution_path not in {None, "tenant_review"}:
         raise APIError(
             status_code=400,
@@ -1473,12 +2110,16 @@ async def resolve_tenant_conflict(
 
     correct_user = payload.correct_user
     if correct_user not in {"A", "B", "both_valid"}:
-        raise APIError(status_code=400, code="CONFLICT_400", error="invalid_correct_user")
+        raise APIError(
+            status_code=400, code="CONFLICT_400", error="invalid_correct_user"
+        )
 
     memory_a = conflict.user_a_memory
     memory_b = conflict.user_b_memory
     if memory_a is None or memory_b is None:
-        raise APIError(status_code=400, code="CONFLICT_400", error="conflict_memory_missing")
+        raise APIError(
+            status_code=400, code="CONFLICT_400", error="conflict_memory_missing"
+        )
 
     reason = payload.reason or None
     action_taken = "both_valid_no_archive"
@@ -1493,38 +2134,82 @@ async def resolve_tenant_conflict(
         archived_memory = memory_a
         action_taken = "archived_user_a_memory"
 
-    if archived_memory is not None and kept_memory is not None:
-        await VersionService(session).asafe_record_version(
-            archived_memory,
-            "conflict_resolved",
-            (
-                "Tenant confirmed User A version"
-                if correct_user == "A"
-                else "Tenant confirmed User B version"
-            ),
-            "user",
+    selection = "both" if correct_user == "both_valid" else correct_user
+    transition_reason = reason or (
+        "Tenant confirmed memory A."
+        if correct_user == "A"
+        else (
+            "Tenant confirmed memory B."
+            if correct_user == "B"
+            else "Tenant confirmed both memories are valid."
         )
-        archived_memory.is_archived = True
+    )
+    try:
+        transition_action = await apply_conflict_selection(
+            session,
+            conflict=conflict,
+            selection=selection,
+            changed_by="operator",
+            reason=transition_reason,
+        )
+    except ValueError as exc:
+        raise APIError(
+            status_code=400,
+            code="CONFLICT_400",
+            error=str(exc),
+        ) from exc
+    if transition_action != "memory_states_unchanged":
+        action_taken = transition_action
+
+    if archived_memory is not None and kept_memory is not None:
         archived_signal_rows = (
-            await session.execute(
-                select(SharedContextSignal).where(
-                    SharedContextSignal.source_memory_id == archived_memory.id,
-                    SharedContextSignal.tenant_id == uuid.UUID(tenant_id),
+            (
+                await session.execute(
+                    select(SharedContextSignal).where(
+                        SharedContextSignal.source_memory_id == archived_memory.id,
+                        SharedContextSignal.tenant_id == uuid.UUID(tenant_id),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         kept_signal_rows = (
-            await session.execute(
-                select(SharedContextSignal).where(
-                    SharedContextSignal.source_memory_id == kept_memory.id,
-                    SharedContextSignal.tenant_id == uuid.UUID(tenant_id),
+            (
+                await session.execute(
+                    select(SharedContextSignal).where(
+                        SharedContextSignal.source_memory_id == kept_memory.id,
+                        SharedContextSignal.tenant_id == uuid.UUID(tenant_id),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for signal in archived_signal_rows:
             signal.is_superseded = True
         for signal in kept_signal_rows:
             signal.is_superseded = False
+
+    clarification_rows = (
+        (
+            await session.execute(
+                select(ClarificationQueue).where(
+                    ClarificationQueue.conflict_id == conflict.id,
+                    ClarificationQueue.status.in_(
+                        [
+                            ClarificationQueueStatus.pending,
+                            ClarificationQueueStatus.triggered,
+                        ]
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for clarification in clarification_rows:
+        clarification.status = ClarificationQueueStatus.resolved
 
     now = utc_now()
     conflict.status = CrossUserConflictStatus.resolved
@@ -1538,7 +2223,9 @@ async def resolve_tenant_conflict(
     session.add(
         AuditLog(
             user_id=(archived_memory.user_id if archived_memory is not None else None),
-            proxy_user_id=(archived_memory.proxy_user_id if archived_memory is not None else None),
+            proxy_user_id=(
+                archived_memory.proxy_user_id if archived_memory is not None else None
+            ),
             action=AuditAction.conflict_resolved_by_tenant,
             memory_id=(archived_memory.id if archived_memory is not None else None),
             old_value={
@@ -1571,7 +2258,9 @@ async def resolve_tenant_conflict(
     )
 
 
-@router.post("/settings/enable-edtech-schema", response_model=EnableEdTechSchemaResponse)
+@router.post(
+    "/settings/enable-edtech-schema", response_model=EnableEdTechSchemaResponse
+)
 async def enable_edtech_schema(
     request: Request,
     tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
@@ -1637,9 +2326,13 @@ async def test_tenant_webhook(
     if tenant_budget is None:
         raise APIError(status_code=404, code="TEN_404", error="tenant_budget_not_found")
     if not tenant_budget.alert_webhook_url:
-        raise APIError(status_code=400, code="TEN_400", error="alert_webhook_not_configured")
+        raise APIError(
+            status_code=400, code="TEN_400", error="alert_webhook_not_configured"
+        )
 
-    delivered, status_code = await _send_test_webhook(tenant_budget.alert_webhook_url, tenant_id)
+    delivered, status_code = await _send_test_webhook(
+        tenant_budget.alert_webhook_url, tenant_id
+    )
     return TenantTestWebhookResponse(
         data=TenantTestWebhookData(delivered=delivered, status_code=status_code),
         request_id=get_request_id(request),
@@ -1667,7 +2360,9 @@ async def get_tenant_deprecation_usage(
                 sunset_at=row["sunset_at"],
                 migration_guide=str(row["migration_guide_url"]),
                 replacement_field=(
-                    str(row["replacement_field"]) if row.get("replacement_field") else None
+                    str(row["replacement_field"])
+                    if row.get("replacement_field")
+                    else None
                 ),
             )
             for row in rows
