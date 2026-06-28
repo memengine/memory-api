@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 from api.db.models import EdTechMemory
+from api.services.edtech.edtech_schema import NEVER_STORE
+from api.services.edtech.edtech_schema import active_fields_for
 
 
 class EdTechPromptBuilder:
@@ -69,9 +71,23 @@ If the conversation has no durable education memory:
         conversation: str,
         existing_memory_compressed: str | None,
         is_first_interaction: bool,
+        learner_type: str = "school_student",
+        active_fields: dict[str, dict[str, Any]] | None = None,
     ) -> str:
+        fields = active_fields or active_fields_for(learner_type)
         parts = [
-            "You are an EdTech memory extraction specialist. Extract structured student-learning state from conversations. Return JSON only.",
+            "You are an EdTech memory extraction specialist. Extract structured learner state from conversations. Return JSON only.",
+            f"This learner is classified as: {learner_type}.",
+            "Extract only these active fields for this learner type:\n" + _format_active_fields(fields),
+            (
+                "Evidence rules:\n"
+                "- Store durable learner facts only when the user clearly provides evidence.\n"
+                "- Do not store assistant suggestions as facts about the learner.\n"
+                "- Interpret short user answers using the immediately preceding assistant question.\n"
+                "- Preserve the user's meaning across Hinglish, typos, and informal phrasing.\n"
+                "- If a phrase could be a subject, goal, exam, or career target, choose the field that matches the user's intent."
+            ),
+            "Never store:\n" + "\n".join(f"- {item}" for item in NEVER_STORE),
             self.SCHEMA_DEFINITION.strip(),
         ]
         if existing_memory_compressed and not is_first_interaction:
@@ -88,7 +104,16 @@ If the conversation has no durable education memory:
         if memory is None:
             return None
         summary: dict[str, Any] = {}
-        for field in ("grade_level", "board_or_curriculum", "exam_name", "exam_date", "last_topic_studied"):
+        for field in (
+            "learner_type",
+            "grade_level",
+            "board_or_curriculum",
+            "primary_deadline_event",
+            "primary_deadline_date",
+            "exam_name",
+            "exam_date",
+            "last_topic_studied",
+        ):
             value = getattr(memory, field, None)
             if value:
                 summary[field] = str(value)
@@ -103,7 +128,34 @@ If the conversation has no durable education memory:
             summary["explanation_style"] = _compact_dict(memory.explanation_style, ("primary", "needs_step_by_step", "anxiety_trigger"))
         if memory.language_profile:
             summary["language_profile"] = _compact_dict(memory.language_profile, ("primary", "comfort", "explanation_preference"))
+        for field in (
+            "competitive_exam_context",
+            "higher_education_context",
+            "professional_cert_context",
+            "skill_learner_context",
+            "medical_context",
+        ):
+            value = getattr(memory, field, None)
+            if value:
+                summary[field] = value
         return json.dumps(summary, default=str, ensure_ascii=True)
+
+
+def _format_active_fields(fields: dict[str, dict[str, Any]]) -> str:
+    lines = []
+    for name, spec in fields.items():
+        details = []
+        if spec.get("description"):
+            details.append(str(spec["description"]))
+        if spec.get("metadata_keys"):
+            details.append("metadata keys: " + ", ".join(str(item) for item in spec["metadata_keys"]))
+        if spec.get("allowed_values"):
+            details.append("allowed values: " + ", ".join(str(item) for item in spec["allowed_values"]))
+        if spec.get("examples"):
+            details.append("examples: " + str(spec["examples"]))
+        description = "; ".join(details) if details else str(spec.get("content_template") or "")
+        lines.append(f"- {name}: {description}")
+    return "\n".join(lines)
 
 
 def _topic_names(items: list[dict[str, Any]] | None, *, limit: int) -> list[str]:
