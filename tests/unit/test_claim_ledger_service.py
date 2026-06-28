@@ -14,6 +14,8 @@ from api.db.models import MemoryClaimRevision
 from api.services.claim_ledger_service import ClaimLedgerService
 from api.services.claim_ledger_service import build_claim_identity
 from api.services.claim_ledger_service import domain_authority_priority
+from api.services.claim_versions import CLAIM_PROCESSOR_VERSION
+from api.services.claim_versions import CLAIM_SCHEMA_VERSION
 
 
 class _NoClaimResult:
@@ -127,6 +129,8 @@ def test_record_memory_creates_active_claim_and_revision() -> None:
     assert len(revisions) == 1
     assert revisions[0].status == "activated"
     assert revisions[0].asserted_value == "growth"
+    assert revisions[0].schema_version == CLAIM_SCHEMA_VERSION
+    assert revisions[0].processor_version == CLAIM_PROCESSOR_VERSION
 
 
 def test_higher_authority_revision_becomes_winner() -> None:
