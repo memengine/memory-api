@@ -172,3 +172,62 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert session.commits == 2
     assert session.rollbacks == 0
     assert session.closed is True
+
+def test_pending_candidate_similarity_allows_rephrased_reinforcement() -> None:
+    existing = SimpleNamespace(content="User may prefer short replies for difficult topics")
+    candidate = extraction_tasks.PendingExtractedMemory(
+        content="User prefers short replies for difficult topics",
+        category="preference",
+        importance_score=6.0,
+        confidence=0.58,
+        reasoning="Weak repeated preference",
+    )
+
+    assert extraction_tasks._candidate_similarity(existing.content, candidate.content) >= 0.82
+    assert extraction_tasks._can_reinforce_candidate(existing, candidate) is True
+
+
+def test_pending_candidate_polarity_guard_blocks_opposite_meaning() -> None:
+    existing = SimpleNamespace(content="User prefers short replies for difficult topics")
+    candidate = extraction_tasks.PendingExtractedMemory(
+        content="User does not prefer short replies for difficult topics",
+        category="preference",
+        importance_score=6.0,
+        confidence=0.58,
+        reasoning="Opposite weak preference",
+    )
+
+    assert extraction_tasks._candidate_similarity(existing.content, candidate.content) >= 0.82
+    assert extraction_tasks._can_reinforce_candidate(existing, candidate) is False
+
+
+def test_pending_candidate_promotes_after_reinforcement_count() -> None:
+    candidate = SimpleNamespace(
+        content="User may prefer short replies for difficult topics",
+        category="preference",
+        importance_score=6.0,
+        confidence_score=0.58,
+        reasoning="Repeated weak preference",
+        reinforcement_count=2,
+    )
+
+    assert extraction_tasks._should_promote_pending_candidate(candidate) is True
+    promoted = extraction_tasks._promoted_memory_from_candidate(candidate)
+    assert promoted.content == candidate.content
+    assert promoted.category == "preference"
+    assert promoted.confidence == 0.58
+
+
+def test_pending_candidate_does_not_promote_single_weak_signal() -> None:
+    candidate = SimpleNamespace(
+        content="User may prefer short replies for difficult topics",
+        category="preference",
+        importance_score=6.0,
+        confidence_score=0.58,
+        reasoning="Single weak preference",
+        reinforcement_count=1,
+    )
+
+    assert extraction_tasks._should_promote_pending_candidate(candidate) is False
+
+
