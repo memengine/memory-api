@@ -10,7 +10,6 @@ import smtplib
 
 logger = logging.getLogger(__name__)
 FROM_ADDRESS = "noreply@memoryos.io"
-CONSENT_BASE_URL = "https://consent.memoryos.io"
 
 CATEGORY_LABELS = {
     "preference": "Your preferences and settings",
@@ -36,7 +35,7 @@ class EmailService:
         manage_url: str,
         expires_at: datetime | None = None,
     ) -> bool:
-        consent_base = str(os.getenv("CONSENT_BASE_URL") or CONSENT_BASE_URL).rstrip("/")
+        consent_base = str(os.getenv("CONSENT_APP_BASE_URL") or os.getenv("CONSENT_BASE_URL") or "").rstrip("/")
         subject = f"{agent_name} can now access your AI memories"
         if expires_at is None:
             expires_text = "continues until you revoke it"
@@ -47,6 +46,11 @@ class EmailService:
             f"   - {CATEGORY_LABELS.get(category, category.replace('_', ' ').title())}"
             for category in categories
         ) or "   - No categories listed"
+        manage_all_text = (
+            f"Manage all your memory permissions:\n{consent_base}/manage\n\n"
+            if consent_base
+            else ""
+        )
         body = (
             "Hi,\n\n"
             f"{agent_name} was just granted access to your MemoryOS memories.\n\n"
@@ -55,8 +59,7 @@ class EmailService:
             f"This access {expires_text}.\n\n"
             "Not you, or changed your mind?\n"
             f"Revoke access immediately: {manage_url}\n\n"
-            "Manage all your memory permissions:\n"
-            f"{consent_base}/manage\n\n"
+            f"{manage_all_text}"
             "\u2014 MemoryOS"
         )
         return self._send_email(to_email=to_email, subject=subject, body=body)
