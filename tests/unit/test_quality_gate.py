@@ -206,6 +206,42 @@ async def test_quality_gate_blocks_duplicate_query_on_l3() -> None:
 
 
 @pytest.mark.asyncio
+async def test_quality_gate_skips_l3_for_provenance_source_events() -> None:
+    tenant_id = str(uuid.uuid4())
+    external_user_id = "source-user-1"
+    service, session, _redis, _dispatch = build_service(
+        tenant_budget=make_tenant_budget(),
+        embedding=[1.0, 0.0],
+    )
+    service._semantic_deduplication = AsyncMock(return_value=1.0)
+    duplicate_messages = [
+        {"role": "user", "content": "What subscription plan is this customer using?"},
+        {"role": "assistant", "content": "The current subscription plan is Growth."},
+    ]
+
+    first_result = await service.check(
+        duplicate_messages,
+        tenant_id,
+        external_user_id,
+        semantic_deduplication=False,
+    )
+    second_result = await service.check(
+        duplicate_messages,
+        tenant_id,
+        external_user_id,
+        semantic_deduplication=False,
+    )
+
+    assert first_result.passed is True
+    assert second_result.passed is True
+    service._semantic_deduplication.assert_not_awaited()
+    assert all(
+        item.args[0].semantic_similarity is None
+        for item in session.add.call_args_list
+    )
+
+
+@pytest.mark.asyncio
 async def test_quality_gate_blocks_duplicate_query_on_l3_with_existing_embedding() -> None:
     tenant_id = str(uuid.uuid4())
     external_user_id = "user-3"
