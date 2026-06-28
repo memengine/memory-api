@@ -18,6 +18,8 @@ from api.db.models import MemorySourceEvent
 from api.db.models import MemoryCategory
 from api.db.models import MemoryClaim
 from api.db.models import MemoryClaimRevision
+from api.services.claim_versions import CLAIM_SCHEMA_VERSION
+from api.services.claim_versions import processor_version_for_resolution
 from api.services.provenance_service import build_provenance_snapshot
 
 
@@ -147,6 +149,8 @@ class ClaimLedgerService:
             observed_at=observed_at,
             evidence_refs=list((provenance or {}).get("evidence") or []),
             resolution_reason=resolution,
+            schema_version=CLAIM_SCHEMA_VERSION,
+            processor_version=processor_version_for_resolution(resolution),
         )
         self.session.add(revision)
         self._flush()
@@ -277,6 +281,8 @@ class ClaimLedgerService:
             observed_at=observed_at,
             evidence_refs=list((provenance or {}).get("evidence") or []),
             resolution_reason="domain_field_extraction",
+            schema_version=CLAIM_SCHEMA_VERSION,
+            processor_version=processor_version_for_resolution("domain_field_extraction"),
         )
         self.session.add(revision)
         self._flush()
