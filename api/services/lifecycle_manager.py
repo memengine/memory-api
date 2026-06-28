@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time as monotonic_time
 import uuid
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -36,12 +37,20 @@ class LifecycleReport:
     skipped: bool = False
     reason: str | None = None
     ran_at: str | None = None
+    duration_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class MemoryLifecycleManager:
+    ARCHIVE_IMPORTANCE_THRESHOLD = 1.5
+    ARCHIVE_DAYS_THRESHOLD = 90
+    HOT_TIER_IMPORTANCE_THRESHOLD = 8.0
+    HOT_TIER_ACCESS_THRESHOLD = 5
+    HOT_TIER_RECENT_DAYS = 7
+    HOT_TIER_TTL = HOT_TIER_TTL_SECONDS
+
     def __init__(
         self,
         *,
@@ -60,6 +69,7 @@ class MemoryLifecycleManager:
         self.enforce_off_peak = enforce_off_peak
 
     async def run_for_tenant(self, tenant_id: str) -> LifecycleReport:
+        started_at = monotonic_time.perf_counter()
         tenant_uuid = uuid.UUID(str(tenant_id))
         reference_time = self._now()
         report = LifecycleReport(tenant_id=str(tenant_uuid), ran_at=reference_time.isoformat())
@@ -67,6 +77,7 @@ class MemoryLifecycleManager:
         if self.enforce_off_peak and self._is_peak_ist(reference_time):
             report.skipped = True
             report.reason = "peak_hours_ist"
+            report.duration_seconds = round(monotonic_time.perf_counter() - started_at, 6)
             await self._store_report(report)
             return report
 
@@ -85,6 +96,7 @@ class MemoryLifecycleManager:
         report.rescored_count = await self._rescore_baselines(tenant_id=tenant_uuid)
 
         await self.session.commit()
+        report.duration_seconds = round(monotonic_time.perf_counter() - started_at, 6)
         await self._store_report(report)
         LOGGER.info("lifecycle_report", extra={"event": "lifecycle_report", **report.to_dict()})
         return report
@@ -129,12 +141,12 @@ class MemoryLifecycleManager:
         tenant_id: uuid.UUID,
         reference_time: datetime,
     ) -> int:
-        cutoff = reference_time - timedelta(days=90)
+        cutoff = reference_time - timedelta(days=self.ARCHIVE_DAYS_THRESHOLD)
         memories = await self._select_memories(
             tenant_id=tenant_id,
             where=(
                 Memory.is_archived.is_(False),
-                Memory.importance_score < 1.5,
+                Memory.importance_score < self.ARCHIVE_IMPORTANCE_THRESHOLD,
                 Memory.last_accessed_at < cutoff,
                 Memory.access_count == 0,
             ),
@@ -143,6 +155,12 @@ class MemoryLifecycleManager:
         archived_count = 0
         for memory in memories:
             memory.is_archived = True
+            await VersionService(self.session).asafe_record_version(
+                memory,
+                "archived",
+                "Auto-archived: low importance, no access in 90 days",
+                "system",
+            )
             self.session.add(memory)
             archived_count += 1
             self._delete_vector(memory)
@@ -164,13 +182,13 @@ class MemoryLifecycleManager:
         tenant_id: uuid.UUID,
         reference_time: datetime,
     ) -> int:
-        cutoff = reference_time - timedelta(days=7)
+        cutoff = reference_time - timedelta(days=self.HOT_TIER_RECENT_DAYS)
         memories = await self._select_memories(
             tenant_id=tenant_id,
             where=(
                 Memory.is_archived.is_(False),
-                Memory.importance_score >= 8.0,
-                Memory.access_count >= 5,
+                Memory.importance_score >= self.HOT_TIER_IMPORTANCE_THRESHOLD,
+                Memory.access_count >= self.HOT_TIER_ACCESS_THRESHOLD,
                 Memory.last_accessed_at > cutoff,
             ),
         )
