@@ -26,6 +26,7 @@ from api.services.embedding_service import EmbeddingService
 LOGGER = logging.getLogger("memoryos.quality_gate")
 QUALITY_SCORE_THRESHOLD = 0.35
 SEMANTIC_DUPLICATE_THRESHOLD = 0.92
+MIN_LEXICAL_OVERLAP_FOR_SEMANTIC_DUPLICATE = 0.2
 RATE_LIMIT_TTL_SECONDS = 120
 RECENT_QUERY_TTL_SECONDS = 3600
 RECENT_QUERY_LIST_SIZE = 5
@@ -33,6 +34,36 @@ DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 DEFAULT_EMBEDDING_DIMENSIONS = 1536
 INTERNAL_ERROR_REASON = "internal_error"
 REDIS_FAILURES = (RedisConnectionError, RedisTimeoutError)
+STOP_WORDS = {
+    "a",
+    "about",
+    "am",
+    "an",
+    "and",
+    "are",
+    "around",
+    "be",
+    "for",
+    "have",
+    "help",
+    "i",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "out",
+    "should",
+    "the",
+    "this",
+    "to",
+    "user",
+    "want",
+    "what",
+    "with",
+}
 
 
 @dataclass(slots=True)
@@ -85,6 +116,8 @@ class QualityGateService:
         messages: list[dict[str, Any]],
         tenant_id: str,
         external_user_id: str,
+        *,
+        semantic_deduplication: bool = True,
     ) -> GateResult:
         quality_score = 0.0
         semantic_similarity: float | None = None
@@ -125,20 +158,24 @@ class QualityGateService:
                     budget_remaining_pct=budget_remaining_pct,
                 )
 
-            semantic_similarity = await self._semantic_deduplication(
-                messages=messages,
-                tenant_id=tenant_id,
-                external_user_id=external_user_id,
-            )
-            if semantic_similarity is not None and semantic_similarity > SEMANTIC_DUPLICATE_THRESHOLD:
-                blocked_layer = CallQualityBlockedLayer.l3
-                gate_reason = "duplicate_query"
-                return GateResult(
-                    passed=False,
-                    blocked_layer=blocked_layer.value,
-                    reason=gate_reason,
-                    budget_remaining_pct=budget_remaining_pct,
+            if semantic_deduplication:
+                semantic_similarity = await self._semantic_deduplication(
+                    messages=messages,
+                    tenant_id=tenant_id,
+                    external_user_id=external_user_id,
                 )
+                if (
+                    semantic_similarity is not None
+                    and semantic_similarity > SEMANTIC_DUPLICATE_THRESHOLD
+                ):
+                    blocked_layer = CallQualityBlockedLayer.l3
+                    gate_reason = "duplicate_query"
+                    return GateResult(
+                        passed=False,
+                        blocked_layer=blocked_layer.value,
+                        reason=gate_reason,
+                        budget_remaining_pct=budget_remaining_pct,
+                    )
 
             budget_decision = await self.budget_governor.evaluate(
                 messages=messages,
@@ -228,6 +265,12 @@ class QualityGateService:
                 similarity_scores.append(1.0)
                 continue
             if not isinstance(previous_embedding, list) or not previous_embedding:
+                continue
+            if previous_query and self._has_conflicting_salient_entities(previous_query, query_text):
+                similarity_scores.append(0.0)
+                continue
+            if previous_query and self._token_overlap(previous_query, query_text) < MIN_LEXICAL_OVERLAP_FOR_SEMANTIC_DUPLICATE:
+                similarity_scores.append(0.0)
                 continue
             similarity_scores.append(self._cosine_similarity(embedding, previous_embedding))
 
@@ -417,6 +460,64 @@ class QualityGateService:
     @staticmethod
     def _normalize_query(value: str) -> str:
         return re.sub(r"\s+", " ", value.strip().lower())
+
+    @classmethod
+    def _salient_entities(cls, value: str) -> set[str]:
+        acronyms = set(re.findall(r"\b[A-Z]{2,}\b", value))
+        numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", value))
+        subject_like = {
+            token
+            for token in re.findall(r"\b[a-z][a-z0-9_+-]{2,}\b", value.lower())
+            if token not in STOP_WORDS
+        }
+        return acronyms | numbers | subject_like
+
+    @classmethod
+    def _has_conflicting_salient_entities(cls, previous_query: str, query_text: str) -> bool:
+        previous_entities = cls._salient_entities(previous_query)
+        current_entities = cls._salient_entities(query_text)
+        if not previous_entities or not current_entities:
+            return False
+
+        previous_strong = cls._strong_identifiers(previous_query)
+        current_strong = cls._strong_identifiers(query_text)
+        if previous_strong or current_strong:
+            return bool(previous_strong and current_strong and previous_strong.isdisjoint(current_strong))
+
+        shared = previous_entities & current_entities
+        previous_unique = previous_entities - shared
+        current_unique = current_entities - shared
+        if not previous_unique or not current_unique:
+            return False
+
+        # Different exam names, subjects, scores, or other salient facts mean
+        # this is probably a new memory, not a duplicate add() request.
+        return True
+
+    @classmethod
+    def _token_overlap(cls, previous_query: str, query_text: str) -> float:
+        previous_tokens = cls._content_tokens(previous_query)
+        current_tokens = cls._content_tokens(query_text)
+        if not previous_tokens or not current_tokens:
+            return 0.0
+        return len(previous_tokens & current_tokens) / min(
+            len(previous_tokens),
+            len(current_tokens),
+        )
+
+    @staticmethod
+    def _content_tokens(value: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"\b[\w'-]+\b", value.lower())
+            if len(token) > 2 and token not in STOP_WORDS
+        }
+
+    @staticmethod
+    def _strong_identifiers(value: str) -> set[str]:
+        acronyms = set(re.findall(r"\b[A-Z]{2,}\b", value))
+        numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", value))
+        return acronyms | numbers
 
     @staticmethod
     def _retry_after_seconds() -> int:
