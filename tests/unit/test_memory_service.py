@@ -10,6 +10,8 @@ import pytest
 
 from api.db.models import Memory
 from api.db.models import MemoryCategory
+from api.db.models import ExtractionJob
+from api.db.models import ExtractionJobStatus
 from api.db.models import QuotaMode
 from api.services.memory_service import MemoryService
 from api.services.quota_manager import QuotaEnvelope
@@ -284,6 +286,40 @@ async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
         scope="tenant:tenant-1",
         operation="memory_add",
     )
+
+
+def test_existing_source_event_payload_uses_live_job_status() -> None:
+    job_id = uuid4()
+    job = ExtractionJob(
+        id=job_id,
+        tenant_id=uuid4(),
+        proxy_user_id=uuid4(),
+        external_user_id="customer-1",
+        status=ExtractionJobStatus.dead,
+        payload={
+            "job_id": str(job_id),
+            "status": "queued",
+            "memories_created": 0,
+        },
+        attempts=3,
+        max_attempts=3,
+        memories_created=0,
+        result={"pending_candidates_buffered": 2, "pending_candidates_promoted": 1},
+        error="Provider unavailable",
+        error_type="llm_provider_unavailable",
+    )
+
+    result = MemoryService._job_payload_with_live_status(job)
+
+    assert result["job_id"] == str(job_id)
+    assert result["status"] == "dead"
+    assert result["attempts"] == 3
+    assert result["max_attempts"] == 3
+    assert result["memories_created"] == 0
+    assert result["pending_candidates_buffered"] == 2
+    assert result["pending_candidates_promoted"] == 1
+    assert result["error_type"] == "llm_provider_unavailable"
+    assert result["error"] == "Provider unavailable"
 
 
 @pytest.mark.asyncio
