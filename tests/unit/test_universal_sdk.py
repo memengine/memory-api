@@ -63,6 +63,16 @@ def test_consent_url_can_preselect_categories() -> None:
     assert params["categories"] == ["preference,goal"]
 
 
+def test_consent_url_can_include_identity_link_token() -> None:
+    url = UniversalMemory.consent_url(
+        agent_id="agent-123",
+        link_token="plink_test_token",
+    )
+
+    params = parse_qs(urlparse(url).query)
+    assert params["link_token"] == ["plink_test_token"]
+
+
 def test_add_uses_universal_auth_headers_and_returns_add_result() -> None:
     captured_headers: dict[str, str] = {}
 
