@@ -74,6 +74,8 @@ class MemoryData(BaseModel):
     agent_id: str | None = None
     previous_version_id: str | None = None
     source_conversation_id: str | None = None
+    source_event_id: str | None = None
+    provenance: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -85,6 +87,8 @@ class MemorySearchResult(BaseModel):
     last_accessed: datetime | None = None
     relevance_score: float
     context_snippet: str
+    source_event_id: str | None = None
+    provenance: dict[str, Any] | None = None
 
 
 class MemoryListResponse(ResponseEnvelope):
@@ -124,6 +128,8 @@ class MemoryJobStatusData(BaseModel):
     job_id: str
     status: str
     memories_created: int = 0
+    pending_candidates_buffered: int = 0
+    pending_candidates_promoted: int = 0
     attempts: int = 0
     created_at: datetime | None = None
     processing_started_at: datetime | None = None
@@ -141,6 +147,7 @@ class MemoryJobStatusResponse(ResponseEnvelope):
 
 
 class MemoryRetrieveResponse(ResponseEnvelope):
+    retrieval_id: str | None = None
     data: list[MemorySearchResult]
     cached: bool
     system_prompt_addition: str
@@ -149,6 +156,17 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     quota_mode: str | None = None
     is_degraded: bool = False
     is_passthrough: bool = False
+
+
+class RetrievalFeedbackData(BaseModel):
+    feedback_id: str
+    retrieval_id: str
+    outcome: str
+    correction_job_id: str | None = None
+
+
+class RetrievalFeedbackResponse(ResponseEnvelope):
+    data: RetrievalFeedbackData
 
 
 class UserProfileData(BaseModel):
