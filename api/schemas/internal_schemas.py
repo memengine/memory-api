@@ -51,6 +51,63 @@ class SystemHealthResponse(BaseModel):
     generated_at: datetime
 
 
+class ProvenanceHealthResponse(BaseModel):
+    memories_total: int
+    memories_with_provenance: int
+    coverage_pct: float
+    tenant_memories_total: int
+    tenant_memories_with_provenance: int
+    tenant_coverage_pct: float
+    passport_memories_total: int
+    passport_memories_with_provenance: int
+    passport_coverage_pct: float
+    tenant_claims_disputed: int
+    passport_claims_disputed: int
+    revoked_grant_memories: int
+    missing_service_writers: int
+    tenant_legacy_unknown_memories: int
+    missing_passport_sources: int
+    failed_backfills_30d: int
+    status: Literal["HEALTHY", "ATTENTION", "CRITICAL"]
+    generated_at: datetime
+
+
+class ClaimVersionBucket(BaseModel):
+    scope: Literal["tenant", "passport"]
+    schema_version: int
+    processor_version: str
+    revision_count: int
+
+
+class ClaimVersionDistributionResponse(BaseModel):
+    data: list[ClaimVersionBucket]
+    current_schema_version: int
+    current_processor_version: str
+    generated_at: datetime
+
+class ProvenanceIssueRecord(BaseModel):
+    issue_key: str
+    issue_type: Literal["service_writer", "legacy_event", "passport_source"]
+    tenant_id: uuid.UUID | None = None
+    tenant_name: str
+    source_label: str
+    api_key_name: str | None = None
+    api_key_prefix: str | None = None
+    sample_reference: str | None = None
+    occurrences: int
+    first_seen: datetime
+    last_seen: datetime
+    recommended_action: str
+
+
+class ProvenanceIssuesResponse(BaseModel):
+    data: list[ProvenanceIssueRecord]
+    next_cursor: str | None = None
+    total_count: int
+    limit: int
+    generated_at: datetime
+
+
 class ProviderUsageData(BaseModel):
     last_hour: dict[str, int] = Field(default_factory=dict)
     active_provider: str | None = None
@@ -219,6 +276,31 @@ class GlobalAgentVerificationResponse(BaseModel):
 
 
 class GlobalAgentVerificationUpdateRequest(BaseModel):
+    is_verified: bool
+
+
+class OrganisationVerificationRecord(BaseModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    tenant_name: str
+    display_name: str
+    logo_url: str | None = None
+    website_url: str | None = None
+    category: str
+    oauth_enabled: bool
+    link_token_enabled: bool
+    is_verified: bool
+    is_public: bool
+    connections_count: int = 0
+    created_at: datetime
+
+
+class OrganisationVerificationResponse(BaseModel):
+    data: list[OrganisationVerificationRecord]
+    generated_at: datetime
+
+
+class OrganisationVerificationUpdateRequest(BaseModel):
     is_verified: bool
 
 
