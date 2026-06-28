@@ -16,9 +16,67 @@ from api.db.models import ServiceWriter
 from api.errors import APIError
 
 
+SOURCE_EVENT_HASH_VERSION = "source-envelope-v2"
+
+
 def payload_sha256(messages: list[dict[str, str]]) -> str:
     canonical = json.dumps(messages, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def source_event_sha256(
+    *,
+    messages: list[dict[str, Any]],
+    source: dict[str, Any],
+) -> str:
+    observed_at = source.get("observed_at")
+    if isinstance(observed_at, str):
+        observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    if isinstance(observed_at, datetime):
+        observed_at = observed_at.astimezone(UTC).isoformat()
+
+    evidence = sorted(
+        (
+            {
+                "source_type": str(item.get("source_type") or ""),
+                "reference": str(item.get("reference") or ""),
+                "content_hash": item.get("content_hash"),
+            }
+            for item in list(source.get("evidence") or [])
+        ),
+        key=lambda item: (
+            item["source_type"],
+            item["reference"],
+            str(item["content_hash"] or ""),
+        ),
+    )
+    envelope = {
+        "messages": messages,
+        "service": str(source.get("service") or ""),
+        "event_id": str(source.get("event_id") or ""),
+        "observed_at": observed_at,
+        "scope": dict(source.get("scope") or {}),
+        "evidence": evidence,
+    }
+    canonical = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def source_event_payload_matches(
+    *,
+    existing_event: MemorySourceEvent,
+    messages: list[dict[str, Any]],
+    incoming_hash: str,
+) -> bool:
+    hash_version = (existing_event.processing_metadata or {}).get("payload_hash_version")
+    if hash_version == SOURCE_EVENT_HASH_VERSION:
+        return existing_event.payload_hash == incoming_hash
+    return existing_event.payload_hash == payload_sha256(messages)
 
 
 def build_provenance_snapshot(event: MemorySourceEvent) -> dict[str, Any]:
