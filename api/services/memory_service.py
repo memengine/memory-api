@@ -3,12 +3,15 @@ from __future__ import annotations
 import uuid
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from typing import Awaitable
 from typing import Callable
 
 from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.cache import CacheService
@@ -16,12 +19,17 @@ from api.db.models import EmbeddingModel
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
+from api.db.models import MemorySourceEvent
 from api.db.models import ProxyUser
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.services.embedding_service import EmbeddingResult
 from api.services.embedding_service import EmbeddingService
 from api.services.proxy_user_service import ProxyUserService
+from api.services.provenance_service import ProvenanceService
+from api.services.provenance_service import SOURCE_EVENT_HASH_VERSION
+from api.services.provenance_service import source_event_sha256
+from api.services.provenance_service import source_event_payload_matches
 from api.services.common import resolve_authorized_user
 from api.services.quota_manager import QuotaManager
 from api.services.vector_outbox import build_vector_payload
@@ -29,6 +37,7 @@ from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.version_service import VersionService
 from api.tasks.queue_router import QueueRouter
+from api.settings import get_settings
 
 
 EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
@@ -59,6 +68,18 @@ class MemoryService:
         self.queue_router = QueueRouter(session=session, cache_service=cache_service)
         self.region_id = region_id
 
+    async def get_idempotent_memory_add(
+        self,
+        *,
+        tenant_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        return await self.cache_service.get_idempotent_response(
+            idempotency_key,
+            scope=f"tenant:{tenant_id}",
+            operation="memory_add",
+        )
+
     async def queue_memory_add(
         self,
         *,
@@ -71,6 +92,8 @@ class MemoryService:
         tenant_id: str | None = None,
         external_user_id: str | None = None,
         proxy_user_id: str | None = None,
+        api_key_id: str | None = None,
+        source: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         proxy_user = None
         resolved_proxy_user_id = proxy_user_id
@@ -110,15 +133,23 @@ class MemoryService:
                 )
                 resolved_proxy_user_id = str(proxy_user.id)
 
-        user = None
         if authenticated_user_id and not tenant_id:
-            user = await resolve_authorized_user(
+            await resolve_authorized_user(
                 self.session,
                 requested_user_id=requested_user_id,
                 authenticated_user_id=authenticated_user_id,
             )
+        idempotency_scope = (
+            f"tenant:{tenant_id}"
+            if tenant_id
+            else f"user:{authenticated_user_id or requested_user_id or resolved_proxy_user_id or 'anonymous'}"
+        )
         if idempotency_key:
-            cached_job = await self.cache_service.get_idempotent_response(idempotency_key)
+            cached_job = await self.cache_service.get_idempotent_response(
+                idempotency_key,
+                scope=idempotency_scope,
+                operation="memory_add",
+            )
             if cached_job is not None:
                 return cached_job
 
@@ -136,6 +167,31 @@ class MemoryService:
             "queued_at": datetime.now(UTC).isoformat(),
         }
         if tenant_id:
+            provenance_service = ProvenanceService(self.session)
+            writer = await provenance_service.resolve_writer(
+                tenant_id=tenant_id,
+                api_key_id=api_key_id,
+                requested_service=str(source.get("service")) if source and source.get("service") else None,
+            )
+            normalized_source = provenance_service.normalize_source(
+                source=source,
+                writer=writer,
+                api_key_id=api_key_id,
+                job_id=job["job_id"],
+            )
+            job["source"] = {
+                **normalized_source,
+                "observed_at": normalized_source["observed_at"].isoformat(),
+                "writer_id": str(writer.id) if writer is not None else None,
+                "api_key_id": api_key_id,
+                "payload_hash": source_event_sha256(
+                    messages=messages,
+                    source=normalized_source,
+                ),
+                "payload_hash_version": SOURCE_EVENT_HASH_VERSION,
+                "explicit": source is not None,
+            }
+        if tenant_id:
             reservation = await self.queue_router.reserve_extraction_slot(
                 tenant_id=tenant_id,
                 job_id=job["job_id"],
@@ -148,10 +204,24 @@ class MemoryService:
                 }
             job["queue_name"] = reservation.queue_name
             job["plan_tier"] = reservation.plan_tier
-        await self._create_extraction_job(job)
+        persisted_job, created = await self._create_extraction_job(job)
+        if not created:
+            if tenant_id and job.get("queue_name"):
+                await self.queue_router.release_extraction_slot(
+                    tenant_id=tenant_id,
+                    queue_name=str(job["queue_name"]),
+                    job_id=job["job_id"],
+                )
+            return persisted_job
         await self.cache_service.set_job_status(job["job_id"], job, ttl=3600)
         if idempotency_key:
-            await self.cache_service.set_idempotent_response(idempotency_key, job, ttl=86400)
+            await self.cache_service.set_idempotent_response(
+                idempotency_key,
+                job,
+                ttl=86400,
+                scope=idempotency_scope,
+                operation="memory_add",
+            )
         dispatch_error = await self._dispatch_extraction_job(job)
         if dispatch_error:
             job["status"] = "error"
@@ -184,14 +254,13 @@ class MemoryService:
         external_user_id: str | None = None,
     ) -> tuple[list[Memory], str | None, int]:
         if tenant_id:
-            query = (
+            base_query = (
                 select(Memory)
                 .join(ProxyUser, Memory.proxy_user_id == ProxyUser.id)
                 .where(ProxyUser.tenant_id == uuid.UUID(tenant_id))
-                .order_by(Memory.created_at.desc(), Memory.id.desc())
             )
             if external_user_id:
-                query = query.where(ProxyUser.external_user_id == external_user_id)
+                base_query = base_query.where(ProxyUser.external_user_id == external_user_id)
         else:
             if not authenticated_user_id:
                 raise APIError(status_code=401, code="AUTH_001", error="unauthorized")
@@ -200,26 +269,50 @@ class MemoryService:
                 requested_user_id=requested_user_id,
                 authenticated_user_id=authenticated_user_id,
             )
-            query = (
+            base_query = (
                 select(Memory)
                 .where(Memory.user_id == user.id)
-                .order_by(Memory.created_at.desc(), Memory.id.desc())
             )
         if categories:
-            query = query.where(Memory.category.in_(categories))
+            base_query = base_query.where(Memory.category.in_(categories))
         if agent_id:
-            query = query.where(Memory.agent_id == uuid.UUID(agent_id))
+            base_query = base_query.where(Memory.agent_id == uuid.UUID(agent_id))
 
-        result = await self.session.execute(query)
-        memories = list(result.scalars().all())
-        total = len(memories)
-        sliced = self._slice_with_cursor(memories, cursor=cursor, limit=limit)
-        next_cursor = None
-        if sliced:
-            last_index = memories.index(sliced[-1])
-            if (last_index + 1) < len(memories):
-                next_cursor = str(sliced[-1].id)
-        return sliced, next_cursor, total
+        count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
+        total_result = await self.session.execute(count_query)
+        total = int(total_result.scalar_one() or 0)
+
+        page_query = base_query
+        if cursor:
+            try:
+                cursor_id = uuid.UUID(cursor)
+            except ValueError:
+                cursor_id = None
+            if cursor_id is not None:
+                cursor_row = (
+                    await self.session.execute(
+                        base_query.order_by(None).where(Memory.id == cursor_id).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if cursor_row is not None:
+                    page_query = page_query.where(
+                        or_(
+                            Memory.created_at < cursor_row.created_at,
+                            (
+                                (Memory.created_at == cursor_row.created_at)
+                                & (Memory.id < cursor_row.id)
+                            ),
+                        )
+                    )
+
+        result = await self.session.execute(
+            page_query.order_by(Memory.created_at.desc(), Memory.id.desc()).limit(limit + 1)
+        )
+        page = list(result.scalars().all())
+        has_more = len(page) > limit
+        memories = page[:limit]
+        next_cursor = str(memories[-1].id) if has_more and memories else None
+        return memories, next_cursor, total
 
     async def get_memory(
         self,
@@ -253,7 +346,6 @@ class MemoryService:
         requires_vector_sync = content is not None or importance_score is not None or is_archived is not None
         next_content = content if content is not None else memory.content
         next_archived = bool(is_archived) if is_archived is not None else bool(memory.is_archived)
-        next_importance = float(importance_score) if importance_score is not None else float(memory.importance_score)
         next_embedding: EmbeddingResult | None = None
         if requires_vector_sync and not next_archived:
             next_embedding = await self._embed_content(next_content)
@@ -378,6 +470,8 @@ class MemoryService:
                 "job_id": str(job_row.id),
                 "status": job_row.status.value,
                 "memories_created": int(job_row.memories_created or 0),
+                "pending_candidates_buffered": int((job_row.result or {}).get("pending_candidates_buffered", 0) or 0),
+                "pending_candidates_promoted": int((job_row.result or {}).get("pending_candidates_promoted", 0) or 0),
                 "attempts": int(job_row.attempts or 0),
                 "max_attempts": int(job_row.max_attempts or DEFAULT_MAX_EXTRACTION_ATTEMPTS),
                 "created_at": job_row.created_at.isoformat() if job_row.created_at else None,
@@ -398,25 +492,112 @@ class MemoryService:
 
         return {"job_id": job_id, "status": "unknown", "memories_created": 0}
 
-    async def _create_extraction_job(self, job: dict[str, Any]) -> None:
+    async def _create_extraction_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         tenant_id = job.get("tenant_id")
         proxy_user_id = job.get("proxy_user_id")
         external_user_id = job.get("external_user_id")
         if not tenant_id or not proxy_user_id or not external_user_id:
-            return
-        row = ExtractionJob(
-            id=uuid.UUID(job["job_id"]),
-            tenant_id=uuid.UUID(str(tenant_id)),
-            proxy_user_id=uuid.UUID(str(proxy_user_id)),
-            external_user_id=str(external_user_id),
-            status=ExtractionJobStatus.queued,
-            max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
-            queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
-            payload=job,
-            result={},
+            return job, True
+        source = dict(job.get("source") or {})
+        try:
+            source_event: MemorySourceEvent | None = None
+            if source:
+                source_event = MemorySourceEvent(
+                    id=uuid.uuid4(),
+                    tenant_id=uuid.UUID(str(tenant_id)),
+                    proxy_user_id=uuid.UUID(str(proxy_user_id)),
+                    writer_id=uuid.UUID(str(source["writer_id"])) if source.get("writer_id") else None,
+                    api_key_id=uuid.UUID(str(source["api_key_id"])) if source.get("api_key_id") else None,
+                    source_service=str(source["service"]),
+                    source_event_id=str(source["event_id"]),
+                    observed_at=datetime.fromisoformat(str(source["observed_at"]).replace("Z", "+00:00")),
+                    payload_hash=str(source["payload_hash"]),
+                    scope=dict(source.get("scope") or {}),
+                    evidence_refs=list(source.get("evidence") or []),
+                    processing_metadata={
+                        "app_version": get_settings().app_version,
+                        "schema_version": 1,
+                        "policy_version": "provenance-phase2-v1",
+                        "prompt_version": "general-extraction-v1",
+                        "payload_hash_version": source.get("payload_hash_version"),
+                    },
+                )
+                self.session.add(source_event)
+                job["source_event_id"] = str(source_event.id)
+            row = ExtractionJob(
+                id=uuid.UUID(job["job_id"]),
+                tenant_id=uuid.UUID(str(tenant_id)),
+                proxy_user_id=uuid.UUID(str(proxy_user_id)),
+                external_user_id=str(external_user_id),
+                status=ExtractionJobStatus.queued,
+                max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
+                queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
+                payload=job,
+                result={},
+                source_event_id=source_event.id if source_event is not None else None,
+                raw_payload_expires_at=(
+                    datetime.now(UTC) + timedelta(days=get_settings().extraction_payload_retention_days)
+                ),
+            )
+            self.session.add(row)
+            await self.session.commit()
+            return job, True
+        except IntegrityError:
+            await self.session.rollback()
+            if not source:
+                raise
+            existing_event = (
+                await self.session.execute(
+                    select(MemorySourceEvent).where(
+                        MemorySourceEvent.tenant_id == uuid.UUID(str(tenant_id)),
+                        MemorySourceEvent.source_service == str(source["service"]),
+                        MemorySourceEvent.source_event_id == str(source["event_id"]),
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_event is None:
+                raise
+            if not source_event_payload_matches(
+                existing_event=existing_event,
+                messages=list(job.get("messages") or []),
+                incoming_hash=str(source["payload_hash"]),
+            ):
+                raise APIError(
+                    status_code=409,
+                    code="PROV_409",
+                    error="source_event_payload_mismatch",
+                    details={
+                        "service": source["service"],
+                        "event_id": source["event_id"],
+                    },
+                )
+            existing_job = (
+                await self.session.execute(
+                    select(ExtractionJob).where(ExtractionJob.source_event_id == existing_event.id)
+                )
+            ).scalar_one_or_none()
+            if existing_job is None:
+                raise
+            return self._job_payload_with_live_status(existing_job), False
+
+    @staticmethod
+    def _job_payload_with_live_status(job: ExtractionJob) -> dict[str, Any]:
+        payload = dict(job.payload or {})
+        payload.update(
+            {
+                "job_id": str(job.id),
+                "status": job.status.value,
+                "memories_created": int(job.memories_created or 0),
+                "pending_candidates_buffered": int((job.result or {}).get("pending_candidates_buffered", 0) or 0),
+                "pending_candidates_promoted": int((job.result or {}).get("pending_candidates_promoted", 0) or 0),
+                "attempts": int(job.attempts or 0),
+                "max_attempts": int(job.max_attempts or DEFAULT_MAX_EXTRACTION_ATTEMPTS),
+                "error_type": job.error_type,
+            }
         )
-        self.session.add(row)
-        await self.session.commit()
+        if job.error:
+            payload["error"] = job.error
+        return payload
 
     async def _mark_extraction_job_failed(
         self,
