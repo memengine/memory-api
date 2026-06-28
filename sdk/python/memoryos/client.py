@@ -13,13 +13,19 @@ from memoryos.types import AddRequest
 from memoryos.types import AddResult
 from memoryos.types import ConversationMessage
 from memoryos.types import DeleteEnvelope
+from memoryos.types import EdTechMemoryProfile
+from memoryos.types import EdTechProfileEnvelope
 from memoryos.types import ExportEnvelope
 from memoryos.types import MemoryExport
 from memoryos.types import MemoryListEnvelope
 from memoryos.types import MemoryPage
+from memoryos.types import MemorySource
 from memoryos.types import QuotaMode
 from memoryos.types import RetrieveResult
 from memoryos.types import RetrieveEnvelope
+from memoryos.types import RetrievalFeedbackResult
+from memoryos.types import RetrievalFeedbackRequest
+from memoryos.types import RetrievalFeedbackEnvelope
 
 
 class Memory:
@@ -80,14 +86,28 @@ class Memory:
         external_user_id: str,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        source: MemorySource | dict[str, Any] | None = None,
     ) -> AddResult:
         payload = AddRequest(
             external_user_id=external_user_id,
             agent_id=agent_id,
             messages=[item if isinstance(item, ConversationMessage) else ConversationMessage.model_validate(item) for item in messages],
             metadata=metadata or {},
+            idempotency_key=idempotency_key,
+            source=(
+                source
+                if isinstance(source, MemorySource)
+                else MemorySource.model_validate(source)
+                if source is not None
+                else None
+            ),
         )
-        response = self._request_response("POST", "/v1/memories/add", json=payload.model_dump(mode="json"))
+        response = self._request_response(
+            "POST",
+            "/v1/memories/add",
+            json=payload.model_dump(mode="json", exclude_none=True),
+        )
         parsed = AddEnvelope.model_validate(self._parse_json(response))
         return AddResult(
             job_id=parsed.job_id,
@@ -99,6 +119,7 @@ class Memory:
             processing_eta_seconds=parsed.processing_eta_seconds,
             processing_status=self._processing_status_from_response(response, parsed.processing_status),
             circuit_status=self._circuit_status_from_response(response),
+            nothing_to_extract=parsed.nothing_to_extract,
         )
 
     def get(
@@ -107,29 +128,67 @@ class Memory:
         external_user_id: str,
         limit: int = 10,
         categories: list[str] | None = None,
+        agent_id: str | None = None,
+        time_filter_days: int | None = None,
+        format: str = "bullets",
+        context_max_tokens: int = 500,
     ) -> RetrieveResult:
+        body: dict[str, Any] = {
+            "query": query,
+            "external_user_id": external_user_id,
+            "limit": limit,
+            "categories": categories or [],
+            "format": format,
+            "context_max_tokens": context_max_tokens,
+        }
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+        if time_filter_days is not None:
+            body["time_filter_days"] = time_filter_days
         response = self._request_response(
             "POST",
             "/v1/memories/retrieve",
-            json={
-                "query": query,
-                "external_user_id": external_user_id,
-                "limit": limit,
-                "categories": categories or [],
-                "format": "bullets",
-            },
+            json=body,
         )
         parsed = RetrieveEnvelope.model_validate(self._parse_json(response))
         quota_mode = parsed.quota_mode or self._quota_mode_from_response(response)
         return RetrieveResult(
+            retrieval_id=parsed.retrieval_id,
             items=parsed.data,
             cached=parsed.cached,
             system_prompt_addition=parsed.system_prompt_addition,
+            context_token_count=parsed.context_token_count,
+            memories_from_hot_tier=parsed.memories_from_hot_tier,
             quota_mode=quota_mode,
             is_passthrough=quota_mode == "PASSTHROUGH",
             is_degraded=quota_mode == "DEGRADED_RETRIEVE",
             circuit_status=self._circuit_status_from_response(response),
         )
+
+    def feedback(
+        self,
+        retrieval_id: str,
+        outcome: str,
+        used_memory_ids: list[str] | None = None,
+        correction: str | None = None,
+        agent_confidence: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RetrievalFeedbackResult:
+        payload = RetrievalFeedbackRequest(
+            retrieval_id=retrieval_id,
+            outcome=outcome,  # type: ignore[arg-type]
+            used_memory_ids=used_memory_ids or [],
+            correction=correction,
+            agent_confidence=agent_confidence,
+            metadata=metadata or {},
+        )
+        response = self._request_response(
+            "POST",
+            "/v1/memories/retrieval-feedback",
+            json=payload.model_dump(mode="json", exclude_none=True),
+        )
+        parsed = RetrievalFeedbackEnvelope.model_validate(self._parse_json(response))
+        return parsed.data
 
     def delete(
         self,
@@ -170,6 +229,16 @@ class Memory:
         _ = self._resolve_external_user_id(external_user_id, kwargs)
         response = self._request("GET", "/v1/users/me/export")
         return ExportEnvelope.model_validate(response).data
+
+    def get_edtech_profile(self, external_user_id: str) -> EdTechMemoryProfile | None:
+        """Return the structured EdTech profile for a user, if enabled."""
+
+        response = self._request(
+            "GET",
+            "/v1/memories/edtech-profile",
+            params={"external_user_id": external_user_id},
+        )
+        return EdTechProfileEnvelope.model_validate(response).data
 
     def _request(
         self,
