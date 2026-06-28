@@ -239,7 +239,7 @@ class UUIService:
         result = await self.session.execute(
             select(PermissionGrant)
             .join(PermissionGrant.global_agent)
-            .options(joinedload(PermissionGrant.global_agent))
+            .options(joinedload(PermissionGrant.global_agent).joinedload(GlobalAgent.owner_tenant))
             .where(
                 PermissionGrant.user_uui_id == self._as_uuid(user_uui_id),
                 PermissionGrant.is_active.is_(True),
@@ -380,12 +380,12 @@ class UUIService:
         return True, memories_removed
 
     async def _get_grant_with_agent(self, grant_id: str) -> PermissionGrant | None:
-        grant = await self.session.get(PermissionGrant, self._as_uuid(grant_id))
-        if grant is None:
-            return None
-        if getattr(grant, "global_agent", None) is None:
-            grant.global_agent = await self.session.get(GlobalAgent, grant.agent_id)
-        return grant
+        result = await self.session.execute(
+            select(PermissionGrant)
+            .options(joinedload(PermissionGrant.global_agent).joinedload(GlobalAgent.owner_tenant))
+            .where(PermissionGrant.id == self._as_uuid(grant_id))
+        )
+        return result.scalar_one_or_none()
 
     async def _cache_uui_token(self, uui_token: str, user_id: str) -> None:
         await self._redis_set(self._uui_cache_key(uui_token), user_id, ex=UUI_CACHE_TTL_SECONDS)
