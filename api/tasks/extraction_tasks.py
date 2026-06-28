@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import traceback
 import uuid
 from datetime import UTC
 from datetime import datetime
+from difflib import SequenceMatcher
 from datetime import timedelta
 from typing import Any
 import logging
@@ -28,15 +30,21 @@ from api.db.models import DeadLetterJob
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
+from api.db.models import MemorySourceEvent
+from api.db.models import PendingExtractionCandidate
 from api.db.models import ProxyUser
 from api.db.models import User
 from api.db.vector_store import QdrantService
+from api.schemas.extraction_schemas import PendingExtractedMemory
+from api.schemas.memory_schemas import ExtractedMemory
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_redis_open
 from api.services.conflict_resolver import ConflictResolver
+from api.services.domain_schemas.registry import get_domain_schema
 from api.services.embedding_service import EmbeddingService
-from api.services.extractor import ExtractionService
+from api.services.extraction_service import ExtractionService
 from api.services.importance_scorer import ImportanceScorer
+from api.services.provenance_service import build_provenance_snapshot
 from api.tasks.queue_router import release_extraction_slot_sync
 from api.settings import get_settings
 
@@ -344,6 +352,327 @@ def _serialize_stored_memories(stored_memories: list[Any]) -> list[dict[str, Any
     return serialized
 
 
+def _normalize_candidate_text(value: str) -> str:
+    return " ".join(value.strip().lower().rstrip(".?!").split())
+
+
+def _candidate_fingerprint(candidate: PendingExtractedMemory) -> str:
+    canonical = repr(
+        {
+            "category": str(candidate.category).lower(),
+            "content": _normalize_candidate_text(candidate.content),
+        }
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+_NEGATION_TOKENS = {
+    "avoid",
+    "dislike",
+    "dislikes",
+    "don't",
+    "dont",
+    "doesn't",
+    "doesnt",
+    "hate",
+    "hates",
+    "never",
+    "no",
+    "not",
+    "prefer not",
+    "stopped",
+    "without",
+}
+_PENDING_SIMILARITY_THRESHOLD = 0.82
+_PENDING_PROMOTION_REINFORCEMENT_COUNT = 2
+
+
+def _candidate_similarity(left: str, right: str) -> float:
+    normalized_left = _normalize_candidate_text(left)
+    normalized_right = _normalize_candidate_text(right)
+    if not normalized_left or not normalized_right:
+        return 0.0
+    if normalized_left == normalized_right:
+        return 1.0
+    left_tokens = set(normalized_left.split())
+    right_tokens = set(normalized_right.split())
+    token_overlap = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+    sequence_ratio = SequenceMatcher(None, normalized_left, normalized_right).ratio()
+    return max(token_overlap, sequence_ratio)
+
+
+def _candidate_polarity(value: str) -> str:
+    normalized = f" {_normalize_candidate_text(value)} "
+    for token in _NEGATION_TOKENS:
+        if f" {token} " in normalized:
+            return "negative"
+    return "positive"
+
+
+def _can_reinforce_candidate(existing: Any, candidate: PendingExtractedMemory) -> bool:
+    return (
+        _candidate_similarity(str(getattr(existing, "content", "") or ""), candidate.content)
+        >= _PENDING_SIMILARITY_THRESHOLD
+        and _candidate_polarity(str(getattr(existing, "content", "") or ""))
+        == _candidate_polarity(candidate.content)
+    )
+
+
+def _memory_category_value(value: Any) -> str:
+    return str(getattr(value, "value", value)).lower()
+
+
+def _find_matching_pending_candidate(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    proxy_user_id: uuid.UUID,
+    candidate: PendingExtractedMemory,
+    fingerprint: str,
+) -> tuple[PendingExtractionCandidate | None, bool]:
+    exact = session.execute(
+        select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.tenant_id == tenant_id,
+            PendingExtractionCandidate.proxy_user_id == proxy_user_id,
+            PendingExtractionCandidate.candidate_fingerprint == fingerprint,
+        )
+    ).scalar_one_or_none()
+    if exact is not None:
+        if _can_reinforce_candidate(exact, candidate):
+            return exact, False
+        return None, True
+
+    pending_for_category = session.execute(
+        select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.tenant_id == tenant_id,
+            PendingExtractionCandidate.proxy_user_id == proxy_user_id,
+            PendingExtractionCandidate.category == candidate.category,
+            PendingExtractionCandidate.status == "pending",
+        )
+    ).scalars().all()
+    for existing in pending_for_category:
+        if _can_reinforce_candidate(existing, candidate):
+            return existing, False
+    return None, False
+
+
+def _promoted_memory_from_candidate(candidate: PendingExtractionCandidate) -> ExtractedMemory:
+    return ExtractedMemory(
+        content=candidate.content,
+        category=_memory_category_value(candidate.category),  # type: ignore[arg-type]
+        importance_score=max(1.0, min(10.0, float(candidate.importance_score or 1.0))),
+        confidence=max(0.0, min(1.0, float(candidate.confidence_score or 0.0))),
+        expiry="permanent",
+        reasoning=str(candidate.reasoning or "Promoted after repeated borderline extraction."),
+    )
+
+
+def _should_promote_pending_candidate(candidate: PendingExtractionCandidate, *, store_threshold: float = 0.65) -> bool:
+    return int(candidate.reinforcement_count or 0) >= _PENDING_PROMOTION_REINFORCEMENT_COUNT or float(
+        candidate.confidence_score or 0.0
+    ) >= store_threshold
+
+
+def _persist_pending_extraction_candidates(
+    session: Session,
+    *,
+    candidates: list[PendingExtractedMemory],
+    tenant_id: str,
+    proxy_user_id: str,
+    extraction_job_id: str | None,
+    source_event_id: str | None,
+) -> tuple[int, list[ExtractedMemory]]:
+    if not candidates:
+        return 0, []
+
+    tenant_uuid = uuid.UUID(str(tenant_id))
+    proxy_user_uuid = uuid.UUID(str(proxy_user_id))
+    job_uuid = uuid.UUID(str(extraction_job_id)) if extraction_job_id else None
+    event_uuid = uuid.UUID(str(source_event_id)) if source_event_id else None
+    now = datetime.now(UTC)
+    buffered = 0
+    promoted: list[ExtractedMemory] = []
+
+    for candidate in candidates:
+        fingerprint = _candidate_fingerprint(candidate)
+        existing, conflict_candidate = _find_matching_pending_candidate(
+            session,
+            tenant_id=tenant_uuid,
+            proxy_user_id=proxy_user_uuid,
+            candidate=candidate,
+            fingerprint=fingerprint,
+        )
+
+        if existing is None:
+            if conflict_candidate:
+                conflict_fingerprint_base = f"{fingerprint}:conflict:{_normalize_candidate_text(candidate.content)}"
+                fingerprint = hashlib.sha256(conflict_fingerprint_base.encode("utf-8")).hexdigest()
+            existing = PendingExtractionCandidate(
+                tenant_id=tenant_uuid,
+                proxy_user_id=proxy_user_uuid,
+                extraction_job_id=job_uuid,
+                source_event_id=event_uuid,
+                content=candidate.content,
+                category=candidate.category,
+                importance_score=candidate.importance_score,
+                confidence_score=candidate.confidence,
+                reasoning=candidate.reasoning,
+                candidate_reason=candidate.candidate_reason,
+                candidate_fingerprint=fingerprint,
+                status="pending",
+                reinforcement_count=1,
+                metadata_json={"conflict_candidate": True} if conflict_candidate else {},
+                last_seen_at=now,
+            )
+        else:
+            existing.extraction_job_id = job_uuid or existing.extraction_job_id
+            existing.source_event_id = event_uuid or existing.source_event_id
+            existing.content = candidate.content
+            existing.importance_score = max(float(existing.importance_score or 0.0), candidate.importance_score)
+            existing.confidence_score = max(float(existing.confidence_score or 0.0), candidate.confidence)
+            existing.reasoning = candidate.reasoning
+            existing.candidate_reason = candidate.candidate_reason
+            existing.reinforcement_count = int(existing.reinforcement_count or 0) + 1
+            existing.last_seen_at = now
+            existing.updated_at = now
+            if existing.status != "pending":
+                existing.status = "pending"
+
+        if _should_promote_pending_candidate(existing):
+            existing.status = "promoted"
+            existing.updated_at = now
+            metadata = dict(existing.metadata_json or {})
+            metadata["promoted_at"] = now.isoformat()
+            metadata["promotion_reason"] = "reinforced_borderline_candidate"
+            existing.metadata_json = metadata
+            promoted.append(_promoted_memory_from_candidate(existing))
+
+        session.add(existing)
+        buffered += 1
+
+    return buffered, promoted
+
+def _load_existing_memories_for_context(session: Session, proxy_user_id: str) -> list[Memory]:
+    try:
+        proxy_user_uuid = uuid.UUID(str(proxy_user_id))
+    except (TypeError, ValueError):
+        return []
+    try:
+        result = session.execute(
+            select(Memory)
+            .where(
+                Memory.proxy_user_id == proxy_user_uuid,
+                Memory.is_archived.is_(False),
+            )
+            .order_by(Memory.importance_score.desc())
+            .limit(50)
+        )
+        return list(result.scalars().all())
+    except Exception:
+        return []
+
+
+def _tenant_domain_schema(session: Session, tenant_id: str) -> str | None:
+    try:
+        from api.db.models import Tenant
+
+        tenant = session.get(Tenant, uuid.UUID(str(tenant_id)))
+    except Exception:
+        return None
+    if tenant is None:
+        return None
+    metadata = getattr(tenant, "metadata_json", None) or {}
+    return metadata.get("domain_schema") or metadata.get("memory_domain")
+
+
+def _run_domain_schema_overlay(
+    session: Session,
+    *,
+    messages: list[dict[str, Any]],
+    proxy_user_id: str,
+    tenant_id: str,
+    job_id: str,
+    agent_id: str | None,
+    client: Any | None,
+) -> dict[str, Any] | None:
+    domain_schema = _tenant_domain_schema(session, tenant_id)
+    if domain_schema is None:
+        return None
+    schema = get_domain_schema(domain_schema)
+    if schema is None:
+        return None
+    try:
+        result = schema.extract_overlay_sync(
+            session=session,
+            messages=messages,
+            proxy_user_id=proxy_user_id,
+            tenant_id=tenant_id,
+            job_id=job_id,
+            agent_id=agent_id,
+            client=client,
+        )
+        session.commit()
+        return result
+    except Exception as exc:
+        session.rollback()
+        LOGGER.warning(
+            "domain_schema_extraction_failed",
+            extra={
+                "event": "domain_schema_extraction_failed",
+                "domain_schema": domain_schema,
+                "tenant_id": tenant_id,
+                "proxy_user_id": proxy_user_id,
+                "job_id": job_id,
+                "error": str(exc),
+            },
+        )
+        return {"domain_schema_error": str(exc), "domain_schema": domain_schema}
+
+
+def _extract_memories_for_pipeline(
+    extractor: Any,
+    *,
+    messages: list[dict[str, Any]],
+    proxy_user_id: str,
+    tenant_id: str,
+    job_id: str | None,
+    existing_memories: list[Memory],
+    source_context: dict[str, Any] | None = None,
+) -> tuple[list[Any], dict[str, Any], bool]:
+    """Run either the new spec-driven extractor or a legacy test double.
+
+    Returns: extracted memories, metadata, whether the pipeline should apply the
+    legacy ImportanceScorer pass.
+    """
+    if isinstance(extractor, ExtractionService):
+        result = extractor.extract_sync(
+            messages=messages,
+            proxy_user_id=proxy_user_id,
+            tenant_id=tenant_id,
+            job_id=job_id,
+            existing_memories=existing_memories,
+            source_context=source_context,
+        )
+        return (
+            list(result.memories_to_store),
+            {
+                "memories_filtered": result.memories_filtered,
+                "pending_candidates_count": result.pending_candidates_count,
+                "pending_candidates": list(result.pending_candidates),
+                "nothing_to_extract": result.nothing_to_extract,
+                "tokens_used": result.tokens_used,
+                "provider_used": result.provider_used,
+            },
+            False,
+        )
+
+    extracted = extractor.extract(
+        messages=messages,
+        user_id=proxy_user_id,
+    )
+    return list(extracted), {}, True
+
+
 def run_extraction_pipeline(
     job_payload: dict[str, Any],
     *,
@@ -357,6 +686,7 @@ def run_extraction_pipeline(
     tenant_id = str(job_payload.get("tenant_id") or "").strip()
     proxy_user_id = str(job_payload.get("proxy_user_id") or "").strip()
     agent_id = job_payload.get("agent_id")
+    source_event_id = job_payload.get("source_event_id")
     messages = list(job_payload.get("messages", []))
 
     if not tenant_id or not proxy_user_id:
@@ -384,15 +714,75 @@ def run_extraction_pipeline(
         )
         session.commit()
 
-        extracted_memories = extractor.extract(
-            messages=messages,
-            user_id=proxy_user_id,
+        existing_memories = _load_existing_memories_for_context(session, proxy_user_id)
+        domain_schema_name = _tenant_domain_schema(session, tenant_id)
+        source_event = (
+            session.get(MemorySourceEvent, uuid.UUID(str(source_event_id)))
+            if source_event_id
+            else None
         )
-        for memory in extracted_memories:
-            memory.importance_score = scorer.score(
-                memory,
-                {"similar_access_count": int(proxy_user.memory_count or 0)},
+        source_payload = dict(job_payload.get("source") or {})
+        source_context = (
+            build_provenance_snapshot(source_event)
+            if source_event is not None and source_payload.get("explicit") is True
+            else None
+        )
+        try:
+            extracted_memories, extraction_meta, should_apply_scorer = _extract_memories_for_pipeline(
+                extractor,
+                messages=messages,
+                proxy_user_id=proxy_user_id,
+                tenant_id=tenant_id,
+                job_id=str(job_payload.get("job_id") or ""),
+                existing_memories=existing_memories,
+                source_context=source_context,
             )
+        except Exception as exc:
+            if not domain_schema_name:
+                raise
+            LOGGER.warning(
+                "general_extraction_failed_domain_overlay_continuing",
+                extra={
+                    "event": "general_extraction_failed_domain_overlay_continuing",
+                    "domain_schema": domain_schema_name,
+                    "tenant_id": tenant_id,
+                    "proxy_user_id": proxy_user_id,
+                    "job_id": str(job_payload.get("job_id") or ""),
+                    "error": str(exc),
+                },
+            )
+            extracted_memories = []
+            extraction_meta = {
+                "memories_filtered": 0,
+                "nothing_to_extract": True,
+                "tokens_used": 0,
+                "provider_used": None,
+                "general_extraction_error": str(exc),
+            }
+            should_apply_scorer = False
+        pending_candidates_buffered, promoted_pending_memories = _persist_pending_extraction_candidates(
+            session,
+            candidates=list(extraction_meta.get("pending_candidates", []) or []),
+            tenant_id=tenant_id,
+            proxy_user_id=proxy_user_id,
+            extraction_job_id=str(job_payload.get("job_id") or "") or None,
+            source_event_id=str(source_event.id) if source_event is not None else None,
+        )
+        extraction_meta["pending_candidates_buffered"] = pending_candidates_buffered
+
+        if should_apply_scorer:
+            for memory in extracted_memories:
+                memory.importance_score = scorer.score(
+                    memory,
+                    {"similar_access_count": int(proxy_user.memory_count or 0)},
+                )
+
+        if source_event is not None:
+            source_event.processing_metadata = {
+                **dict(source_event.processing_metadata or {}),
+                "provider_used": extraction_meta.get("provider_used"),
+                "domain_schema": domain_schema_name or "general",
+            }
 
         embedding_service = EmbeddingService(sync_session=session, gemini_client=client)
         resolver = conflict_resolver or ConflictResolver(
@@ -401,6 +791,11 @@ def run_extraction_pipeline(
             embedder=embedding_service.embed_sync,
             client=client,
             default_source_conversation_id=conversation.id,
+            default_source_event_id=source_event.id if source_event is not None else None,
+            provenance_snapshot=(
+                build_provenance_snapshot(source_event) if source_event is not None else None
+            ),
+            domain_schema=domain_schema_name,
         )
         stored_memories = resolver.check_and_store(
             extracted_memories,
@@ -414,16 +809,51 @@ def run_extraction_pipeline(
 
         conversation.processing_status = ConversationProcessingStatus.done
         session.add(conversation)
+        if source_event is not None:
+            source_event.processing_metadata = {
+                **dict(source_event.processing_metadata or {}),
+                "provider_used": extraction_meta.get("provider_used"),
+                "domain_schema": domain_schema_name or "general",
+                "completed_at": datetime.now(UTC).isoformat(),
+            }
+            session.add(source_event)
         _refresh_proxy_user_memory_count(session, proxy_user.id)
         session.commit()
 
+        domain_schema_meta = _run_domain_schema_overlay(
+            session,
+            messages=messages,
+            proxy_user_id=proxy_user_id,
+            tenant_id=tenant_id,
+            job_id=str(job_payload.get("job_id") or ""),
+            agent_id=str(agent_id) if agent_id else None,
+            client=client,
+        ) or {}
+
         _invalidate_proxy_user_cache(proxy_user_id)
 
+        conflicts_resolved = sum(
+            1
+            for memory in stored_memories
+            if getattr(memory, "resolution", None) in {"UPDATE", "MERGE"}
+        )
         return {
             **job_payload,
             "status": "processed",
             "memories_created": len(stored_memories),
             "stored_memories": _serialize_stored_memories(stored_memories),
+            "memories_filtered": int(extraction_meta.get("memories_filtered", 0) or 0),
+            "pending_candidates_buffered": int(extraction_meta.get("pending_candidates_buffered", 0) or 0),
+            "pending_candidates_promoted": int(extraction_meta.get("pending_candidates_promoted", 0) or 0),
+            "nothing_to_extract": bool(extraction_meta.get("nothing_to_extract", False)),
+            "conflicts_resolved": conflicts_resolved,
+            "cross_user_conflicts_flagged": int(getattr(resolver, "last_cross_user_conflicts_flagged", 0) or 0),
+            "detection_strategies_used": list(getattr(resolver, "last_detection_strategies_used", []) or []),
+            "conflict_types_found": list(getattr(resolver, "last_conflict_types_found", []) or []),
+            "tokens_used": int(extraction_meta.get("tokens_used", 0) or 0),
+            "provider_used": extraction_meta.get("provider_used"),
+            "general_extraction_error": extraction_meta.get("general_extraction_error"),
+            **domain_schema_meta,
         }
     except Exception:
         session.rollback()
@@ -543,3 +973,6 @@ def release_queue_slot_after_extraction(
         queue_name=payload.get("queue_name"),
         job_id=payload.get("job_id"),
     )
+
+
+
