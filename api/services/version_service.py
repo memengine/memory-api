@@ -14,6 +14,8 @@ from api.db.models import Memory
 from api.db.models import MemoryCategory
 from api.db.models import MemoryVersion
 from api.db.models import ProxyUser
+from api.db.models import UniversalMemory
+from api.db.models import UniversalMemoryVersion
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,8 +26,20 @@ ALLOWED_CHANGE_TYPES = {
     "importance_decay",
     "importance_boost",
     "archived",
+    "conflict_resolved",
 }
 ALLOWED_CHANGED_BY = {"system", "user", "operator"}
+ALLOWED_UNIVERSAL_CHANGE_TYPES = {
+    "created",
+    "user_corrected",
+    "user_removed",
+    "conflict_resolved",
+    "agent_updated",
+    "importance_decay",
+    "importance_boost",
+    "archived",
+}
+ALLOWED_UNIVERSAL_CHANGED_BY = {"system", "user", "agent"}
 
 
 @dataclass(slots=True)
@@ -139,6 +153,79 @@ class VersionService:
         )
         return list(result.scalars().all())
 
+    async def record_universal_version(
+        self,
+        memory: UniversalMemory,
+        change_type: str,
+        change_reason: str | None = None,
+        changed_by: str = "system",
+        changed_by_agent_id: str | None = None,
+        db_session: Any | None = None,
+    ) -> UniversalMemoryVersion:
+        self._validate_universal_change(change_type=change_type, changed_by=changed_by)
+        session = db_session or self.session
+        version = UniversalMemoryVersion(
+            id=uuid.uuid4(),
+            universal_memory_id=memory.id,
+            version_number=await self._anext_universal_version_number(memory.id, db_session=session),
+            content=memory.content,
+            category=self._category_value(memory.category),
+            importance_score=float(memory.importance_score),
+            confidence=float(memory.confidence),
+            change_type=change_type,
+            change_reason=change_reason,
+            changed_by=changed_by,
+            changed_by_agent_id=(uuid.UUID(str(changed_by_agent_id)) if changed_by_agent_id else None),
+        )
+        session.add(version)
+        return version
+
+    def record_universal_version_sync(
+        self,
+        memory: UniversalMemory,
+        change_type: str,
+        change_reason: str | None = None,
+        changed_by: str = "system",
+        changed_by_agent_id: str | None = None,
+        db_session: Any | None = None,
+    ) -> UniversalMemoryVersion:
+        self._validate_universal_change(change_type=change_type, changed_by=changed_by)
+        session = db_session or self.session
+        version = UniversalMemoryVersion(
+            id=uuid.uuid4(),
+            universal_memory_id=memory.id,
+            version_number=self._next_universal_version_number(memory.id, db_session=session),
+            content=memory.content,
+            category=self._category_value(memory.category),
+            importance_score=float(memory.importance_score),
+            confidence=float(memory.confidence),
+            change_type=change_type,
+            change_reason=change_reason,
+            changed_by=changed_by,
+            changed_by_agent_id=(uuid.UUID(str(changed_by_agent_id)) if changed_by_agent_id else None),
+        )
+        session.add(version)
+        return version
+
+    async def get_universal_history(
+        self,
+        universal_memory_id: str,
+        user_uui_id: str,
+        db_session: Any | None = None,
+    ) -> list[UniversalMemoryVersion]:
+        session = db_session or self.session
+        parsed_memory_id = uuid.UUID(str(universal_memory_id))
+        parsed_user_id = uuid.UUID(str(user_uui_id))
+        memory = await session.get(UniversalMemory, parsed_memory_id)
+        if memory is None or memory.user_uui_id != parsed_user_id:
+            raise PermissionError("Memory does not belong to this user")
+        result = await session.execute(
+            select(UniversalMemoryVersion)
+            .where(UniversalMemoryVersion.universal_memory_id == parsed_memory_id)
+            .order_by(UniversalMemoryVersion.version_number.asc())
+        )
+        return list(result.scalars().all())
+
     async def get_user_data_export(self, proxy_user_id: str, tenant_id: str) -> UserDataExport:
         proxy_user_uuid = uuid.UUID(str(proxy_user_id))
         tenant_uuid = uuid.UUID(str(tenant_id))
@@ -217,6 +304,36 @@ class VersionService:
         )
         return int(result.scalar_one() or 0) + 1
 
+    async def _anext_universal_version_number(
+        self,
+        universal_memory_id: uuid.UUID,
+        *,
+        db_session: Any | None = None,
+    ) -> int:
+        session = db_session or self.session
+        result = await session.execute(
+            select(func.coalesce(func.max(UniversalMemoryVersion.version_number), 0)).where(
+                UniversalMemoryVersion.universal_memory_id == universal_memory_id
+            )
+        )
+        return int(result.scalar_one() or 0) + 1
+
+    def _next_universal_version_number(
+        self,
+        universal_memory_id: uuid.UUID,
+        *,
+        db_session: Any | None = None,
+    ) -> int:
+        session = db_session or self.session
+        result = session.execute(
+            select(func.coalesce(func.max(UniversalMemoryVersion.version_number), 0)).where(
+                UniversalMemoryVersion.universal_memory_id == universal_memory_id
+            )
+        )
+        if hasattr(result, "scalar_one"):
+            return int(result.scalar_one() or 0) + 1
+        return 1
+
     @staticmethod
     def version_to_dict(version: MemoryVersion) -> dict[str, Any]:
         return {
@@ -243,6 +360,13 @@ class VersionService:
             raise ValueError(f"invalid memory version change_type: {change_type}")
         if changed_by not in ALLOWED_CHANGED_BY:
             raise ValueError(f"invalid memory version changed_by: {changed_by}")
+
+    @staticmethod
+    def _validate_universal_change(*, change_type: str, changed_by: str) -> None:
+        if change_type not in ALLOWED_UNIVERSAL_CHANGE_TYPES:
+            raise ValueError(f"invalid universal memory version change_type: {change_type}")
+        if changed_by not in ALLOWED_UNIVERSAL_CHANGED_BY:
+            raise ValueError(f"invalid universal memory version changed_by: {changed_by}")
 
 
 __all__ = ["UserDataExport", "VersionService"]
