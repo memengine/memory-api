@@ -31,12 +31,20 @@ class StubQualityGateService:
         self.result = result
         self.calls = []
 
-    async def check(self, messages, tenant_id, external_user_id):
+    async def check(
+        self,
+        messages,
+        tenant_id,
+        external_user_id,
+        *,
+        semantic_deduplication=True,
+    ):
         self.calls.append(
             {
                 "messages": messages,
                 "tenant_id": tenant_id,
                 "external_user_id": external_user_id,
+                "semantic_deduplication": semantic_deduplication,
             }
         )
         return self.result
@@ -47,12 +55,20 @@ class SequencedQualityGateService:
         self.results = list(results)
         self.calls = []
 
-    async def check(self, messages, tenant_id, external_user_id):
+    async def check(
+        self,
+        messages,
+        tenant_id,
+        external_user_id,
+        *,
+        semantic_deduplication=True,
+    ):
         self.calls.append(
             {
                 "messages": messages,
                 "tenant_id": tenant_id,
                 "external_user_id": external_user_id,
+                "semantic_deduplication": semantic_deduplication,
             }
         )
         index = min(len(self.calls) - 1, len(self.results) - 1)
@@ -102,6 +118,7 @@ class FakeRateLimitRedis:
 async def bypass_api_key_auth(self, request, call_next):
     request.state.tenant_id = str(uuid.uuid4())
     request.state.user_id = None
+    request.state.api_key_id = str(uuid.uuid4())
     request.state.auth_scheme = "apikey"
     return await call_next(request)
 
@@ -311,6 +328,43 @@ def test_add_endpoint_queues_job_when_gate_passes(monkeypatch) -> None:
     assert response.json()["budget_remaining_pct"] == 0.65
     assert len(memory_service.queue_calls) == 1
     assert len(quality_gate_service.calls) == 1
+
+
+def test_add_endpoint_forwards_source_provenance(monkeypatch) -> None:
+    client, memory_service, quality_gate_service = build_client(
+        monkeypatch,
+        gate_result=GateResult(
+            passed=True,
+            blocked_layer=None,
+            reason=None,
+            budget_remaining_pct=0.9,
+        ),
+    )
+    payload = add_payload()
+    payload["source"] = {
+        "event_id": "ticket-event-42",
+        "service": "support-service",
+        "observed_at": "2026-06-11T10:00:00Z",
+        "scope": {"ticket_id": "TCK-42"},
+        "evidence": [
+            {
+                "source_type": "ticket",
+                "reference": "TCK-42",
+                "content_hash": "a" * 64,
+            }
+        ],
+    }
+
+    with client:
+        response = client.post("/v1/memories/add", json=payload)
+
+    assert response.status_code == 200
+    queued = memory_service.queue_calls[0]
+    assert queued["source"]["event_id"] == "ticket-event-42"
+    assert queued["source"]["service"] == "support-service"
+    assert queued["source"]["scope"] == {"ticket_id": "TCK-42"}
+    assert queued["api_key_id"] is not None
+    assert quality_gate_service.calls[0]["semantic_deduplication"] is False
 
 
 def test_add_endpoint_returns_passthrough_when_memory_service_skips_extraction(monkeypatch) -> None:
