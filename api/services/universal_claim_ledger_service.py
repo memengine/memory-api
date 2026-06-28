@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy import text
 
 from api.db.models import PermissionGrant
 from api.db.models import UniversalMemory
 from api.db.models import UniversalMemoryClaim
 from api.db.models import UniversalMemoryClaimRevision
+from api.services.claim_versions import CLAIM_SCHEMA_VERSION
+from api.services.claim_versions import processor_version_for_resolution
 from api.services.claim_ledger_service import build_claim_identity
 from api.services.claim_ledger_service import normalize_text
 
@@ -30,6 +34,8 @@ class UniversalClaimProvenance:
     grant_status: str
     recorded_at: datetime
     resolution_reason: str | None
+    schema_version: int
+    processor_version: str
 
 
 class UniversalClaimLedgerService:
@@ -50,6 +56,9 @@ class UniversalClaimLedgerService:
         resolution_reason: str,
     ) -> UniversalClaimDecision:
         identity = UniversalClaimLedgerService._identity(memory)
+        UniversalClaimLedgerService._lock_claim_sync(
+            session, memory.user_uui_id, identity.fingerprint
+        )
         claim = session.execute(
             select(UniversalMemoryClaim).where(
                 UniversalMemoryClaim.user_uui_id == memory.user_uui_id,
@@ -78,6 +87,9 @@ class UniversalClaimLedgerService:
         resolution_reason: str,
     ) -> UniversalClaimDecision:
         identity = UniversalClaimLedgerService._identity(memory)
+        await UniversalClaimLedgerService._lock_claim_async(
+            session, memory.user_uui_id, identity.fingerprint
+        )
         claim = (
             await session.execute(
                 select(UniversalMemoryClaim).where(
@@ -184,8 +196,41 @@ class UniversalClaimLedgerService:
                 grant_status=grant_status,
                 recorded_at=revision.created_at,
                 resolution_reason=revision.resolution_reason,
+                schema_version=int(revision.schema_version or 1),
+                processor_version=str(revision.processor_version or "legacy"),
             )
         return result
+
+    @staticmethod
+    def _claim_lock_key(user_uui_id: uuid.UUID, fingerprint: str) -> int:
+        digest = hashlib.sha256(f"{user_uui_id}:{fingerprint}".encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+    @staticmethod
+    def _is_postgres_session(session: Any) -> bool:
+        get_bind = getattr(session, "get_bind", None)
+        if not callable(get_bind):
+            return False
+        bind = get_bind()
+        return getattr(getattr(bind, "dialect", None), "name", None) == "postgresql"
+
+    @staticmethod
+    def _lock_claim_sync(session: Any, user_uui_id: uuid.UUID, fingerprint: str) -> None:
+        if not UniversalClaimLedgerService._is_postgres_session(session):
+            return
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": UniversalClaimLedgerService._claim_lock_key(user_uui_id, fingerprint)},
+        )
+
+    @staticmethod
+    async def _lock_claim_async(session: Any, user_uui_id: uuid.UUID, fingerprint: str) -> None:
+        if not UniversalClaimLedgerService._is_postgres_session(session):
+            return
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": UniversalClaimLedgerService._claim_lock_key(user_uui_id, fingerprint)},
+        )
 
     @staticmethod
     def _identity(memory: UniversalMemory):
@@ -276,6 +321,8 @@ class UniversalClaimLedgerService:
             status=revision_status,
             confidence_score=float(memory.confidence or 0.0),
             resolution_reason=resolution_reason,
+            schema_version=CLAIM_SCHEMA_VERSION,
+            processor_version=processor_version_for_resolution(resolution_reason, passport=True),
             created_at=recorded_at,
         )
         session.add(revision)
@@ -361,6 +408,8 @@ class UniversalClaimLedgerService:
             status=revision_status,
             confidence_score=float(memory.confidence or 0.0),
             resolution_reason=resolution_reason,
+            schema_version=CLAIM_SCHEMA_VERSION,
+            processor_version=processor_version_for_resolution(resolution_reason, passport=True),
             created_at=now,
         )
         session.add(revision)
