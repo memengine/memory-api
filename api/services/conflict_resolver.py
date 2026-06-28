@@ -12,11 +12,18 @@ from typing import Any
 from typing import Callable
 from typing import Literal
 
+from sqlalchemy import and_
+from sqlalchemy import or_
+from sqlalchemy import select
+
 from api.db.models import AuditAction
 from api.db.models import AuditLog
+from api.db.models import ClarificationQueue
 from api.db.models import CrossUserConflict
+from api.db.models import CrossUserConflictStatus
 from api.db.models import Memory
 from api.db.models import MemoryCategory
+from api.db.models import SharedContextEntityType
 from api.db.models import SharedContextSignal
 from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
 from api.infra.llm_router import LLMRouter
@@ -32,6 +39,9 @@ from api.services.conflict_detection import SEMANTIC_CONFLICT_THRESHOLD
 from api.services.conflict_detection import SharedContextConflict
 from api.services.conflict_detection import build_cross_user_conflict_row
 from api.services.conflict_detection import classify_conflict_type
+from api.services.claim_ledger_service import ClaimLedgerService
+from api.services.conflict_routing.generic_router import GenericEntityRouter
+from api.services.conflict_routing.registry import get_router
 from api.services.extractor import ExtractedMemory
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
@@ -104,9 +114,288 @@ class StoredMemory:
 
 @dataclass(slots=True)
 class ConflictDecision:
-    action: Literal["UPDATE", "MERGE", "KEEP_BOTH", "REJECT"]
+    action: Literal["UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"]
     reasoning: str
     merged_memory: ExtractedMemory | None = None
+
+
+@dataclass(slots=True)
+class AutoResolutionResult:
+    strategy_used: str
+    resolution: str
+    action_taken: str
+    requires_attention: bool
+    reason: str
+
+
+PER_USER_SCOPED_ENTITY_TYPES = {
+    "exam_date",
+    "grade_level",
+    "individual_goal",
+    "learning_style",
+    "marks_target",
+    "personal_fact",
+    "personal_goal",
+    "personal_preference",
+    "personal_skill",
+    "study_schedule",
+}
+
+PERSONAL_GOAL_SIGNALS = (
+    "become ",
+    "career",
+    "for himself",
+    "for herself",
+    "for me",
+    "internship",
+    "is currently looking",
+    "job opportunities",
+    "learn ",
+    "looking for",
+    "my ",
+    "personal",
+    "user is currently looking",
+    "user wants",
+    "wants to",
+)
+
+SHARED_ORG_SIGNALS = (
+    "all of us",
+    "company",
+    "organisation",
+    "organization",
+    "our ",
+    "team",
+    "we ",
+)
+
+
+def classify_resolution_path(
+    conflict: CrossUserConflict,
+    entity_type: str,
+    memory_a: Memory,
+    memory_b: Memory,
+    domain_schema: str | None = None,
+) -> Literal["user_session", "tenant_review"]:
+    del conflict
+    router = get_router(domain_schema)
+    routed = router.classify(entity_type, memory_a, memory_b)
+    if routed is not None:
+        return routed
+
+    if not isinstance(router, GenericEntityRouter):
+        fallback = GenericEntityRouter().classify(entity_type, memory_a, memory_b)
+        if fallback is not None:
+            return fallback
+
+    if memory_a.proxy_user_id == memory_b.proxy_user_id:
+        return "user_session"
+    return "tenant_review"
+
+
+def resolve_cross_user_conflict_automatically(
+    conflict: CrossUserConflict,
+    db_session: Any,
+    domain_schema: str | None = None,
+) -> AutoResolutionResult:
+    entity_type = (
+        conflict.entity_type.value
+        if hasattr(conflict.entity_type, "value")
+        else str(conflict.entity_type)
+    )
+    memory_a = _load_conflict_memory(db_session, conflict.user_a_memory_id, conflict.user_a_memory)
+    memory_b = _load_conflict_memory(db_session, conflict.user_b_memory_id, conflict.user_b_memory)
+    if memory_a is None or memory_b is None:
+        conflict.status = CrossUserConflictStatus.pending
+        conflict.auto_resolution = "requires_attention"
+        conflict.auto_resolution_at = datetime.now(UTC)
+        conflict.resolution_path = "tenant_review"
+        conflict.requires_attention = True
+        return AutoResolutionResult(
+            strategy_used="requires_attention",
+            resolution="unresolvable",
+            action_taken="left_pending",
+            requires_attention=True,
+            reason="One or both memories are unavailable for automatic resolution",
+        )
+
+    if _is_per_user_scoped_conflict(entity_type, memory_a, memory_b):
+        conflict.status = CrossUserConflictStatus.ignored
+        conflict.auto_resolution = "per_user_scoped"
+        conflict.auto_resolution_at = datetime.now(UTC)
+        conflict.resolution_path = "user_session"
+        conflict.requires_attention = False
+        conflict.resolution_reason = "Personal goals or facts are user-specific"
+        return AutoResolutionResult(
+            strategy_used="per_user_scoped",
+            resolution="per_user_scoped",
+            action_taken="ignored_personal_cross_user_conflict",
+            requires_attention=False,
+            reason="Personal facts are user-specific",
+        )
+
+    created_a = _aware_datetime(memory_a.created_at)
+    created_b = _aware_datetime(memory_b.created_at)
+    recency_days = abs((created_a - created_b).days)
+    if recency_days > 7:
+        newer_memory, older_memory = (
+            (memory_a, memory_b) if created_a > created_b else (memory_b, memory_a)
+        )
+        _weight_down_memory(
+            older_memory,
+            newer_memory,
+            reason="Newer claim weighted higher automatically",
+        )
+        _mark_conflict_auto_resolved(conflict, "recency_weighted")
+        return AutoResolutionResult(
+            strategy_used="recency_weighted",
+            resolution="recency_weighted",
+            action_taken="weighted_down_older_claim",
+            requires_attention=False,
+            reason="Newer claim weighted higher automatically",
+        )
+
+    confidence_diff = abs(float(memory_a.confidence_score or 0.0) - float(memory_b.confidence_score or 0.0))
+    if confidence_diff > 0.20:
+        higher_confidence, lower_confidence = (
+            (memory_a, memory_b)
+            if float(memory_a.confidence_score or 0.0) > float(memory_b.confidence_score or 0.0)
+            else (memory_b, memory_a)
+        )
+        _weight_down_memory(
+            lower_confidence,
+            higher_confidence,
+            reason="Higher-confidence claim weighted higher automatically",
+        )
+        _mark_conflict_auto_resolved(conflict, "confidence_weighted")
+        return AutoResolutionResult(
+            strategy_used="confidence_weighted",
+            resolution="confidence_weighted",
+            action_taken="weighted_down_lower_confidence_claim",
+            requires_attention=False,
+            reason="Higher-confidence claim weighted higher automatically",
+        )
+
+    resolution_path = classify_resolution_path(
+        conflict,
+        entity_type,
+        memory_a,
+        memory_b,
+        domain_schema,
+    )
+    conflict.resolution_path = resolution_path
+    if resolution_path == "user_session":
+        target_memory = memory_a if created_a <= created_b else memory_b
+        if target_memory.proxy_user_id:
+            _queue_user_session_clarification(
+                db_session=db_session,
+                conflict=conflict,
+                target_memory=target_memory,
+                question_context=f"{entity_type}: {conflict.entity_value_a} vs {conflict.entity_value_b}",
+            )
+            conflict.status = CrossUserConflictStatus.clarification_queued
+            conflict.auto_resolution = "clarification_queued"
+            conflict.auto_resolution_at = datetime.now(UTC)
+            conflict.requires_attention = False
+            return AutoResolutionResult(
+                strategy_used="clarification_queued",
+                resolution="clarification_queued",
+                action_taken="queued_clarification",
+                requires_attention=False,
+                reason="Will ask user to confirm in next session",
+            )
+
+        conflict.status = CrossUserConflictStatus.pending
+        conflict.auto_resolution = "requires_attention"
+        conflict.auto_resolution_at = datetime.now(UTC)
+        conflict.requires_attention = True
+        return AutoResolutionResult(
+            strategy_used="requires_attention",
+            resolution="unresolvable",
+            action_taken="left_pending",
+            requires_attention=True,
+            reason="Unable to queue clarification because no proxy user is attached",
+        )
+
+    conflict.status = CrossUserConflictStatus.pending
+    conflict.auto_resolution = "requires_attention"
+    conflict.auto_resolution_at = datetime.now(UTC)
+    conflict.resolution_path = "tenant_review"
+    conflict.requires_attention = True
+    return AutoResolutionResult(
+        strategy_used="requires_attention",
+        resolution="unresolvable",
+        action_taken="left_pending",
+        requires_attention=True,
+        reason="Tenant review is required for shared organizational context",
+    )
+
+
+def _is_per_user_scoped_conflict(entity_type: str, memory_a: Memory, memory_b: Memory) -> bool:
+    if entity_type in PER_USER_SCOPED_ENTITY_TYPES:
+        return True
+
+    combined = f"{memory_a.content} {memory_b.content}".lower()
+    if entity_type == "shared_goal":
+        has_personal_goal_signal = any(signal in combined for signal in PERSONAL_GOAL_SIGNALS)
+        has_shared_org_signal = any(signal in combined for signal in SHARED_ORG_SIGNALS)
+        return has_personal_goal_signal and not has_shared_org_signal
+
+    return False
+
+
+def _load_conflict_memory(
+    db_session: Any,
+    memory_id: uuid.UUID | None,
+    fallback: Memory | None,
+) -> Memory | None:
+    if fallback is not None:
+        return fallback
+    if memory_id is not None and hasattr(db_session, "get"):
+        return db_session.get(Memory, memory_id)
+    return None
+
+
+def _aware_datetime(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _weight_down_memory(memory: Memory, superseding_memory: Memory, *, reason: str) -> None:
+    memory.importance_score = float(memory.importance_score or 0.0) * 0.5
+    metadata = dict(memory.metadata_json or {})
+    metadata.update(
+        {
+            "potentially_outdated": True,
+            "superseded_candidate_id": str(superseding_memory.id),
+            "auto_resolution_reason": reason,
+        }
+    )
+    memory.metadata_json = metadata
+
+
+def _queue_user_session_clarification(
+    *,
+    db_session: Any,
+    conflict: CrossUserConflict,
+    target_memory: Memory,
+    question_context: str,
+) -> None:
+    db_session.add(
+        ClarificationQueue(
+            tenant_id=conflict.tenant_id,
+            proxy_user_id=target_memory.proxy_user_id,
+            question_context=question_context,
+            conflict_id=conflict.id,
+            trigger_on="next_session",
+        )
+    )
+
+
+def _mark_conflict_auto_resolved(conflict: CrossUserConflict, strategy: str) -> None:
+    conflict.status = CrossUserConflictStatus.resolved
+    conflict.auto_resolution = strategy
+    conflict.auto_resolution_at = datetime.now(UTC)
+    conflict.requires_attention = False
 
 
 class ConflictResolver:
@@ -120,8 +409,11 @@ class ConflictResolver:
         model: str | None = None,
         prompt_path: Path | None = None,
         default_source_conversation_id: uuid.UUID | None = None,
+        default_source_event_id: uuid.UUID | None = None,
+        provenance_snapshot: dict[str, Any] | None = None,
         llm_router: LLMRouter | None = None,
         llm_service: LLMService | None = None,
+        domain_schema: str | None = None,
     ) -> None:
         self.session = session
         self.qdrant_service = qdrant_service
@@ -132,6 +424,8 @@ class ConflictResolver:
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.default_source_conversation_id = default_source_conversation_id
+        self.default_source_event_id = default_source_event_id
+        self.provenance_snapshot = provenance_snapshot
         self.llm_router = llm_router
         self.llm_service = llm_service or LLMService(
             provider_clients={LLMProvider.GEMINI: self.client} if self.client is not None else None,
@@ -139,6 +433,7 @@ class ConflictResolver:
             use_state_store=self.client is None,
         )
         self.conflict_detector = ConflictDetector()
+        self.domain_schema = domain_schema or os.getenv("MEMORYOS_DOMAIN_SCHEMA")
         self.last_cross_user_conflicts_flagged = 0
         self.last_detection_strategies_used: list[str] = []
         self.last_conflict_types_found: list[str] = []
@@ -199,9 +494,62 @@ class ConflictResolver:
             for candidate in candidates:
                 existing_memory = candidate.existing_memory
 
-                decision = self._temporal_conflict_decision(new_memory, existing_memory)
+                decision = self._authority_conflict_decision(new_memory, existing_memory)
+                equal_authority_conflict = self._is_equal_authority_cross_writer_conflict(
+                    new_memory,
+                    existing_memory,
+                )
+                if decision is None and equal_authority_conflict:
+                    decision = ConflictDecision(
+                        action="CLARIFY",
+                        reasoning=(
+                            "Registered services with equal authority reported "
+                            "different values for the same user."
+                        ),
+                    )
+                if decision is None:
+                    decision = self._temporal_conflict_decision(new_memory, existing_memory)
                 if decision is None:
                     decision = self._classify_conflict(new_memory, existing_memory, candidate)
+
+                if decision.action == "CLARIFY":
+                    pending = self._store_new_memory_with_shared_context(
+                        extracted_memory=new_memory,
+                        user_id=user_id,
+                        proxy_user_id=proxy_user_id,
+                        tenant_id=tenant_id,
+                        embedding=embedding,
+                        previous_version_id=str(existing_memory.id),
+                        resolution="CLARIFICATION_PENDING",
+                        source_conversation_id=source_conversation_id,
+                        agent_id=agent_id,
+                        is_archived=True,
+                        record_shared_context=False,
+                    )
+                    self._create_equal_authority_conflict(
+                        tenant_id=tenant_id,
+                        proxy_user_id=proxy_user_id,
+                        existing_memory=existing_memory,
+                        pending_memory_id=pending.id,
+                        category=new_memory.category,
+                    )
+                    stored_memories.append(pending)
+                    self._create_audit_log(
+                        user_id=user_id,
+                        proxy_user_id=proxy_user_id,
+                        action=AuditAction.memory_created,
+                        old_value=self._serialize_memory(existing_memory),
+                        new_value={
+                            "resolution": "CLARIFICATION_PENDING",
+                            "reasoning": decision.reasoning,
+                            "pending_memory_id": pending.id,
+                            "new_memory": self._serialize_extracted_memory(new_memory),
+                        },
+                        memory_id=uuid.UUID(pending.id),
+                    )
+                    self._track_candidate_metadata(candidate, new_memory, existing_memory)
+                    decision_applied = True
+                    break
 
                 if decision.action == "UPDATE":
                     self._archive_memory(
@@ -494,6 +842,104 @@ class ConflictResolver:
         )
 
     @staticmethod
+    def _authority_priority(
+        provenance: dict[str, Any] | None,
+        category: str,
+    ) -> int:
+        rules = dict((provenance or {}).get("authority_rules") or {})
+        category_rules = dict(rules.get("categories") or {})
+        raw_priority = category_rules.get(category, rules.get("default_priority", 50))
+        try:
+            return max(0, min(int(raw_priority), 100))
+        except (TypeError, ValueError):
+            return 50
+
+    def _authority_conflict_decision(
+        self,
+        new_memory: ExtractedMemory,
+        existing_memory: Memory,
+    ) -> ConflictDecision | None:
+        incoming_priority = self._authority_priority(
+            self.provenance_snapshot,
+            new_memory.category,
+        )
+        existing_priority = self._authority_priority(
+            dict(existing_memory.metadata_json or {}).get("provenance"),
+            existing_memory.category.value,
+        )
+        if incoming_priority > existing_priority:
+            return ConflictDecision(
+                action="UPDATE",
+                reasoning=(
+                    f"Incoming writer authority {incoming_priority} exceeds "
+                    f"stored writer authority {existing_priority}."
+                ),
+            )
+        if incoming_priority < existing_priority:
+            return ConflictDecision(
+                action="REJECT",
+                reasoning=(
+                    f"Stored writer authority {existing_priority} exceeds "
+                    f"incoming writer authority {incoming_priority}."
+                ),
+            )
+        incoming_observed_at = self._provenance_observed_at(self.provenance_snapshot)
+        existing_observed_at = self._provenance_observed_at(
+            dict(existing_memory.metadata_json or {}).get("provenance")
+        )
+        if (
+            incoming_observed_at is not None
+            and existing_observed_at is not None
+            and incoming_observed_at < existing_observed_at
+        ):
+            return ConflictDecision(
+                action="REJECT",
+                reasoning=(
+                    f"Incoming event observed at {incoming_observed_at.isoformat()} is older "
+                    f"than stored evidence observed at {existing_observed_at.isoformat()}."
+                ),
+            )
+        return None
+
+    def _is_equal_authority_cross_writer_conflict(
+        self,
+        new_memory: ExtractedMemory,
+        existing_memory: Memory,
+    ) -> bool:
+        incoming = dict(self.provenance_snapshot or {})
+        existing = dict(
+            dict(existing_memory.metadata_json or {}).get("provenance") or {}
+        )
+        incoming_writer = incoming.get("writer_id")
+        existing_writer = existing.get("writer_id")
+        if (
+            not incoming_writer
+            or not existing_writer
+            or str(incoming_writer) == str(existing_writer)
+        ):
+            return False
+        if new_memory.content.strip().casefold() == existing_memory.content.strip().casefold():
+            return False
+        return self._authority_priority(
+            incoming,
+            new_memory.category,
+        ) == self._authority_priority(
+            existing,
+            existing_memory.category.value,
+        )
+
+    @staticmethod
+    def _provenance_observed_at(provenance: dict[str, Any] | None) -> datetime | None:
+        raw_value = (provenance or {}).get("observed_at")
+        if not raw_value:
+            return None
+        try:
+            value = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+    @staticmethod
     def _temporal_conflict_decision(
         new_memory: ExtractedMemory,
         existing_memory: Memory,
@@ -521,6 +967,8 @@ class ConflictResolver:
         resolution: str,
         source_conversation_id: str | None,
         agent_id: str | None,
+        is_archived: bool = False,
+        record_shared_context: bool = True,
     ) -> StoredMemory:
         stored = self._store_new_memory(
             extracted_memory=extracted_memory,
@@ -532,14 +980,64 @@ class ConflictResolver:
             resolution=resolution,
             source_conversation_id=source_conversation_id,
             agent_id=agent_id,
+            is_archived=is_archived,
         )
-        self._record_shared_context_for_stored_memory(
-            stored_memory=stored,
-            extracted_memory=extracted_memory,
-            tenant_id=tenant_id,
-            proxy_user_id=proxy_user_id,
-        )
+        if record_shared_context:
+            self._record_shared_context_for_stored_memory(
+                stored_memory=stored,
+                extracted_memory=extracted_memory,
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+            )
         return stored
+
+    def _create_equal_authority_conflict(
+        self,
+        *,
+        tenant_id: str | None,
+        proxy_user_id: str | None,
+        existing_memory: Memory,
+        pending_memory_id: str,
+        category: str,
+    ) -> None:
+        if tenant_id is None or proxy_user_id is None:
+            return
+        pending_memory = self.session.get(Memory, uuid.UUID(pending_memory_id))
+        if pending_memory is None:
+            return
+        entity_type = {
+            "preference": SharedContextEntityType.personal_preference,
+            "goal": SharedContextEntityType.individual_goal,
+            "expertise": SharedContextEntityType.personal_skill,
+        }.get(category, SharedContextEntityType.personal_fact)
+        conflict = CrossUserConflict(
+            tenant_id=uuid.UUID(tenant_id),
+            user_a_memory_id=existing_memory.id,
+            user_b_memory_id=pending_memory.id,
+            entity_type=entity_type,
+            entity_value_a=existing_memory.content,
+            entity_value_b=pending_memory.content,
+            status=CrossUserConflictStatus.pending,
+            auto_resolution="equal_authority_clarification",
+            auto_resolution_at=datetime.now(UTC),
+            resolution_path="tenant_review",
+            requires_attention=True,
+        )
+        conflict.user_a_memory = existing_memory
+        conflict.user_b_memory = pending_memory
+        self.session.add(conflict)
+        if hasattr(self.session, "flush"):
+            self.session.flush()
+        _queue_user_session_clarification(
+            db_session=self.session,
+            conflict=conflict,
+            target_memory=existing_memory,
+            question_context=(
+                "Two trusted services reported different values. "
+                "Which memory is correct?"
+            ),
+        )
+        self.last_cross_user_conflicts_flagged += 1
 
     def _record_shared_context_for_stored_memory(
         self,
@@ -611,23 +1109,81 @@ class ConflictResolver:
         inserted = 0
         for conflict in conflicts:
             signal = conflict.conflicting_signal
+            user_a_memory_id = str(signal.source_memory_id) if signal.source_memory_id else None
+            if self._cross_user_conflict_exists(
+                tenant_id=tenant_id,
+                user_a_memory_id=user_a_memory_id,
+                user_b_memory_id=new_memory_id,
+                entity_type=signal.entity_type,
+            ):
+                continue
             row = build_cross_user_conflict_row(
                 tenant_id=tenant_id,
-                user_a_memory_id=str(signal.source_memory_id) if signal.source_memory_id else None,
+                user_a_memory_id=user_a_memory_id,
                 user_b_memory_id=new_memory_id,
                 entity_type=signal.entity_type,
                 entity_value_a=conflict.entity_value_a,
                 entity_value_b=conflict.entity_value_b,
             )
             self.session.add(row)
-            inserted += 1
-            self._dispatch_context_conflict_webhook(
-                tenant_id=tenant_id,
-                conflict=row,
-                source_proxy_user_id=signal.source_proxy_user_id,
-                current_proxy_user_id=proxy_user_id,
+            if hasattr(self.session, "flush"):
+                self.session.flush()
+            result = resolve_cross_user_conflict_automatically(
+                row,
+                self.session,
+                domain_schema=self.domain_schema,
             )
+            inserted += 1
+            if result.requires_attention:
+                self._dispatch_context_conflict_webhook(
+                    tenant_id=tenant_id,
+                    conflict=row,
+                    source_proxy_user_id=signal.source_proxy_user_id,
+                    current_proxy_user_id=proxy_user_id,
+                )
         return inserted
+
+    def _cross_user_conflict_exists(
+        self,
+        *,
+        tenant_id: str,
+        user_a_memory_id: str | None,
+        user_b_memory_id: str,
+        entity_type: Any,
+    ) -> bool:
+        if not hasattr(self.session, "execute") or user_a_memory_id is None:
+            return False
+
+        tenant_uuid = uuid.UUID(str(tenant_id))
+        memory_a_uuid = uuid.UUID(str(user_a_memory_id))
+        memory_b_uuid = uuid.UUID(str(user_b_memory_id))
+        stmt = select(CrossUserConflict.id).where(
+            CrossUserConflict.tenant_id == tenant_uuid,
+            CrossUserConflict.entity_type == entity_type,
+            or_(
+                and_(
+                    CrossUserConflict.user_a_memory_id == memory_a_uuid,
+                    CrossUserConflict.user_b_memory_id == memory_b_uuid,
+                ),
+                and_(
+                    CrossUserConflict.user_a_memory_id == memory_b_uuid,
+                    CrossUserConflict.user_b_memory_id == memory_a_uuid,
+                ),
+            ),
+        ).limit(1)
+        result = self.session.execute(stmt)
+        if hasattr(result, "scalar_one_or_none"):
+            return result.scalar_one_or_none() is not None
+        if hasattr(result, "scalars"):
+            scalars = result.scalars()
+            if hasattr(scalars, "first"):
+                return scalars.first() is not None
+            if hasattr(scalars, "all"):
+                return any(
+                    isinstance(row, (uuid.UUID, CrossUserConflict, str))
+                    for row in scalars.all()
+                )
+        return False
 
     @staticmethod
     def _dispatch_context_conflict_webhook(
@@ -666,6 +1222,7 @@ class ConflictResolver:
         resolution: str,
         source_conversation_id: str | None,
         agent_id: str | None,
+        is_archived: bool = False,
     ) -> StoredMemory:
         memory_id = uuid.uuid4()
         resolved_source_conversation_id = (
@@ -691,12 +1248,19 @@ class ConflictResolver:
             embedding_model_id=embedding.model_id,
             previous_version_id=uuid.UUID(previous_version_id) if previous_version_id else None,
             source_conversation_id=resolved_source_conversation_id,
+            source_event_id=self.default_source_event_id,
             expires_at=None,
             metadata_json={
                 "expiry": extracted_memory.expiry,
                 "reasoning": extracted_memory.reasoning,
                 "resolution": resolution,
+                **(
+                    {"provenance": self.provenance_snapshot}
+                    if self.provenance_snapshot is not None
+                    else {}
+                ),
             },
+            is_archived=is_archived,
         )
 
         self.session.add(memory)
@@ -710,19 +1274,27 @@ class ConflictResolver:
             "system",
         )
 
-        enqueue_vector_upsert(
-            self.session,
-            memory_id=memory_id,
-            embedding=embedding.vector,
-            payload=build_vector_payload(
-                memory,
-                user_id=str(user_id),
-                tenant_id=tenant_id,
-                proxy_user_id=proxy_user_id,
-                embedding_model_id=embedding.model_id,
-                qdrant_collection=embedding.qdrant_collection,
-            ),
+        self._record_claim_for_memory(
+            memory=memory,
+            tenant_id=tenant_id,
+            proxy_user_id=str(memory.proxy_user_id),
+            resolution=resolution,
         )
+
+        if not is_archived:
+            enqueue_vector_upsert(
+                self.session,
+                memory_id=memory_id,
+                embedding=embedding.vector,
+                payload=build_vector_payload(
+                    memory,
+                    user_id=str(user_id),
+                    tenant_id=tenant_id,
+                    proxy_user_id=proxy_user_id,
+                    embedding_model_id=embedding.model_id,
+                    qdrant_collection=embedding.qdrant_collection,
+                ),
+            )
 
         return StoredMemory(
             id=str(memory_id),
@@ -735,6 +1307,29 @@ class ConflictResolver:
             previous_version_id=previous_version_id,
             resolution=resolution,
         )
+
+    def _record_claim_for_memory(
+        self,
+        *,
+        memory: Memory,
+        tenant_id: str | None,
+        proxy_user_id: str | None,
+        resolution: str,
+    ) -> None:
+        if tenant_id is None or proxy_user_id is None:
+            return
+        try:
+            ClaimLedgerService(self.session).record_memory(
+                memory,
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                provenance=self.provenance_snapshot,
+                resolution=resolution,
+            )
+        except Exception:
+            # The claim ledger is governance metadata. It must never block the
+            # primary memory write path.
+            return
 
     def _archive_memory(self, memory: Memory, change_reason: str | None = None) -> None:
         VersionService(self.session).safe_record_version(
