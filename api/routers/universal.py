@@ -154,7 +154,7 @@ async def _search_universal_memories(
     context_max_tokens: int,
 ) -> tuple[list[MemorySearchResult], str, int]:
     if not allowed_categories:
-        return [], ""
+        return [], "", 0
 
     embedder = EmbeddingService(async_session=session)
     query_embedding = await embedder.embed(query)
@@ -192,7 +192,7 @@ async def _search_universal_memories(
 
     ranked_points = _merge_scored_points(scored_points)
     if not ranked_points:
-        return [], ""
+        return [], "", 0
 
     memory_ids = [str(getattr(point, "id", "")) for point in ranked_points if getattr(point, "id", None)]
     result = await session.execute(
