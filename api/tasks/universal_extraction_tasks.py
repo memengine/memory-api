@@ -13,14 +13,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
 from api.db.database import build_sync_session_factory
+from api.db.models import GlobalAgent
 from api.db.models import MemoryCategory
 from api.db.models import PermissionGrant
 from api.db.models import UniversalMemory
 from api.db.models import UniversalUser
-from api.db.vector_store import QdrantService
 from api.services.embedding_service import EmbeddingService
 from api.services.extractor import ExtractionService
 from api.services.importance_scorer import ImportanceScorer
+from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
+from api.services.vector_outbox import enqueue_vector_upsert
+from api.services.version_service import VersionService
 from api.services.uui_service import ALLOWED_MEMORY_CATEGORIES
 
 
@@ -58,7 +61,7 @@ def run_universal_extraction_pipeline(
     session_factory: sessionmaker[Session] | None = None,
     extractor: ExtractionService | None = None,
     scorer: ImportanceScorer | None = None,
-    qdrant_service: QdrantService | None = None,
+    qdrant_service: Any | None = None,
 ) -> dict[str, Any]:
     user_uui_id = str(job_payload.get("user_uui_id") or "").strip()
     agent_id = str(job_payload.get("agent_id") or "").strip()
@@ -70,7 +73,9 @@ def run_universal_extraction_pipeline(
     session_factory = session_factory or build_universal_session_factory()
     extractor = extractor or ExtractionService()
     scorer = scorer or ImportanceScorer()
-    qdrant_service = qdrant_service or QdrantService()
+    # Retained as a compatibility-only argument for callers that previously
+    # injected Qdrant directly. Writes now flow through the transactional outbox.
+    del qdrant_service
 
     session = session_factory()
     try:
@@ -110,6 +115,7 @@ def run_universal_extraction_pipeline(
                 id=memory_id,
                 user_uui_id=universal_user.id,
                 source_agent_id=uuid.UUID(agent_id),
+                source_type="passport_agent",
                 content=extracted_memory.content,
                 category=MemoryCategory(extracted_memory.category),
                 importance_score=float(extracted_memory.importance_score),
@@ -126,23 +132,46 @@ def run_universal_extraction_pipeline(
             )
             session.add(universal_memory)
             session.flush()
-
-            qdrant_service.upsert_memory(
-                memory_id=str(memory_id),
-                embedding=embedding.vector,
-                payload={
-                    "memory_id": str(memory_id),
-                    "user_uui_id": str(universal_user.id),
-                    "source_agent_id": str(agent_id),
-                    "category": extracted_memory.category,
-                    "importance_score": float(extracted_memory.importance_score),
-                    "is_archived": False,
-                    "created_at": created_at.isoformat(),
-                },
-                collection_name=UNIVERSAL_COLLECTION_NAME,
-                vector_size=embedding.dimensions,
+            VersionService(session).record_universal_version_sync(
+                universal_memory,
+                "created",
+                "Extracted from conversation",
+                "agent",
+                changed_by_agent_id=agent_id,
+                db_session=session,
             )
-            stored_count += 1
+
+            source_agent = session.get(GlobalAgent, uuid.UUID(agent_id))
+            claim_decision = UniversalClaimLedgerService.record_sync(
+                session,
+                universal_memory,
+                grant=grant,
+                source_tenant_id=(source_agent.owner_tenant_id if source_agent else None),
+                resolution_reason="Extracted from an active Passport write grant",
+            )
+            universal_memory.metadata_json = {
+                **dict(universal_memory.metadata_json or {}),
+                "claim_id": str(claim_decision.claim_id),
+                "claim_status": claim_decision.status,
+            }
+            if claim_decision.memory_is_active:
+                enqueue_vector_upsert(
+                    session,
+                    memory_id=memory_id,
+                    embedding=embedding.vector,
+                    payload={
+                        "memory_id": str(memory_id),
+                        "user_uui_id": str(universal_user.id),
+                        "source_agent_id": str(agent_id),
+                        "category": extracted_memory.category,
+                        "importance_score": float(extracted_memory.importance_score),
+                        "claim_status": claim_decision.status,
+                        "is_archived": False,
+                        "created_at": created_at.isoformat(),
+                        "qdrant_collection": UNIVERSAL_COLLECTION_NAME,
+                    },
+                )
+                stored_count += 1
 
         universal_user.memory_count = int(universal_user.memory_count or 0) + stored_count
         session.add(universal_user)
