@@ -1,4 +1,4 @@
-export type MemoryCategory =
+﻿export type MemoryCategory =
   | "preference"
   | "fact"
   | "goal"
@@ -8,9 +8,31 @@ export type MemoryCategory =
 
 export type MessageRole = "user" | "assistant" | "system";
 
+export type RetrievalFeedbackOutcome =
+  | "used_successfully"
+  | "used_partially"
+  | "ignored"
+  | "not_useful"
+  | "user_corrected"
+  | "clarification_needed";
+
 export interface ConversationMessage {
   role: MessageRole;
   content: string;
+}
+
+export interface EvidenceReference {
+  sourceType: string;
+  reference: string;
+  contentHash?: string;
+}
+
+export interface MemorySource {
+  eventId: string;
+  service: string;
+  observedAt: string;
+  scope?: Record<string, unknown>;
+  evidence?: EvidenceReference[];
 }
 
 export interface AddRequest {
@@ -18,6 +40,7 @@ export interface AddRequest {
   agentId?: string;
   messages: ConversationMessage[];
   metadata?: Record<string, unknown>;
+  source?: MemorySource;
 }
 
 export interface AddResult {
@@ -30,6 +53,8 @@ export interface AddResult {
   processingEtaSeconds: number | null;
   processingStatus: "normal" | "delayed";
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
+  nothingToExtract: boolean;
+  readonly wasStored: boolean;
 }
 
 export interface MemoryItem {
@@ -40,16 +65,45 @@ export interface MemoryItem {
   lastAccessed: string | null;
   relevanceScore: number;
   contextSnippet: string;
+  accessCount: number;
+  originalImportanceScore: number;
+  isHot: boolean;
+  systemArchived: boolean;
+  sourceEventId: string | null;
+  provenance: Record<string, unknown> | null;
+  readonly importanceDelta: number;
+  readonly importanceTrend: "rising" | "stable" | "decaying";
 }
 
 export interface RetrieveResult {
+  retrievalId: string | null;
   items: MemoryItem[];
   cached: boolean;
   systemPromptAddition: string;
+  contextTokenCount: number;
+  memoriesFromHotTier: number;
   quotaMode: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
   isPassthrough: boolean;
   isDegraded: boolean;
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
+  readonly hasContext: boolean;
+}
+
+export interface RetrievalFeedbackParams {
+  retrievalId: string;
+  outcome: RetrievalFeedbackOutcome;
+  usedMemoryIds?: string[];
+  correction?: string;
+  agentConfidence?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RetrievalFeedbackResult {
+  feedbackId: string;
+  retrievalId: string;
+  outcome: string;
+  correctionJobId: string | null;
+  readonly queuedRetrospectiveExtraction: boolean;
 }
 
 export interface MemoryRecord {
@@ -62,11 +116,18 @@ export interface MemoryRecord {
   updatedAt: string | null;
   lastAccessedAt: string | null;
   accessCount: number;
+  originalImportanceScore: number;
+  isHot: boolean;
+  systemArchived: boolean;
   isArchived: boolean;
   agentId: string | null;
   previousVersionId: string | null;
   sourceConversationId: string | null;
+  sourceEventId: string | null;
+  provenance: Record<string, unknown> | null;
   metadata: Record<string, unknown>;
+  readonly importanceDelta: number;
+  readonly importanceTrend: "rising" | "stable" | "decaying";
 }
 
 export interface MemoryPage {
@@ -79,6 +140,17 @@ export interface MemoryPage {
 export interface ListOptions {
   pageCursor?: string;
   limit?: number;
+}
+
+export interface GetParams {
+  query: string;
+  externalUserId: string;
+  limit?: number;
+  categories?: MemoryCategory[];
+  agentId?: string;
+  timeFilterDays?: number;
+  format?: "bullets" | "json" | "xml";
+  contextMaxTokens?: number;
 }
 
 export interface UserProfile {
@@ -115,6 +187,39 @@ export interface MemoryExport {
   agents: Agent[];
 }
 
+export interface EdTechMemoryProfile {
+  id: string;
+  proxyUserId: string;
+  tenantId: string;
+  gradeLevel: string | null;
+  boardOrCurriculum: string | null;
+  subjects: Array<Record<string, unknown>>;
+  syllabusStage: Record<string, unknown>;
+  strongTopics: Array<Record<string, unknown>>;
+  weakTopics: Array<Record<string, unknown>>;
+  conceptGaps: Array<Record<string, unknown>>;
+  misconceptions: Array<Record<string, unknown>>;
+  explanationStyle: Record<string, unknown> | null;
+  sessionProfile: Record<string, unknown> | null;
+  languageProfile: Record<string, unknown> | null;
+  peakHours: Record<string, unknown> | null;
+  examName: string | null;
+  examDate: string | null;
+  marksTarget: Record<string, unknown> | null;
+  mockScores: Array<Record<string, unknown>>;
+  forgettingStages: Record<string, unknown>;
+  improvementVelocity: Record<string, unknown>;
+  streak: Record<string, unknown> | null;
+  lastTopicStudied: string | null;
+  schemaVersion: number;
+  lastExtractionAt: string | null;
+  extractionSourceJobIds: string[];
+  createdAt: string | null;
+  updatedAt: string | null;
+  readonly hasExamContext: boolean;
+  readonly hasLearningProfile: boolean;
+}
+
 export interface ErrorPayload {
   error: string;
   code: string;
@@ -137,9 +242,11 @@ interface AddEnvelope {
   budget_remaining_pct?: number | null;
   processing_eta_seconds?: number | null;
   processing_status?: "normal" | "delayed";
+  nothing_to_extract?: boolean;
 }
 
 interface RetrieveEnvelope {
+  retrieval_id?: string | null;
   data: Array<{
     id: string;
     content: string;
@@ -148,10 +255,27 @@ interface RetrieveEnvelope {
     last_accessed: string | null;
     relevance_score: number;
     context_snippet: string;
+    access_count?: number;
+    original_importance_score?: number;
+    is_hot?: boolean;
+    system_archived?: boolean;
+    source_event_id?: string | null;
+    provenance?: Record<string, unknown> | null;
   }>;
   cached: boolean;
   system_prompt_addition: string;
+  context_token_count?: number;
+  memories_from_hot_tier?: number;
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
+}
+
+interface RetrievalFeedbackEnvelope {
+  data: {
+    feedback_id: string;
+    retrieval_id: string;
+    outcome: string;
+    correction_job_id?: string | null;
+  };
 }
 
 interface MemoryListEnvelope {
@@ -165,10 +289,15 @@ interface MemoryListEnvelope {
     updated_at: string | null;
     last_accessed_at: string | null;
     access_count: number;
+    original_importance_score?: number;
+    is_hot?: boolean;
+    system_archived?: boolean;
     is_archived: boolean;
     agent_id: string | null;
     previous_version_id: string | null;
     source_conversation_id: string | null;
+    source_event_id?: string | null;
+    provenance?: Record<string, unknown> | null;
     metadata: Record<string, unknown>;
   }>;
   pagination: {
@@ -212,6 +341,39 @@ interface ExportEnvelope {
       created_at: string | null;
     }>;
   };
+}
+
+interface EdTechProfileEnvelope {
+  data: {
+    id: string;
+    proxy_user_id: string;
+    tenant_id: string;
+    grade_level?: string | null;
+    board_or_curriculum?: string | null;
+    subjects?: Array<Record<string, unknown>>;
+    syllabus_stage?: Record<string, unknown>;
+    strong_topics?: Array<Record<string, unknown>>;
+    weak_topics?: Array<Record<string, unknown>>;
+    concept_gaps?: Array<Record<string, unknown>>;
+    misconceptions?: Array<Record<string, unknown>>;
+    explanation_style?: Record<string, unknown> | null;
+    session_profile?: Record<string, unknown> | null;
+    language_profile?: Record<string, unknown> | null;
+    peak_hours?: Record<string, unknown> | null;
+    exam_name?: string | null;
+    exam_date?: string | null;
+    marks_target?: Record<string, unknown> | null;
+    mock_scores?: Array<Record<string, unknown>>;
+    forgetting_stages?: Record<string, unknown>;
+    improvement_velocity?: Record<string, unknown>;
+    streak?: Record<string, unknown> | null;
+    last_topic_studied?: string | null;
+    schema_version?: number;
+    last_extraction_at?: string | null;
+    extraction_source_job_ids?: string[];
+    created_at?: string | null;
+    updated_at?: string | null;
+  } | null;
 }
 
 type FetchLike = typeof fetch;
@@ -293,7 +455,19 @@ function ensureMessages(messages: ConversationMessage[]): ConversationMessage[] 
   });
 }
 
+function importanceTrend(importanceScore: number, originalImportanceScore: number): "rising" | "stable" | "decaying" {
+  const delta = Number((importanceScore - originalImportanceScore).toFixed(2));
+  if (delta > 0.3) {
+    return "rising";
+  }
+  if (delta < -0.3) {
+    return "decaying";
+  }
+  return "stable";
+}
+
 function toMemoryResult(item: RetrieveEnvelope["data"][number]): MemoryItem {
+  const originalImportanceScore = item.original_importance_score ?? item.importance_score;
   return {
     id: item.id,
     content: item.content,
@@ -302,6 +476,18 @@ function toMemoryResult(item: RetrieveEnvelope["data"][number]): MemoryItem {
     lastAccessed: item.last_accessed,
     relevanceScore: item.relevance_score,
     contextSnippet: item.context_snippet,
+    accessCount: item.access_count ?? 0,
+    originalImportanceScore,
+    isHot: item.is_hot ?? false,
+    systemArchived: item.system_archived ?? false,
+    sourceEventId: item.source_event_id ?? null,
+    provenance: item.provenance ?? null,
+    get importanceDelta() {
+      return Number((this.importanceScore - this.originalImportanceScore).toFixed(2));
+    },
+    get importanceTrend() {
+      return importanceTrend(this.importanceScore, this.originalImportanceScore);
+    },
   };
 }
 
@@ -330,6 +516,7 @@ function processingStatusFromHeaders(headers: Headers): AddResult["processingSta
 }
 
 function toMemoryRecord(item: MemoryListEnvelope["data"][number]): MemoryRecord {
+  const originalImportanceScore = item.original_importance_score ?? item.importance_score;
   return {
     id: item.id,
     content: item.content,
@@ -340,11 +527,22 @@ function toMemoryRecord(item: MemoryListEnvelope["data"][number]): MemoryRecord 
     updatedAt: item.updated_at,
     lastAccessedAt: item.last_accessed_at,
     accessCount: item.access_count,
+    originalImportanceScore,
+    isHot: item.is_hot ?? false,
+    systemArchived: item.system_archived ?? false,
     isArchived: item.is_archived,
     agentId: item.agent_id,
     previousVersionId: item.previous_version_id,
     sourceConversationId: item.source_conversation_id,
+    sourceEventId: item.source_event_id ?? null,
+    provenance: item.provenance ?? null,
     metadata: item.metadata,
+    get importanceDelta() {
+      return Number((this.importanceScore - this.originalImportanceScore).toFixed(2));
+    },
+    get importanceTrend() {
+      return importanceTrend(this.importanceScore, this.originalImportanceScore);
+    },
   };
 }
 
@@ -381,6 +579,45 @@ function toAgent(item: ExportEnvelope["data"]["agents"][number]): Agent {
   };
 }
 
+function toEdTechProfile(item: NonNullable<EdTechProfileEnvelope["data"]>): EdTechMemoryProfile {
+  return {
+    id: item.id,
+    proxyUserId: item.proxy_user_id,
+    tenantId: item.tenant_id,
+    gradeLevel: item.grade_level ?? null,
+    boardOrCurriculum: item.board_or_curriculum ?? null,
+    subjects: item.subjects ?? [],
+    syllabusStage: item.syllabus_stage ?? {},
+    strongTopics: item.strong_topics ?? [],
+    weakTopics: item.weak_topics ?? [],
+    conceptGaps: item.concept_gaps ?? [],
+    misconceptions: item.misconceptions ?? [],
+    explanationStyle: item.explanation_style ?? null,
+    sessionProfile: item.session_profile ?? null,
+    languageProfile: item.language_profile ?? null,
+    peakHours: item.peak_hours ?? null,
+    examName: item.exam_name ?? null,
+    examDate: item.exam_date ?? null,
+    marksTarget: item.marks_target ?? null,
+    mockScores: item.mock_scores ?? [],
+    forgettingStages: item.forgetting_stages ?? {},
+    improvementVelocity: item.improvement_velocity ?? {},
+    streak: item.streak ?? null,
+    lastTopicStudied: item.last_topic_studied ?? null,
+    schemaVersion: item.schema_version ?? 1,
+    lastExtractionAt: item.last_extraction_at ?? null,
+    extractionSourceJobIds: item.extraction_source_job_ids ?? [],
+    createdAt: item.created_at ?? null,
+    updatedAt: item.updated_at ?? null,
+    get hasExamContext() {
+      return Boolean(this.examName || this.examDate || this.marksTarget);
+    },
+    get hasLearningProfile() {
+      return Boolean(this.explanationStyle || this.languageProfile || this.sessionProfile);
+    },
+  };
+}
+
 export class MemoryOS {
   static readonly DEFAULT_BASE_URL = "https://api.memoryos.io";
   static readonly DEFAULT_TIMEOUT = 30_000;
@@ -411,12 +648,14 @@ export class MemoryOS {
     externalUserId: string,
     agentId?: string,
     metadata?: Record<string, unknown>,
+    source?: MemorySource,
   ): Promise<AddResult> {
     const payload: AddRequest = {
       externalUserId,
       messages: ensureMessages(messages),
       ...(agentId ? { agentId } : {}),
       ...(metadata ? { metadata } : {}),
+      ...(source ? { source } : {}),
     };
     const response = await this.requestResponse("POST", "/v1/memories/add", {
       body: JSON.stringify({
@@ -424,6 +663,21 @@ export class MemoryOS {
         ...(payload.agentId ? { agent_id: payload.agentId } : {}),
         messages: payload.messages,
         metadata: payload.metadata ?? {},
+        ...(payload.source
+          ? {
+              source: {
+                event_id: payload.source.eventId,
+                service: payload.source.service,
+                observed_at: payload.source.observedAt,
+                scope: payload.source.scope ?? {},
+                evidence: (payload.source.evidence ?? []).map((item) => ({
+                  source_type: item.sourceType,
+                  reference: item.reference,
+                  ...(item.contentHash ? { content_hash: item.contentHash } : {}),
+                })),
+              },
+            }
+          : {}),
       }),
     });
     const payloadJson = (await this.parseJson(response)) as AddEnvelope;
@@ -437,34 +691,105 @@ export class MemoryOS {
       processingEtaSeconds: payloadJson.processing_eta_seconds ?? null,
       processingStatus: payloadJson.processing_status ?? processingStatusFromHeaders(response.headers),
       circuitStatus: circuitStatusFromHeaders(response.headers),
+      nothingToExtract: payloadJson.nothing_to_extract ?? false,
+      get wasStored() {
+        return payloadJson.status === "queued" && !(payloadJson.nothing_to_extract ?? false);
+      },
     };
   }
 
+  async get(params: GetParams): Promise<RetrieveResult>;
   async get(
     query: string,
     externalUserId: string,
+    limit?: number,
+    categories?: MemoryCategory[],
+    agentId?: string,
+    timeFilterDays?: number,
+    format?: "bullets" | "json" | "xml",
+    contextMaxTokens?: number,
+  ): Promise<RetrieveResult>;
+  async get(
+    queryOrParams: string | GetParams,
+    externalUserId?: string,
     limit: number = 10,
     categories?: MemoryCategory[],
+    agentId?: string,
+    timeFilterDays?: number,
+    format: "bullets" | "json" | "xml" = "bullets",
+    contextMaxTokens: number = 500,
   ): Promise<RetrieveResult> {
+    const params =
+      typeof queryOrParams === "string"
+        ? {
+            query: queryOrParams,
+            externalUserId: externalUserId ?? "",
+            limit,
+            categories,
+            agentId,
+            timeFilterDays,
+            format,
+            contextMaxTokens,
+          }
+        : queryOrParams;
+
+    const body: Record<string, unknown> = {
+      query: params.query,
+      external_user_id: params.externalUserId,
+      limit: params.limit ?? 10,
+      categories: params.categories ?? [],
+      format: params.format ?? "bullets",
+      context_max_tokens: params.contextMaxTokens ?? 500,
+    };
+    if (params.agentId !== undefined) {
+      body.agent_id = params.agentId;
+    }
+    if (params.timeFilterDays !== undefined) {
+      body.time_filter_days = params.timeFilterDays;
+    }
+
     const response = await this.requestResponse("POST", "/v1/memories/retrieve", {
-      body: JSON.stringify({
-        query,
-        external_user_id: externalUserId,
-        limit,
-        categories: categories ?? [],
-        format: "bullets",
-      }),
+      body: JSON.stringify(body),
     });
     const payload = (await this.parseJson(response)) as RetrieveEnvelope;
     const quotaMode = payload.quota_mode ?? quotaModeFromHeaders(response.headers);
     return {
+      retrievalId: payload.retrieval_id ?? null,
       items: payload.data.map(toMemoryResult),
       cached: payload.cached,
       systemPromptAddition: payload.system_prompt_addition,
+      contextTokenCount: payload.context_token_count ?? 0,
+      memoriesFromHotTier: payload.memories_from_hot_tier ?? 0,
       quotaMode,
       isPassthrough: quotaMode === "PASSTHROUGH",
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
+      get hasContext() {
+        return Boolean(payload.system_prompt_addition) && quotaMode !== "PASSTHROUGH";
+      },
+    };
+  }
+
+  async feedback(params: RetrievalFeedbackParams): Promise<RetrievalFeedbackResult> {
+    const response = await this.requestResponse("POST", "/v1/memories/retrieval-feedback", {
+      body: JSON.stringify({
+        retrieval_id: params.retrievalId,
+        outcome: params.outcome,
+        used_memory_ids: params.usedMemoryIds ?? [],
+        ...(params.correction !== undefined ? { correction: params.correction } : {}),
+        ...(params.agentConfidence !== undefined ? { agent_confidence: params.agentConfidence } : {}),
+        metadata: params.metadata ?? {},
+      }),
+    });
+    const payload = (await this.parseJson(response)) as RetrievalFeedbackEnvelope;
+    return {
+      feedbackId: payload.data.feedback_id,
+      retrievalId: payload.data.retrieval_id,
+      outcome: payload.data.outcome,
+      correctionJobId: payload.data.correction_job_id ?? null,
+      get queuedRetrospectiveExtraction() {
+        return Boolean(payload.data.correction_job_id);
+      },
     };
   }
 
@@ -502,6 +827,19 @@ export class MemoryOS {
       apiKeys: response.data.api_keys.map(toApiKey),
       agents: response.data.agents.map(toAgent),
     };
+  }
+
+  async getEdTechProfile(externalUserId: string): Promise<EdTechMemoryProfile | null> {
+    const params = new URLSearchParams({ external_user_id: externalUserId });
+    const response = await this.request<EdTechProfileEnvelope>("GET", `/v1/memories/edtech-profile?${params.toString()}`);
+    return response.data ? toEdTechProfile(response.data) : null;
+  }
+
+  /**
+   * @deprecated Use getEdTechProfile(). This alias is kept for older callers that used different casing.
+   */
+  async getEdtechProfile(externalUserId: string): Promise<EdTechMemoryProfile | null> {
+    return this.getEdTechProfile(externalUserId);
   }
 
   private async request<T>(method: string, path: string, init: { body?: string } = {}): Promise<T> {
