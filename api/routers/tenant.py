@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import calendar
@@ -51,7 +51,9 @@ from api.db.models import MemoryClaimRevision
 from api.db.models import MemorySourceEvent
 from api.db.models import OrganisationDirectory
 from api.db.models import OveragePolicy
+from api.db.models import PendingExtractionCandidate
 from api.db.models import ProxyUser
+from api.db.models import RetrievalFeedbackEvent
 from api.db.models import SharedContextSignal
 from api.db.models import ServiceWriter
 from api.db.models import SupportMemory
@@ -112,6 +114,10 @@ from api.schemas.tenant_schemas import ProxyUserDetail
 from api.schemas.tenant_schemas import ProxyUserDetailResponse
 from api.schemas.tenant_schemas import TenantDeprecationUsageEntry
 from api.schemas.tenant_schemas import TenantDeprecationUsageResponse
+from api.schemas.tenant_schemas import TenantExtractionIntelligenceData
+from api.schemas.tenant_schemas import TenantExtractionIntelligenceResponse
+from api.schemas.tenant_schemas import TenantPendingExtractionCandidateEntry
+from api.schemas.tenant_schemas import TenantRetrievalFeedbackEntry
 from api.schemas.tenant_schemas import TenantMemoryAdditionPoint
 from api.schemas.tenant_schemas import TenantMemoryAdditionsResponse
 from api.schemas.tenant_schemas import TenantProxyUserData
@@ -1737,6 +1743,148 @@ async def list_tenant_quality_log(
         timestamp=utc_now(),
     )
 
+
+
+@router.get("/extraction-intelligence", response_model=TenantExtractionIntelligenceResponse)
+async def get_tenant_extraction_intelligence(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    session: DbSession,
+    limit: int = Query(default=8, ge=1, le=25),
+) -> TenantExtractionIntelligenceResponse:
+    """Summarize weak extraction candidates and retrieval feedback for tenant operators."""
+    tenant_uuid = uuid.UUID(tenant_id)
+    since_7d = utc_now() - timedelta(days=7)
+
+    candidate_status_rows = (
+        await session.execute(
+            select(PendingExtractionCandidate.status, func.count(PendingExtractionCandidate.id))
+            .where(PendingExtractionCandidate.tenant_id == tenant_uuid)
+            .group_by(PendingExtractionCandidate.status)
+        )
+    ).all()
+    candidate_status_breakdown = {str(status): int(count) for status, count in candidate_status_rows}
+
+    feedback_outcome_rows = (
+        await session.execute(
+            select(RetrievalFeedbackEvent.outcome, func.count(RetrievalFeedbackEvent.id))
+            .where(
+                RetrievalFeedbackEvent.tenant_id == tenant_uuid,
+                RetrievalFeedbackEvent.created_at >= since_7d,
+            )
+            .group_by(RetrievalFeedbackEvent.outcome)
+        )
+    ).all()
+    feedback_outcome_breakdown = {str(outcome): int(count) for outcome, count in feedback_outcome_rows}
+
+    promoted_candidates_7d = int(
+        await session.scalar(
+            select(func.count(PendingExtractionCandidate.id)).where(
+                PendingExtractionCandidate.tenant_id == tenant_uuid,
+                PendingExtractionCandidate.status == "promoted",
+                PendingExtractionCandidate.updated_at >= since_7d,
+            )
+        )
+        or 0
+    )
+    dismissed_candidates_7d = int(
+        await session.scalar(
+            select(func.count(PendingExtractionCandidate.id)).where(
+                PendingExtractionCandidate.tenant_id == tenant_uuid,
+                PendingExtractionCandidate.status.in_(["dismissed", "expired"]),
+                PendingExtractionCandidate.updated_at >= since_7d,
+            )
+        )
+        or 0
+    )
+    reinforced_candidates = int(
+        await session.scalar(
+            select(func.count(PendingExtractionCandidate.id)).where(
+                PendingExtractionCandidate.tenant_id == tenant_uuid,
+                PendingExtractionCandidate.status == "pending",
+                PendingExtractionCandidate.reinforcement_count > 1,
+            )
+        )
+        or 0
+    )
+    feedback_events_7d = sum(feedback_outcome_breakdown.values())
+    corrections_queued_7d = int(
+        await session.scalar(
+            select(func.count(RetrievalFeedbackEvent.id)).where(
+                RetrievalFeedbackEvent.tenant_id == tenant_uuid,
+                RetrievalFeedbackEvent.created_at >= since_7d,
+                RetrievalFeedbackEvent.correction_job_id.is_not(None),
+            )
+        )
+        or 0
+    )
+
+    candidate_rows = (
+        await session.execute(
+            select(PendingExtractionCandidate, ProxyUser.external_user_id)
+            .join(ProxyUser, ProxyUser.id == PendingExtractionCandidate.proxy_user_id)
+            .where(PendingExtractionCandidate.tenant_id == tenant_uuid)
+            .order_by(PendingExtractionCandidate.updated_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    feedback_rows = (
+        await session.execute(
+            select(RetrievalFeedbackEvent, ProxyUser.external_user_id)
+            .join(ProxyUser, ProxyUser.id == RetrievalFeedbackEvent.proxy_user_id)
+            .where(RetrievalFeedbackEvent.tenant_id == tenant_uuid)
+            .order_by(RetrievalFeedbackEvent.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+
+    return TenantExtractionIntelligenceResponse(
+        data=TenantExtractionIntelligenceData(
+            pending_candidates=candidate_status_breakdown.get("pending", 0),
+            promoted_candidates_7d=promoted_candidates_7d,
+            dismissed_candidates_7d=dismissed_candidates_7d,
+            reinforced_candidates=reinforced_candidates,
+            feedback_events_7d=feedback_events_7d,
+            corrections_queued_7d=corrections_queued_7d,
+            clarification_feedback_7d=feedback_outcome_breakdown.get("clarification_needed", 0),
+            negative_feedback_7d=(
+                feedback_outcome_breakdown.get("not_useful", 0)
+                + feedback_outcome_breakdown.get("user_corrected", 0)
+            ),
+            candidate_status_breakdown=candidate_status_breakdown,
+            feedback_outcome_breakdown=feedback_outcome_breakdown,
+            recent_candidates=[
+                TenantPendingExtractionCandidateEntry(
+                    id=str(candidate.id),
+                    external_user_id=external_user_id,
+                    content=candidate.content,
+                    category=candidate.category.value if hasattr(candidate.category, "value") else str(candidate.category),
+                    confidence_score=float(candidate.confidence_score),
+                    importance_score=float(candidate.importance_score),
+                    reinforcement_count=int(candidate.reinforcement_count),
+                    candidate_reason=candidate.candidate_reason,
+                    status=candidate.status,
+                    last_seen_at=candidate.last_seen_at,
+                    updated_at=candidate.updated_at,
+                )
+                for candidate, external_user_id in candidate_rows
+            ],
+            recent_feedback=[
+                TenantRetrievalFeedbackEntry(
+                    id=str(feedback.id),
+                    external_user_id=external_user_id,
+                    outcome=feedback.outcome,
+                    correction=feedback.correction,
+                    agent_confidence=feedback.agent_confidence,
+                    correction_job_id=str(feedback.correction_job_id) if feedback.correction_job_id else None,
+                    created_at=feedback.created_at,
+                )
+                for feedback, external_user_id in feedback_rows
+            ],
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
 
 @router.get("/memory-additions", response_model=TenantMemoryAdditionsResponse)
 async def get_tenant_memory_additions(
