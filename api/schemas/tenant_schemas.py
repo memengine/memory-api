@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date
 from datetime import datetime
@@ -141,6 +141,49 @@ class TenantQualityLogResponse(ResponseEnvelope):
     data: list[TenantQualityLogEntry]
     pagination: CursorPage
 
+
+
+class TenantPendingExtractionCandidateEntry(BaseModel):
+    id: str
+    external_user_id: str
+    content: str
+    category: str
+    confidence_score: float
+    importance_score: float
+    reinforcement_count: int
+    candidate_reason: str
+    status: str
+    last_seen_at: datetime
+    updated_at: datetime
+
+
+class TenantRetrievalFeedbackEntry(BaseModel):
+    id: str
+    external_user_id: str
+    outcome: str
+    correction: str | None = None
+    agent_confidence: float | None = None
+    correction_job_id: str | None = None
+    created_at: datetime
+
+
+class TenantExtractionIntelligenceData(BaseModel):
+    pending_candidates: int = 0
+    promoted_candidates_7d: int = 0
+    dismissed_candidates_7d: int = 0
+    reinforced_candidates: int = 0
+    feedback_events_7d: int = 0
+    corrections_queued_7d: int = 0
+    clarification_feedback_7d: int = 0
+    negative_feedback_7d: int = 0
+    candidate_status_breakdown: dict[str, int] = Field(default_factory=dict)
+    feedback_outcome_breakdown: dict[str, int] = Field(default_factory=dict)
+    recent_candidates: list[TenantPendingExtractionCandidateEntry] = Field(default_factory=list)
+    recent_feedback: list[TenantRetrievalFeedbackEntry] = Field(default_factory=list)
+
+
+class TenantExtractionIntelligenceResponse(ResponseEnvelope):
+    data: TenantExtractionIntelligenceData
 
 class TenantSettingsPatchRequest(BaseModel):
     alert_webhook_url: str | None = Field(default=None, max_length=500)
