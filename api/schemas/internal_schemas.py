@@ -72,6 +72,39 @@ class ProvenanceHealthResponse(BaseModel):
     generated_at: datetime
 
 
+class ExtractionIntelligenceTenantSignal(BaseModel):
+    tenant_id: uuid.UUID
+    company_name: str
+    pending_candidates: int = 0
+    reinforced_candidates: int = 0
+    feedback_events_7d: int = 0
+    correction_jobs_7d: int = 0
+    negative_feedback_7d: int = 0
+    promoted_candidates_7d: int = 0
+    dismissed_candidates_7d: int = 0
+    stuck_retrospective_jobs: int = 0
+    latest_signal_at: datetime | None = None
+    needs_attention: bool = False
+
+
+class ExtractionIntelligenceHealthResponse(BaseModel):
+    pending_candidates: int
+    reinforced_candidates: int
+    promoted_candidates_7d: int
+    dismissed_candidates_7d: int
+    feedback_events_7d: int
+    correction_jobs_7d: int
+    user_corrections_7d: int
+    clarification_feedback_7d: int
+    negative_feedback_7d: int
+    stuck_retrospective_jobs: int
+    promotion_rate_7d: float
+    tenants_needing_attention: int
+    top_tenants: list[ExtractionIntelligenceTenantSignal] = Field(default_factory=list)
+    status: Literal["HEALTHY", "ATTENTION", "CRITICAL"]
+    generated_at: datetime
+
+
 class ClaimVersionBucket(BaseModel):
     scope: Literal["tenant", "passport"]
     schema_version: int
