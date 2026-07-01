@@ -97,6 +97,7 @@ class StubMemoryService:
             "started_at": None,
             "completed_at": None,
             "dead_lettered_at": None,
+            "extraction_metadata": {"compositional_pass_attempted": False},
         }
 
 
@@ -362,7 +363,8 @@ async def bypass_auth(self, request, call_next):
     return await call_next(request)
 
 
-ADMIN_HEADERS = {"X-Admin-Secret": os.environ["ADMIN_SECRET"]}
+def admin_headers() -> dict[str, str]:
+    return {"X-Admin-Secret": os.environ["ADMIN_SECRET"]}
 
 
 def build_test_client(monkeypatch, *, bypass_auth_enabled: bool) -> TestClient:
@@ -647,17 +649,17 @@ def test_remaining_endpoint_shapes(monkeypatch) -> None:
             "/v1/agents",
             json={"name": "assistant", "description": "Main agent", "memory_scope": "private"},
         )
-        backfill_status_response = client.get("/v1/internal/backfill-status", headers=ADMIN_HEADERS)
-        queue_depth_response = client.get("/v1/internal/queue-depth", headers=ADMIN_HEADERS)
-        reembedding_status_response = client.get("/v1/internal/reembedding-status", headers=ADMIN_HEADERS)
+        backfill_status_response = client.get("/v1/internal/backfill-status", headers=admin_headers())
+        queue_depth_response = client.get("/v1/internal/queue-depth", headers=admin_headers())
+        reembedding_status_response = client.get("/v1/internal/reembedding-status", headers=admin_headers())
         activate_model_response = client.post(
             "/v1/internal/embedding-models/activate/gemini-embedding-001-v2",
-            headers=ADMIN_HEADERS,
+            headers=admin_headers(),
         )
         backfill_trigger_response = client.post(
             "/v1/internal/backfill/run/proxy-user-ids",
             params={"batch_size": 500, "sleep_between_batches_ms": 50},
-            headers=ADMIN_HEADERS,
+            headers=admin_headers(),
         )
 
     assert get_response.status_code == 200
@@ -665,6 +667,7 @@ def test_remaining_endpoint_shapes(monkeypatch) -> None:
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["deleted"] is True
     assert job_response.status_code == 200
+    assert job_response.json()["data"]["extraction_metadata"] == {"compositional_pass_attempted": False}
     assert job_response.json()["data"]["attempts"] == 1
     assert job_response.json()["data"]["queue_name"] == "starter-extraction"
     assert profile_response.status_code == 200
