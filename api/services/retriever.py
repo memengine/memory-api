@@ -1077,6 +1077,10 @@ class RetrieverService:
                     ),
                     last_accessed_at=str(last_accessed_at) if last_accessed_at else None,
                     created_at=str(created_at) if created_at else None,
+                    source_event_id=(
+                        str(payload["source_event_id"]) if payload.get("source_event_id") else None
+                    ),
+                    provenance=dict(payload["provenance"]) if payload.get("provenance") else None,
                 )
             )
         return results
