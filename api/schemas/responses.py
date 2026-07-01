@@ -140,6 +140,7 @@ class MemoryJobStatusData(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     dead_lettered_at: datetime | None = None
+    extraction_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemoryJobStatusResponse(ResponseEnvelope):
