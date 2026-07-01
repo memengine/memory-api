@@ -34,7 +34,23 @@ MAX_EXISTING_MEMORIES = 20
 COMPOSITIONAL_MIN_MESSAGES = 4
 COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
+COMPOSITIONAL_MIN_SIGNAL_GROUPS = 2
+COMPOSITIONAL_SIGNAL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("identity", (" i am ", " i'm ", " my role", " founder", " engineer", " student", " teacher", " manager")),
+    ("team", (" team", " company", " startup", " workspace", " client", " customer", " organisation", " organization")),
+    ("project", (" building", " working on", " project", " product", " app", " platform", " workflow", " integration")),
+    ("goal", (" goal", " trying to", " want to", " need to", " planning", " launch", " prepare", " improve")),
+    ("preference", (" prefer", " likes", " usually", " always", " avoid", " tone", " short", " detailed", " hindi", " english")),
+    ("timeline", (" today", " tomorrow", " next week", " by ", " deadline", " before", " after", " currently")),
+)
 
+TEMPORARY_SESSION_MEMORY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bcurrent\s+(debugging|debug|troubleshooting|terminal|session|flow)\b", re.IGNORECASE),
+    re.compile(r"\bcontinue\s+with\s+the\s+(current|same)\s+.+\b(flow|debugging|debug|session)\b", re.IGNORECASE),
+    re.compile(r"\bdo\s+not\s+change\s+anything\b", re.IGNORECASE),
+    re.compile(r"\bkeep\s+going\s+with\s+the\s+(current|same)\b", re.IGNORECASE),
+    re.compile(r"\bnext\s+(terminal\s+)?command\b", re.IGNORECASE),
+)
 
 class ExtractionError(RuntimeError):
     """Raised when the extraction model returns unusable output."""
@@ -105,23 +121,41 @@ class ExtractionService:
         )
 
         composition_signals: dict[str, Any] = {}
+        composition_prepass_attempted = self._should_run_compositional_pass(
+            messages=messages,
+            conversation=conversation,
+            source_context=source_context,
+        )
+        composition_prepass_error: str | None = None
         tokens_used = 0
         provider_used: str | None = None
-        if self._should_run_compositional_pass(messages=messages, conversation=conversation, source_context=source_context):
-            composition_response = await self.llm_service.complete(
-                system_prompt=self._build_composition_system_prompt(),
-                user_message=conversation,
-                temperature=0.0,
-                max_tokens=700,
-                response_format="json",
-            )
-            tokens_used += int(composition_response.total_tokens or 0)
-            provider_used = composition_response.provider_used or provider_used
-            await self._record_provider_usage(composition_response.provider_used)
-            composition_signals = self._parse_composition_response(composition_response.content)
-            if composition_signals:
-                user_message = self._append_composition_context(user_message, composition_signals)
-
+        if composition_prepass_attempted:
+            try:
+                composition_response = await self.llm_service.complete(
+                    system_prompt=self._build_composition_system_prompt(),
+                    user_message=conversation,
+                    temperature=0.0,
+                    max_tokens=700,
+                    response_format="json",
+                )
+                tokens_used += int(composition_response.total_tokens or 0)
+                provider_used = composition_response.provider_used or provider_used
+                await self._record_provider_usage(composition_response.provider_used)
+                composition_signals = self._parse_composition_response(composition_response.content)
+                if composition_signals:
+                    user_message = self._append_composition_context(user_message, composition_signals)
+            except Exception as exc:  # pragma: no cover - defensive fail-open path.
+                composition_prepass_error = exc.__class__.__name__
+                LOGGER.warning(
+                    "composition_pass_failed",
+                    extra={
+                        "event": "composition_pass_failed",
+                        "tenant_id": tenant_id,
+                        "proxy_user_id": resolved_user_id,
+                        "job_id": job_id,
+                        "error": str(exc),
+                    },
+                )
         response = await self.llm_service.complete(
             system_prompt=self._build_system_prompt(
                 source_context=source_context,
@@ -162,8 +196,14 @@ class ExtractionService:
             job_id=str(job_id or ""),
             memories_to_store=kept,
             pending_candidates=pending,
+            extraction_metadata={
+                "compositional_pass_attempted": composition_prepass_attempted,
+                "compositional_pass_used": bool(composition_signals),
+                "compositional_entities": len(composition_signals.get("entities") or []),
+                "compositional_relationships": len(composition_signals.get("relationships") or []),
+                "compositional_error": composition_prepass_error,
+            },
         )
-
     async def _record_provider_usage(self, provider: str | None) -> None:
         if not provider:
             return
@@ -276,20 +316,47 @@ class ExtractionService:
             return False
         if len(messages) < COMPOSITIONAL_MIN_MESSAGES:
             return False
-        user_messages = sum(1 for message in messages if str(message.get("role") or "").lower() == "user")
-        return user_messages >= COMPOSITIONAL_MIN_USER_MESSAGES and len(conversation) >= COMPOSITIONAL_MIN_CHARS
+        if len(conversation) < COMPOSITIONAL_MIN_CHARS:
+            return False
+
+        user_turns = [
+            str(message.get("content") or "")
+            for message in messages
+            if str(message.get("role") or "").lower() == "user" and str(message.get("content") or "").strip()
+        ]
+        if len(user_turns) < COMPOSITIONAL_MIN_USER_MESSAGES:
+            return False
+
+        signal_groups = ExtractionService._composition_signal_groups("\n".join(user_turns))
+        if len(signal_groups) < COMPOSITIONAL_MIN_SIGNAL_GROUPS:
+            return False
+
+        # At least two user turns should carry durable signals. This avoids an
+        # extra LLM call for one long message that the normal extractor can handle.
+        signaled_turns = sum(1 for turn in user_turns if ExtractionService._composition_signal_groups(turn))
+        return signaled_turns >= COMPOSITIONAL_MIN_USER_MESSAGES
 
     @staticmethod
     def _build_composition_system_prompt() -> str:
         return (
-            "You are the first pass in a two-pass memory extraction pipeline. "
-            "Find entities and relationships that are spread across multiple turns. "
-            "Do not create memories. Do not infer beyond the transcript. Return JSON only.\n\n"
+            "You are pass 1 in a two-pass MemoryOS extraction pipeline. "
+            "Find durable entities and relationships that require connecting details across multiple user turns. "
+            "Do not create memories, do not infer beyond the transcript, and ignore one-off operational chatter. "
+            "Return JSON only.\n\n"
             "Return exactly this JSON shape:\n"
             '{"entities":[{"name":"string","type":"person|project|company|tool|role|goal|preference|other","evidence":"short quote or turn summary"}],'
             '"relationships":[{"subject":"string","relation":"string","object":"string","evidence":"short quote or turn summary","confidence":0.0}],'
             '"notes":"optional string"}'
         )
+
+    @staticmethod
+    def _composition_signal_groups(text: str) -> set[str]:
+        padded = f" {text.lower()} "
+        groups: set[str] = set()
+        for group_name, markers in COMPOSITIONAL_SIGNAL_GROUPS:
+            if any(marker in padded for marker in markers):
+                groups.add(group_name)
+        return groups
 
     @staticmethod
     def _parse_composition_response(raw_content: str) -> dict[str, Any]:
@@ -327,9 +394,11 @@ class ExtractionService:
             confidence = relation.get("confidence", "")
             evidence = str(relation.get("evidence") or "").strip()
             if subject and predicate and obj:
-                lines.append(f"- relationship: {subject} --{predicate}--> {obj} confidence: {confidence} evidence: {evidence[:160]}")
+                lines.append(
+                    f"- relationship: {subject} --{predicate}--> {obj} "
+                    f"confidence: {confidence} evidence: {evidence[:160]}"
+                )
         return "\n".join(lines)
-
     @staticmethod
     def _prepend_source_context(
         conversation: str,
@@ -445,6 +514,8 @@ class ExtractionService:
             return None
         if category not in ALLOWED_CATEGORIES:
             return None
+        if self._looks_like_temporary_session_memory(content=content, category=category, reasoning=reasoning):
+            return None
         if len(content) < 10:
             return None
         if len(content) > 500:
@@ -460,6 +531,13 @@ class ExtractionService:
             )
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _looks_like_temporary_session_memory(*, content: str, category: str, reasoning: str) -> bool:
+        if category not in {"preference", "procedure", "goal", "fact"}:
+            return False
+        combined = f"{content}\n{reasoning}"
+        return any(pattern.search(combined) for pattern in TEMPORARY_SESSION_MEMORY_PATTERNS)
     @classmethod
     def _load_spec(cls, spec_path: Path) -> ParsedExtractionSpec:
         if cls._cached_spec is not None and cls._cached_spec_path == spec_path:
