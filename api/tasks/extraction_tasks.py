@@ -301,6 +301,15 @@ def _ensure_proxy_backing_user(session: Session, proxy_user_id: str) -> User:
     return user
 
 
+def _parse_optional_uuid(value: str | None) -> uuid.UUID | None:
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _create_source_conversation(
     session: Session,
     *,
@@ -311,7 +320,7 @@ def _create_source_conversation(
     conversation = Conversation(
         id=uuid.uuid4(),
         user_id=user_id,
-        agent_id=uuid.UUID(agent_id) if agent_id else None,
+        agent_id=_parse_optional_uuid(agent_id),
         message_count=message_count,
         processing_status=ConversationProcessingStatus.processing,
     )
@@ -662,6 +671,7 @@ def _extract_memories_for_pipeline(
                 "nothing_to_extract": result.nothing_to_extract,
                 "tokens_used": result.tokens_used,
                 "provider_used": result.provider_used,
+                "extraction_metadata": dict(result.extraction_metadata or {}),
             },
             False,
         )
@@ -782,6 +792,7 @@ def run_extraction_pipeline(
                 **dict(source_event.processing_metadata or {}),
                 "provider_used": extraction_meta.get("provider_used"),
                 "domain_schema": domain_schema_name or "general",
+                "extraction_metadata": extraction_meta.get("extraction_metadata") or {},
             }
 
         embedding_service = EmbeddingService(sync_session=session, gemini_client=client)
@@ -814,6 +825,7 @@ def run_extraction_pipeline(
                 **dict(source_event.processing_metadata or {}),
                 "provider_used": extraction_meta.get("provider_used"),
                 "domain_schema": domain_schema_name or "general",
+                "extraction_metadata": extraction_meta.get("extraction_metadata") or {},
                 "completed_at": datetime.now(UTC).isoformat(),
             }
             session.add(source_event)
@@ -853,6 +865,7 @@ def run_extraction_pipeline(
             "tokens_used": int(extraction_meta.get("tokens_used", 0) or 0),
             "provider_used": extraction_meta.get("provider_used"),
             "general_extraction_error": extraction_meta.get("general_extraction_error"),
+            "extraction_metadata": extraction_meta.get("extraction_metadata") or {},
             **domain_schema_meta,
         }
     except Exception:
@@ -973,6 +986,3 @@ def release_queue_slot_after_extraction(
         queue_name=payload.get("queue_name"),
         job_id=payload.get("job_id"),
     )
-
-
-
