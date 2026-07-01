@@ -665,6 +665,7 @@ async def get_memory_job_status(
             started_at=datetime.fromisoformat(job["started_at"]) if job.get("started_at") else None,
             completed_at=datetime.fromisoformat(job["completed_at"]) if job.get("completed_at") else None,
             dead_lettered_at=datetime.fromisoformat(job["dead_lettered_at"]) if job.get("dead_lettered_at") else None,
+            extraction_metadata=job.get("extraction_metadata") or {},
         ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
