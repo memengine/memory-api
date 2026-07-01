@@ -485,6 +485,7 @@ class MemoryService:
                 "started_at": job_row.started_at.isoformat() if job_row.started_at else None,
                 "completed_at": job_row.completed_at.isoformat() if job_row.completed_at else None,
                 "dead_lettered_at": job_row.dead_lettered_at.isoformat() if job_row.dead_lettered_at else None,
+                "extraction_metadata": (job_row.result or {}).get("extraction_metadata") or {},
             }
         cached_job = await self.cache_service.get_job_status(job_id)
         if cached_job is not None:
