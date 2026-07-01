@@ -130,6 +130,39 @@ class FakeEmbeddingService:
         return SimpleNamespace(id=DEFAULT_ACTIVE_MODEL_ID)
 
 
+def test_qdrant_payload_results_include_provenance() -> None:
+    memory_id = uuid.uuid4()
+    source_event_id = uuid.uuid4()
+    service = object.__new__(RetrieverService)
+    point = SimpleNamespace(
+        id=str(memory_id),
+        score=0.91,
+        payload={
+            "memory_id": str(memory_id),
+            "content": "User's current subscription plan is Growth.",
+            "category": "fact",
+            "importance_score": 7.0,
+            "confidence_score": 0.95,
+            "agent_id": None,
+            "previous_version_id": None,
+            "created_at": datetime.now(UTC).isoformat(),
+            "last_accessed_at": None,
+            "source_event_id": str(source_event_id),
+            "provenance": {
+                "service": "billing-service",
+                "event_id": "billing-plan-001",
+                "writer_id": str(uuid.uuid4()),
+            },
+        },
+    )
+
+    results = service._results_from_qdrant_payloads([point])
+
+    assert len(results) == 1
+    assert results[0].source_event_id == str(source_event_id)
+    assert results[0].provenance == point.payload["provenance"]
+
+
 @pytest.mark.asyncio
 async def test_retrieve_returns_cached_results_immediately(monkeypatch) -> None:
     monkeypatch.setattr("api.services.retriever.REDIS_CACHE_READ_ENABLED", True)
