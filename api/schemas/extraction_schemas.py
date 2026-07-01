@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Any
 
 from api.schemas.memory_schemas import ExtractedMemory
 
@@ -28,6 +29,7 @@ class ExtractionResult:
     job_id: str
     memories_to_store: list[ExtractedMemory] = field(default_factory=list)
     pending_candidates: list[PendingExtractedMemory] = field(default_factory=list)
+    extraction_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 __all__ = ["ExtractionResult", "PendingExtractedMemory"]
