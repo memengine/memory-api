@@ -1239,7 +1239,7 @@ class ConflictResolver:
                 if proxy_user_id is not None
                 else uuid.uuid4()
             ),
-            agent_id=uuid.UUID(agent_id) if agent_id else None,
+            agent_id=uuid.UUID(agent_id) if agent_id and self._is_uuid(agent_id) else None,
             content=extracted_memory.content,
             category=MemoryCategory(extracted_memory.category),
             importance_score=extracted_memory.importance_score,
