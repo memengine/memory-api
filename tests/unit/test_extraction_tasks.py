@@ -231,3 +231,12 @@ def test_pending_candidate_does_not_promote_single_weak_signal() -> None:
     assert extraction_tasks._should_promote_pending_candidate(candidate) is False
 
 
+
+
+def test_parse_optional_uuid_ignores_non_uuid_agent_labels() -> None:
+    from api.tasks.extraction_tasks import _parse_optional_uuid
+
+    assert _parse_optional_uuid(None) is None
+    assert _parse_optional_uuid("support-bot") is None
+    valid = uuid.uuid4()
+    assert _parse_optional_uuid(str(valid)) == valid
