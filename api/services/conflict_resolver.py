@@ -40,6 +40,8 @@ from api.services.conflict_detection import SharedContextConflict
 from api.services.conflict_detection import build_cross_user_conflict_row
 from api.services.conflict_detection import classify_conflict_type
 from api.services.claim_ledger_service import ClaimLedgerService
+from api.services.conflict_decision_evidence import automatic_evidence
+from api.services.conflict_decision_evidence import review_evidence
 from api.services.conflict_routing.generic_router import GenericEntityRouter
 from api.services.conflict_routing.registry import get_router
 from api.services.extractor import ExtractedMemory
@@ -117,6 +119,7 @@ class ConflictDecision:
     action: Literal["UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"]
     reasoning: str
     merged_memory: ExtractedMemory | None = None
+    decision_evidence: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -126,6 +129,7 @@ class AutoResolutionResult:
     action_taken: str
     requires_attention: bool
     reason: str
+    decision_evidence: dict[str, Any] | None = None
 
 
 PER_USER_SCOPED_ENTITY_TYPES = {
@@ -217,6 +221,15 @@ def resolve_cross_user_conflict_automatically(
             action_taken="left_pending",
             requires_attention=True,
             reason="One or both memories are unavailable for automatic resolution",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                review_evidence(
+                    action="TENANT_REVIEW",
+                    reason_codes=["conflict_memory_missing", "tenant_review_required"],
+                    explanation="One or both memories are unavailable, so MemoryOS cannot safely decide automatically.",
+                    details={"entity_type": entity_type},
+                ),
+            ),
         )
 
     if _is_per_user_scoped_conflict(entity_type, memory_a, memory_b):
@@ -232,6 +245,16 @@ def resolve_cross_user_conflict_automatically(
             action_taken="ignored_personal_cross_user_conflict",
             requires_attention=False,
             reason="Personal facts are user-specific",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                automatic_evidence(
+                    action="IGNORE",
+                    reason_codes=["personal_truth", "per_user_scoped"],
+                    explanation="This is personal information, so it should not create an organisation-level conflict.",
+                    confidence=0.95,
+                    details={"entity_type": entity_type},
+                ),
+            ),
         )
 
     created_a = _aware_datetime(memory_a.created_at)
@@ -245,6 +268,17 @@ def resolve_cross_user_conflict_automatically(
             older_memory,
             newer_memory,
             reason="Newer claim weighted higher automatically",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                automatic_evidence(
+                    action="UPDATE",
+                    reason_codes=["recency_weighted", "recency_safe_to_apply"],
+                    explanation="The newer claim was weighted higher because the evidence is more recent.",
+                    confidence=0.8,
+                    winner_source=str(newer_memory.id),
+                    details={"recency_days": recency_days, "entity_type": entity_type},
+                ),
+            ),
         )
         _mark_conflict_auto_resolved(conflict, "recency_weighted")
         return AutoResolutionResult(
@@ -253,6 +287,17 @@ def resolve_cross_user_conflict_automatically(
             action_taken="weighted_down_older_claim",
             requires_attention=False,
             reason="Newer claim weighted higher automatically",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                automatic_evidence(
+                    action="UPDATE",
+                    reason_codes=["recency_weighted", "recency_safe_to_apply"],
+                    explanation="The newer claim was weighted higher because the evidence is more recent.",
+                    confidence=0.8,
+                    winner_source=str(newer_memory.id),
+                    details={"recency_days": recency_days, "entity_type": entity_type},
+                ),
+            ),
         )
 
     confidence_diff = abs(float(memory_a.confidence_score or 0.0) - float(memory_b.confidence_score or 0.0))
@@ -266,6 +311,17 @@ def resolve_cross_user_conflict_automatically(
             lower_confidence,
             higher_confidence,
             reason="Higher-confidence claim weighted higher automatically",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                automatic_evidence(
+                    action="UPDATE",
+                    reason_codes=["confidence_weighted", "higher_confidence_source"],
+                    explanation="The higher-confidence claim was weighted higher automatically.",
+                    confidence=0.75,
+                    winner_source=str(higher_confidence.id),
+                    details={"confidence_diff": confidence_diff, "entity_type": entity_type},
+                ),
+            ),
         )
         _mark_conflict_auto_resolved(conflict, "confidence_weighted")
         return AutoResolutionResult(
@@ -274,6 +330,17 @@ def resolve_cross_user_conflict_automatically(
             action_taken="weighted_down_lower_confidence_claim",
             requires_attention=False,
             reason="Higher-confidence claim weighted higher automatically",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                automatic_evidence(
+                    action="UPDATE",
+                    reason_codes=["confidence_weighted", "higher_confidence_source"],
+                    explanation="The higher-confidence claim was weighted higher automatically.",
+                    confidence=0.75,
+                    winner_source=str(higher_confidence.id),
+                    details={"confidence_diff": confidence_diff, "entity_type": entity_type},
+                ),
+            ),
         )
 
     resolution_path = classify_resolution_path(
@@ -303,6 +370,15 @@ def resolve_cross_user_conflict_automatically(
                 action_taken="queued_clarification",
                 requires_attention=False,
                 reason="Will ask user to confirm in next session",
+                decision_evidence=_attach_cross_user_decision_evidence(
+                    conflict,
+                    review_evidence(
+                        action="USER_REVIEW",
+                        reason_codes=["personal_truth_requires_user", "clarification_queued"],
+                        explanation="This concerns personal memory, so MemoryOS queued a user-facing clarification.",
+                        details={"entity_type": entity_type},
+                    ),
+                ),
             )
 
         conflict.status = CrossUserConflictStatus.pending
@@ -315,6 +391,15 @@ def resolve_cross_user_conflict_automatically(
             action_taken="left_pending",
             requires_attention=True,
             reason="Unable to queue clarification because no proxy user is attached",
+            decision_evidence=_attach_cross_user_decision_evidence(
+                conflict,
+                review_evidence(
+                    action="TENANT_REVIEW",
+                    reason_codes=["missing_proxy_user", "tenant_review_required"],
+                    explanation="MemoryOS could not identify a user session for clarification, so the conflict needs review.",
+                    details={"entity_type": entity_type},
+                ),
+            ),
         )
 
     conflict.status = CrossUserConflictStatus.pending
@@ -328,7 +413,24 @@ def resolve_cross_user_conflict_automatically(
         action_taken="left_pending",
         requires_attention=True,
         reason="Tenant review is required for shared organizational context",
+        decision_evidence=_attach_cross_user_decision_evidence(
+            conflict,
+            review_evidence(
+                action="TENANT_REVIEW",
+                reason_codes=["organisation_truth_requires_tenant", "shared_context_conflict"],
+                explanation="This concerns shared organisation context, so MemoryOS routed it to tenant review.",
+                details={"entity_type": entity_type},
+            ),
+        ),
     )
+
+
+def _attach_cross_user_decision_evidence(
+    conflict: CrossUserConflict,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    conflict.decision_evidence = evidence
+    return evidence
 
 
 def _is_per_user_scoped_conflict(entity_type: str, memory_a: Memory, memory_b: Memory) -> bool:
@@ -506,11 +608,30 @@ class ConflictResolver:
                             "Registered services with equal authority reported "
                             "different values for the same user."
                         ),
+                        decision_evidence=review_evidence(
+                            action="TENANT_REVIEW",
+                            reason_codes=[
+                                "equal_authority_disagreement",
+                                "cross_writer_conflict",
+                                "human_review_required",
+                            ],
+                            explanation=(
+                                "Two registered services with equal authority disagree, so "
+                                "MemoryOS preserved both claims and routed the decision for review."
+                            ),
+                        ),
                     )
                 if decision is None:
                     decision = self._temporal_conflict_decision(new_memory, existing_memory)
                 if decision is None:
                     decision = self._classify_conflict(new_memory, existing_memory, candidate)
+
+                decision_evidence = decision.decision_evidence or self._fallback_decision_evidence(
+                    decision=decision,
+                    candidate=candidate,
+                    new_memory=new_memory,
+                    existing_memory=existing_memory,
+                )
 
                 if decision.action == "CLARIFY":
                     pending = self._store_new_memory_with_shared_context(
@@ -525,6 +646,7 @@ class ConflictResolver:
                         agent_id=agent_id,
                         is_archived=True,
                         record_shared_context=False,
+                        decision_evidence=decision_evidence,
                     )
                     self._create_equal_authority_conflict(
                         tenant_id=tenant_id,
@@ -567,6 +689,7 @@ class ConflictResolver:
                             resolution="UPDATE",
                             source_conversation_id=source_conversation_id,
                             agent_id=agent_id,
+                            decision_evidence=decision_evidence,
                         )
                     )
                     self._create_audit_log(
@@ -608,6 +731,7 @@ class ConflictResolver:
                             resolution="MERGE",
                             source_conversation_id=source_conversation_id,
                             agent_id=agent_id,
+                            decision_evidence=decision_evidence,
                         )
                     )
                     self._create_audit_log(
@@ -697,6 +821,38 @@ class ConflictResolver:
         if conflict_type.value not in self.last_conflict_types_found:
             self.last_conflict_types_found.append(conflict_type.value)
 
+    def _fallback_decision_evidence(
+        self,
+        *,
+        decision: ConflictDecision,
+        candidate: ConflictCandidate,
+        new_memory: ExtractedMemory,
+        existing_memory: Memory,
+    ) -> dict[str, Any]:
+        conflict_type = classify_conflict_type(
+            new_content=new_memory.content,
+            existing_content=existing_memory.content,
+            category=new_memory.category,
+            detected_entities=candidate.detected_entities,
+        )
+        action = decision.action if decision.action != "CLARIFY" else "TENANT_REVIEW"
+        reason_codes = [
+            "semantic_conflict_detected",
+            f"conflict_type:{conflict_type.value}",
+            f"decision:{decision.action.lower()}",
+        ]
+        return automatic_evidence(
+            action=action,  # type: ignore[arg-type]
+            reason_codes=reason_codes,
+            explanation=decision.reasoning,
+            confidence=None,
+            details={
+                "detection_strategy": candidate.detection_strategy,
+                "detected_entities": candidate.detected_entities,
+                "incoming_category": new_memory.category,
+                "existing_memory_id": str(existing_memory.id),
+            },
+        )
     def _load_existing_memory(self, point: Any) -> Memory | None:
         payload = getattr(point, "payload", {}) or {}
         memory_id = payload.get("memory_id") or getattr(point, "id", None)
@@ -753,10 +909,26 @@ class ConflictResolver:
                 reasoning=str(merged_payload["reasoning"]).strip(),
             )
 
+        normalized_action = action if action in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT"} else "KEEP_BOTH"
         return ConflictDecision(
-            action=action if action in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT"} else "KEEP_BOTH",
+            action=normalized_action,
             reasoning=reasoning,
             merged_memory=merged_memory,
+            decision_evidence=automatic_evidence(
+                action=normalized_action,  # type: ignore[arg-type]
+                reason_codes=[
+                    "semantic_conflict_classified",
+                    f"conflict_type:{conflict_type.value}",
+                    f"decision:{normalized_action.lower()}",
+                ],
+                explanation=reasoning,
+                confidence=None,
+                details={
+                    "classifier": "llm",
+                    "raw_action": action,
+                    "conflict_type": conflict_type.value,
+                },
+            ),
         )
 
     def _build_conflict_user_prompt(
@@ -874,6 +1046,17 @@ class ConflictResolver:
                     f"Incoming writer authority {incoming_priority} exceeds "
                     f"stored writer authority {existing_priority}."
                 ),
+                decision_evidence=automatic_evidence(
+                    action="UPDATE",
+                    reason_codes=["higher_authority_source", "incoming_source_wins"],
+                    explanation="Incoming source has higher authority for this memory category.",
+                    confidence=1.0,
+                    winner_source="incoming",
+                    details={
+                        "incoming_authority": incoming_priority,
+                        "existing_authority": existing_priority,
+                    },
+                ),
             )
         if incoming_priority < existing_priority:
             return ConflictDecision(
@@ -881,6 +1064,17 @@ class ConflictResolver:
                 reasoning=(
                     f"Stored writer authority {existing_priority} exceeds "
                     f"incoming writer authority {incoming_priority}."
+                ),
+                decision_evidence=automatic_evidence(
+                    action="REJECT",
+                    reason_codes=["higher_authority_source", "stored_source_wins"],
+                    explanation="Stored source has higher authority for this memory category.",
+                    confidence=1.0,
+                    winner_source="stored",
+                    details={
+                        "incoming_authority": incoming_priority,
+                        "existing_authority": existing_priority,
+                    },
                 ),
             )
         incoming_observed_at = self._provenance_observed_at(self.provenance_snapshot)
@@ -897,6 +1091,17 @@ class ConflictResolver:
                 reasoning=(
                     f"Incoming event observed at {incoming_observed_at.isoformat()} is older "
                     f"than stored evidence observed at {existing_observed_at.isoformat()}."
+                ),
+                decision_evidence=automatic_evidence(
+                    action="REJECT",
+                    reason_codes=["older_source_event", "recency_safe_to_apply"],
+                    explanation="Incoming evidence is older than the currently stored source event.",
+                    confidence=1.0,
+                    winner_source="stored",
+                    details={
+                        "incoming_observed_at": incoming_observed_at.isoformat(),
+                        "existing_observed_at": existing_observed_at.isoformat(),
+                    },
                 ),
             )
         return None
@@ -952,6 +1157,13 @@ class ConflictResolver:
             return ConflictDecision(
                 action="KEEP_BOTH",
                 reasoning="Temporal context differs across memories; keep both with temporal context.",
+                decision_evidence=automatic_evidence(
+                    action="KEEP_BOTH",
+                    reason_codes=["temporal_context_differs", "both_claims_contextually_valid"],
+                    explanation="The claims describe different time periods, so both are preserved.",
+                    confidence=0.9,
+                    details={"incoming_years": sorted(new_years), "existing_years": sorted(existing_years)},
+                ),
             )
         return None
 
@@ -969,6 +1181,7 @@ class ConflictResolver:
         agent_id: str | None,
         is_archived: bool = False,
         record_shared_context: bool = True,
+        decision_evidence: dict[str, Any] | None = None,
     ) -> StoredMemory:
         stored = self._store_new_memory(
             extracted_memory=extracted_memory,
@@ -981,6 +1194,7 @@ class ConflictResolver:
             source_conversation_id=source_conversation_id,
             agent_id=agent_id,
             is_archived=is_archived,
+            decision_evidence=decision_evidence,
         )
         if record_shared_context:
             self._record_shared_context_for_stored_memory(
@@ -1022,6 +1236,19 @@ class ConflictResolver:
             auto_resolution_at=datetime.now(UTC),
             resolution_path="tenant_review",
             requires_attention=True,
+            decision_evidence=review_evidence(
+                action="TENANT_REVIEW",
+                reason_codes=[
+                    "equal_authority_disagreement",
+                    "cross_writer_conflict",
+                    "human_review_required",
+                ],
+                explanation=(
+                    "Two registered services with equal authority reported different values. "
+                    "MemoryOS preserved both claims and routed this conflict for review."
+                ),
+                details={"category": category},
+            ),
         )
         conflict.user_a_memory = existing_memory
         conflict.user_b_memory = pending_memory
@@ -1223,6 +1450,7 @@ class ConflictResolver:
         source_conversation_id: str | None,
         agent_id: str | None,
         is_archived: bool = False,
+        decision_evidence: dict[str, Any] | None = None,
     ) -> StoredMemory:
         memory_id = uuid.uuid4()
         resolved_source_conversation_id = (
@@ -1254,6 +1482,7 @@ class ConflictResolver:
                 "expiry": extracted_memory.expiry,
                 "reasoning": extracted_memory.reasoning,
                 "resolution": resolution,
+                **({"decision_evidence": decision_evidence} if decision_evidence else {}),
                 **(
                     {"provenance": self.provenance_snapshot}
                     if self.provenance_snapshot is not None
@@ -1325,6 +1554,7 @@ class ConflictResolver:
                 proxy_user_id=proxy_user_id,
                 provenance=self.provenance_snapshot,
                 resolution=resolution,
+                decision_evidence=decision_evidence,
             )
         except Exception:
             # The claim ledger is governance metadata. It must never block the
