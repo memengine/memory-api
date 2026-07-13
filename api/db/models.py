@@ -1024,6 +1024,11 @@ class MemoryClaimRevision(Base):
         server_default=EMPTY_JSONB_ARRAY,
     )
     resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     processor_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default=text("'legacy'"))
     created_at: Mapped[datetime] = mapped_column(
@@ -1568,6 +1573,11 @@ class CrossUserConflict(Base):
     resolved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
     resolution: Mapped[str | None] = mapped_column(String(20), nullable=True)
     resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=EMPTY_JSONB_OBJECT,
+    )
     requires_attention: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
