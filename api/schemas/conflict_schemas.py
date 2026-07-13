@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -33,6 +34,9 @@ class CrossUserConflictData(BaseModel):
     auto_resolution: str | None = None
     auto_resolution_at: datetime | None = None
     requires_attention: bool = False
+    decision_evidence: dict[str, Any] | None = None
+    decision_reason_codes: list[str] = []
+    decision_explanation: str | None = None
 
 
 class CrossUserConflictsResponse(ResponseEnvelope):
