@@ -8,6 +8,7 @@ from api.db.models import CrossUserConflict
 from api.db.models import Memory
 from api.services.embedding_service import EmbeddingService
 from api.services.claim_ledger_service import ClaimLedgerService
+from api.services.conflict_decision_evidence import manual_evidence
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
@@ -99,6 +100,14 @@ async def apply_conflict_selection(
                 ),
             )
             transitions.append(f"activated_{_memory_label(memory, memory_a)}")
+
+    conflict.decision_evidence = manual_evidence(
+        action="KEEP_BOTH" if selection == "both" else ("REJECT" if selection == "neither" else "UPDATE"),
+        reason_codes=["human_review_completed", f"selection:{selection}"],
+        explanation=reason,
+        winner_source=selection,
+        details={"changed_by": changed_by, "selection": selection},
+    )
 
     await ClaimLedgerService(session).apply_conflict_selection(
         memory_a=memory_a,
