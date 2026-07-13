@@ -35,6 +35,13 @@ export interface MemorySource {
   evidence?: EvidenceReference[];
 }
 
+export interface MemorySourceOptions {
+  eventId?: string;
+  observedAt?: string | Date;
+  scope?: Record<string, unknown>;
+  evidence?: EvidenceReference[];
+}
+
 export interface AddRequest {
   externalUserId: string;
   agentId?: string;
@@ -442,6 +449,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function randomSourceEventId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `sdk-${crypto.randomUUID()}`;
+  }
+  return `sdk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function createMemorySource(service: string, options: MemorySourceOptions = {}): MemorySource {
+  const observedAt = options.observedAt instanceof Date
+    ? options.observedAt.toISOString()
+    : options.observedAt ?? new Date().toISOString();
+
+  return {
+    eventId: options.eventId ?? randomSourceEventId(),
+    service,
+    observedAt,
+    scope: options.scope ?? {},
+    evidence: options.evidence ?? [],
+  };
+}
+
 function ensureMessages(messages: ConversationMessage[]): ConversationMessage[] {
   if (messages.length === 0) {
     throw new Error("messages must not be empty.");
@@ -622,6 +650,10 @@ export class MemoryOS {
   static readonly DEFAULT_BASE_URL = "https://api.memoryos.io";
   static readonly DEFAULT_TIMEOUT = 30_000;
   static readonly MAX_RETRIES = 3;
+
+  static source(service: string, options: MemorySourceOptions = {}): MemorySource {
+    return createMemorySource(service, options);
+  }
 
   readonly apiKey: string;
   readonly baseUrl: string;
