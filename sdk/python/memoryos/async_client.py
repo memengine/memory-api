@@ -80,6 +80,28 @@ class AsyncMemory:
             raise TypeError("external_user_id is required")
         return external_user_id
 
+    @staticmethod
+    def source(
+        service: str,
+        *,
+        event_id: str | None = None,
+        observed_at: Any | None = None,
+        scope: dict[str, Any] | None = None,
+        evidence: list[Any] | None = None,
+    ) -> MemorySource:
+        """Create source metadata for multi-service memory writes.
+
+        Most apps can omit source in add(). Use this helper when Billing,
+        Support, CRM, or another service needs explicit provenance.
+        """
+        return MemorySource.for_service(
+            service,
+            event_id=event_id,
+            observed_at=observed_at,
+            scope=scope,
+            evidence=evidence,
+        )
+
     async def add(
         self,
         messages: list[dict[str, str]] | list[ConversationMessage],
