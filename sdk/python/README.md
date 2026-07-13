@@ -4,6 +4,68 @@
 pip install memoryos
 ```
 
+## Start simple: solo builders and small teams
+
+> **For whom:** solo developers, MVPs, small SaaS apps, and single-agent products.
+> You do **not** need `event_id`, `run_id`, service writers, or authority rules to start. MemoryOS creates safe internal source metadata automatically.
+
+```python
+import os
+from memoryos import Memory
+
+mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"])
+
+mem.add(
+    external_user_id="user_123",
+    messages=[
+        {"role": "user", "content": "I prefer short answers when debugging."},
+        {"role": "assistant", "content": "Got it. I will keep debugging replies concise."},
+    ],
+)
+
+context = mem.get(
+    external_user_id="user_123",
+    query="How should I answer this user?",
+)
+
+if context.has_context:
+    system_prompt = BASE_SYSTEM_PROMPT + "\n\n" + context.system_prompt_addition
+```
+
+This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
+
+## Multi-service mode: support, billing, CRM, and product services
+
+> **For whom:** teams where multiple services can write facts about the same user.
+> Use this when you need auditability, deduplication, conflict handling, or source-of-truth routing.
+
+Early teams can use one tenant API key and pass `source.service`:
+
+```python
+from memoryos import Memory
+
+mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"])
+
+mem.add(
+    external_user_id="cust_123",
+    messages=[{"role": "assistant", "content": "Customer is on the Growth plan."}],
+    source=Memory.source(
+        "billing-service",
+        event_id="invoice_evt_8842",  # optional but useful for dedupe/audit
+        scope={"workspace_id": "ws_123"},
+        evidence=[{"source_type": "billing_record", "reference": "invoice_evt_8842"}],
+    ),
+)
+
+mem.add(
+    external_user_id="cust_123",
+    messages=[{"role": "assistant", "content": "Customer support previously saw the Starter plan."}],
+    source=Memory.source("support-service"),  # event_id and observed_at are generated
+)
+```
+
+Production teams should register service writers in the dashboard and bind dedicated API keys. Then Billing, Support, CRM, and other services can have different authority rules without changing the basic SDK flow.
+
 ## New in this release
 
 ### Checking if a conversation produced memories
@@ -254,17 +316,17 @@ result = client.get(query="...", external_user_id="...")
 
 if result.is_passthrough:
     # MemoryOS quota exhausted or system degraded
-    # Your AI still works â€” just without memory context
+    # Your AI still works - just without memory context
     system_prompt = BASE_SYSTEM_PROMPT
 elif result.is_degraded:
-    # Serving from cache â€” fewer memories than usual
+    # Serving from cache - fewer memories than usual
     # Still worth using
     system_prompt = BASE_SYSTEM_PROMPT + result.system_prompt_addition
 else:
     # Full memory context
     system_prompt = BASE_SYSTEM_PROMPT + result.system_prompt_addition
 
-# Always call your LLM â€” never skip because of MemoryOS state
+# Always call your LLM - never skip because of MemoryOS state
 response = llm.complete(system_prompt, user_message)
 ```
 
@@ -272,8 +334,8 @@ response = llm.complete(system_prompt, user_message)
 result = client.add(messages=messages, external_user_id="...")
 
 if result.processing_status == "delayed":
-    # Queue is busy â€” memory will be stored but takes longer
+    # Queue is busy - memory will be stored but takes longer
     # ETA in seconds:
     eta = result.processing_eta_seconds
-    # Log it â€” do not surface to end user
+    # Log it - do not surface to end user
 ```
