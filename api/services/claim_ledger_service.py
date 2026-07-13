@@ -62,6 +62,7 @@ class ClaimLedgerService:
         proxy_user_id: str | uuid.UUID | None,
         provenance: dict[str, Any] | None,
         resolution: str,
+        decision_evidence: dict[str, Any] | None = None,
     ) -> MemoryClaim | None:
         if tenant_id is None or proxy_user_id is None:
             return None
@@ -149,6 +150,7 @@ class ClaimLedgerService:
             observed_at=observed_at,
             evidence_refs=list((provenance or {}).get("evidence") or []),
             resolution_reason=resolution,
+            decision_evidence=decision_evidence or {},
             schema_version=CLAIM_SCHEMA_VERSION,
             processor_version=processor_version_for_resolution(resolution),
         )
@@ -281,6 +283,7 @@ class ClaimLedgerService:
             observed_at=observed_at,
             evidence_refs=list((provenance or {}).get("evidence") or []),
             resolution_reason="domain_field_extraction",
+            decision_evidence={},
             schema_version=CLAIM_SCHEMA_VERSION,
             processor_version=processor_version_for_resolution("domain_field_extraction"),
         )
@@ -348,6 +351,13 @@ class ClaimLedgerService:
                 "activated" if revision.memory_id in selected else "rejected"
             )
             revision.resolution_reason = reason
+            revision.decision_evidence = {
+                "action": "manual_resolution",
+                "decision_level": "manual",
+                "reason_codes": ["human_review_completed"],
+                "explanation": reason,
+                "details": {"selection": selection},
+            }
 
         for claim in affected_claims.values():
             claim_revisions = [
