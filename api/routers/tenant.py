@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import calendar
@@ -756,6 +756,11 @@ def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConfli
         if memory_b is not None
         else {}
     )
+    decision_evidence = dict(conflict.decision_evidence or {})
+    reason_codes = decision_evidence.get("reason_codes") or []
+    if not isinstance(reason_codes, list):
+        reason_codes = []
+
     return CrossUserConflictData(
         id=str(conflict.id),
         tenant_id=str(conflict.tenant_id),
@@ -786,6 +791,9 @@ def _cross_user_conflict_to_data(conflict: CrossUserConflict) -> CrossUserConfli
         resolved_by=conflict.resolved_by,
         resolution_reason=conflict.resolution_reason,
         requires_attention=bool(conflict.requires_attention),
+        decision_evidence=decision_evidence,
+        decision_reason_codes=[str(code) for code in reason_codes],
+        decision_explanation=decision_evidence.get("explanation"),
     )
 
 
