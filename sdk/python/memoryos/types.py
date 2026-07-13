@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+from datetime import UTC
 from datetime import date
 from datetime import datetime
 from typing import Any
@@ -59,6 +61,32 @@ class MemorySource(BaseModel):
     observed_at: datetime
     scope: dict[str, Any] = Field(default_factory=dict)
     evidence: list[EvidenceReference] = Field(default_factory=list, max_length=20)
+
+    @classmethod
+    def for_service(
+        cls,
+        service: str,
+        *,
+        event_id: str | None = None,
+        observed_at: datetime | None = None,
+        scope: dict[str, Any] | None = None,
+        evidence: list[EvidenceReference | dict[str, Any]] | None = None,
+    ) -> "MemorySource":
+        """Build source metadata without making teams manage IDs on day one.
+
+        Use this when more than one backend service writes memory. Solo apps can
+        omit source entirely and MemoryOS will generate a default source event.
+        """
+        return cls(
+            event_id=event_id or f"sdk-{uuid.uuid4()}",
+            service=service,
+            observed_at=observed_at or datetime.now(UTC),
+            scope=scope or {},
+            evidence=[
+                item if isinstance(item, EvidenceReference) else EvidenceReference.model_validate(item)
+                for item in (evidence or [])
+            ],
+        )
 
 
 class AddRequest(BaseModel):
