@@ -153,6 +153,9 @@ def test_personal_goal_cross_user_conflict_is_ignored() -> None:
     assert result.strategy_used == "per_user_scoped"
     assert conflict.status == "ignored"
     assert conflict.requires_attention is False
+    assert conflict.decision_evidence["action"] == "IGNORE"
+    assert conflict.decision_evidence["decision_level"] == "automatic"
+    assert "per_user_scoped" in conflict.decision_evidence["reason_codes"]
 
 
 def test_resolver_uses_type_specific_prompts_for_fact_and_preference() -> None:
