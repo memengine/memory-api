@@ -100,6 +100,9 @@ async def test_selecting_pending_memory_updates_database_and_vector_outbox(
         VectorSyncOperation.delete,
         VectorSyncOperation.upsert,
     ]
+    assert conflict.decision_evidence["decision_level"] == "manual"
+    assert conflict.decision_evidence["action"] == "UPDATE"
+    assert "selection:B" in conflict.decision_evidence["reason_codes"]
     assert action == "archived_memory_a_and_activated_memory_b"
 
 
