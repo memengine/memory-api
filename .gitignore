@@ -69,4 +69,7 @@ Thumbs.db
 *.temp
 *.bak
 *.orig
-.github/
+# GitHub Actions workflows are part of the deploy surface.
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml

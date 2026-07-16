@@ -4,6 +4,71 @@
 npm install @memoryos/sdk
 ```
 
+## Start simple: solo builders and small teams
+
+> **For whom:** solo developers, MVPs, small SaaS apps, and single-agent products.
+> You do **not** need `eventId`, `runId`, service writers, or authority rules to start. MemoryOS creates safe internal source metadata automatically.
+
+```ts
+import { MemoryOS } from "@memoryos/sdk";
+
+const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!);
+
+await mem.add(
+  [
+    { role: "user", content: "I prefer short answers when debugging." },
+    { role: "assistant", content: "Got it. I will keep debugging replies concise." },
+  ],
+  "user_123",
+);
+
+const context = await mem.get(
+  "How should I answer this user?",
+  "user_123",
+);
+
+const systemPrompt = context.hasContext
+  ? `${BASE_SYSTEM_PROMPT}\n\n${context.systemPromptAddition}`
+  : BASE_SYSTEM_PROMPT;
+```
+
+This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
+
+## Multi-service mode: support, billing, CRM, and product services
+
+> **For whom:** teams where multiple services can write facts about the same user.
+> Use this when you need auditability, deduplication, conflict handling, or source-of-truth routing.
+
+Early teams can use one tenant API key and pass `source.service`:
+
+```ts
+import { MemoryOS } from "@memoryos/sdk";
+
+const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!);
+
+await mem.add(
+  [{ role: "assistant", content: "Customer is on the Growth plan." }],
+  "cust_123", // externalUserId: your stable customer/user id
+  "support-bot", // agentId: your app or AI agent id
+  { ticketId: "TCK-8842", channel: "billing" }, // metadata: optional app context
+  MemoryOS.source("billing-service", {
+    eventId: "invoice_evt_8842",
+    scope: { workspaceId: "ws_123" },
+    evidence: [{ sourceType: "billing_record", reference: "invoice_evt_8842" }],
+  }),
+);
+
+await mem.add(
+  [{ role: "assistant", content: "Customer support previously saw the Starter plan." }],
+  "cust_123", // same externalUserId, so MemoryOS can compare facts
+  "support-bot",
+  { ticketId: "SUP-2109", channel: "support" },
+  MemoryOS.source("support-service"), // eventId and observedAt are generated
+);
+```
+
+Production teams should register service writers in the dashboard and bind dedicated API keys. Then Billing, Support, CRM, and other services can have different authority rules without changing the basic SDK flow.
+
 ## Webhook Signature Verification
 
 ```ts
