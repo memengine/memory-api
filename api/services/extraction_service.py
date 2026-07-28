@@ -16,7 +16,6 @@ from api.db.cache import CacheService
 from api.schemas.extraction_schemas import ExtractionResult
 from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
-from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
 
 try:  # pragma: no cover - exercised implicitly when dependency is installed.
@@ -83,7 +82,7 @@ class ExtractionService:
     ) -> None:
         self.client = client
         self.llm_service = llm_service or LLMService(
-            provider_clients={LLMProvider.GEMINI: client} if client is not None else None,
+            provider_clients=None,
             require_provider=client is None,
             use_state_store=client is None,
         )
