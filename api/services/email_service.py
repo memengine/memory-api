@@ -9,7 +9,7 @@ import smtplib
 
 
 logger = logging.getLogger(__name__)
-FROM_ADDRESS = "noreply@memoryos.io"
+DEFAULT_FROM_ADDRESS = "noreply@memoryos.io"
 
 CATEGORY_LABELS = {
     "preference": "Your preferences and settings",
@@ -69,12 +69,13 @@ class EmailService:
         smtp_port = int(os.getenv("SMTP_PORT", "587"))
         smtp_user = os.getenv("SMTP_USER")
         smtp_pass = os.getenv("SMTP_PASS")
+        smtp_from = os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM") or smtp_user or DEFAULT_FROM_ADDRESS
         if not smtp_host:
             logger.warning("SMTP host is not configured for email delivery.")
             return False
 
         message = EmailMessage()
-        message["From"] = FROM_ADDRESS
+        message["From"] = smtp_from
         message["To"] = to_email
         message["Subject"] = subject
         message.set_content(body)
@@ -87,5 +88,5 @@ class EmailService:
                 smtp.send_message(message)
             return True
         except Exception:
-            logger.exception("Failed to send transactional email.")
+            logger.exception("Failed to send transactional email via %s from %s.", smtp_host, smtp_from)
             return False
