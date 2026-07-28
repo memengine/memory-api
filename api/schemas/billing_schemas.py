@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-PlanName = Literal["free", "starter", "growth", "enterprise"]
+PlanName = Literal["free", "starter", "growth", "scale", "enterprise"]
 CtaType = Literal["signup", "checkout", "sales"]
 OveragePolicy = Literal["block", "warn", "charge"]
 
@@ -23,9 +23,11 @@ class BillingPlanFeatures(BaseModel):
     quality_gate: bool
     domain_schemas: bool
     cross_agent: bool
+    conflict_resolution: bool
+    multi_service_writers: bool
     audit_log_days: int
     support: str
-    sla: str
+    reliability_note: str
     data_residency: str
 
 
