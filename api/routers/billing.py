@@ -15,7 +15,7 @@ from api.schemas.billing_schemas import BillingPlanLimits
 
 router = APIRouter(prefix="/v1/billing", tags=["billing"])
 
-PLANS_CACHE_KEY = "billing:plans:v1"
+PLANS_CACHE_KEY = "billing:plans:v5"
 PLANS_CACHE_TTL_SECONDS = 3600
 
 
@@ -36,12 +36,32 @@ def _limits(plan_name: str, *, overage_policy_label: str | None) -> BillingPlanL
     )
 
 
+def _plan_features(
+    *,
+    audit_log_days: int,
+    support: str,
+    reliability_note: str,
+    data_residency: str = "IN1 only",
+) -> BillingPlanFeatures:
+    return BillingPlanFeatures(
+        quality_gate=True,
+        domain_schemas=True,
+        cross_agent=True,
+        conflict_resolution=True,
+        multi_service_writers=True,
+        audit_log_days=audit_log_days,
+        support=support,
+        reliability_note=reliability_note,
+        data_residency=data_residency,
+    )
+
+
 def _build_plans() -> list[BillingPlan]:
     return [
         BillingPlan(
             name="free",
             display_name="Free",
-            badge="Always Free",
+            badge="Try everything",
             monthly_price_inr=0,
             annual_price_inr=0,
             monthly_price_usd=0,
@@ -50,68 +70,76 @@ def _build_plans() -> list[BillingPlan]:
             cta_text="Start for free",
             cta_type="signup",
             limits=_limits("free", overage_policy_label="API pauses when limit reached"),
-            features=BillingPlanFeatures(
-                quality_gate=True,
-                domain_schemas=False,
-                cross_agent=False,
-                audit_log_days=0,
-                support="Community",
-                sla="Best effort",
-                data_residency="IN1 only",
+            features=_plan_features(
+                audit_log_days=7,
+                support="Community and docs",
+                reliability_note="Best-effort access for evaluation",
             ),
         ),
         BillingPlan(
             name="starter",
             display_name="Starter",
             badge="Most Popular",
-            monthly_price_inr=999,
-            annual_price_inr=9990,
-            monthly_price_usd=12,
-            annual_price_usd=120,
+            monthly_price_inr=1800,
+            annual_price_inr=18000,
+            monthly_price_usd=22,
+            annual_price_usd=220,
             is_popular=True,
             cta_text="Upgrade to Starter",
             cta_type="checkout",
             stripe_price_monthly=_stripe_price("STRIPE_PRICE_STARTER_MONTHLY"),
             stripe_price_annual=_stripe_price("STRIPE_PRICE_STARTER_ANNUAL"),
             limits=_limits("starter", overage_policy_label="AI continues without memory context"),
-            features=BillingPlanFeatures(
-                quality_gate=True,
-                domain_schemas=False,
-                cross_agent=False,
+            features=_plan_features(
                 audit_log_days=30,
-                support="Email (48h SLA)",
-                sla="99.5%",
-                data_residency="IN1 only",
+                support="Email support",
+                reliability_note="Operational monitoring",
             ),
         ),
         BillingPlan(
             name="growth",
             display_name="Growth",
-            badge="Scale Up",
-            monthly_price_inr=3999,
-            annual_price_inr=39990,
-            monthly_price_usd=48,
-            annual_price_usd=480,
+            badge="Growing teams",
+            monthly_price_inr=6000,
+            annual_price_inr=60000,
+            monthly_price_usd=72,
+            annual_price_usd=720,
             is_popular=False,
             cta_text="Upgrade to Growth",
             cta_type="checkout",
             stripe_price_monthly=_stripe_price("STRIPE_PRICE_GROWTH_MONTHLY"),
             stripe_price_annual=_stripe_price("STRIPE_PRICE_GROWTH_ANNUAL"),
             limits=_limits("growth", overage_policy_label="AI continues without memory context"),
-            features=BillingPlanFeatures(
-                quality_gate=True,
-                domain_schemas=True,
-                cross_agent=True,
+            features=_plan_features(
                 audit_log_days=90,
-                support="Email (24h SLA)",
-                sla="99.9%",
-                data_residency="IN1 only",
+                support="Priority email support",
+                reliability_note="Priority incident review",
+            ),
+        ),
+        BillingPlan(
+            name="scale",
+            display_name="Scale",
+            badge="Production scale",
+            monthly_price_inr=18000,
+            annual_price_inr=180000,
+            monthly_price_usd=216,
+            annual_price_usd=2160,
+            is_popular=False,
+            cta_text="Upgrade to Scale",
+            cta_type="checkout",
+            stripe_price_monthly=_stripe_price("STRIPE_PRICE_SCALE_MONTHLY"),
+            stripe_price_annual=_stripe_price("STRIPE_PRICE_SCALE_ANNUAL"),
+            limits=_limits("scale", overage_policy_label="AI continues without memory context"),
+            features=_plan_features(
+                audit_log_days=180,
+                support="Priority support and onboarding",
+                reliability_note="Capacity planning and launch review",
             ),
         ),
         BillingPlan(
             name="enterprise",
             display_name="Enterprise",
-            badge="Unlimited",
+            badge="Custom",
             monthly_price_inr=None,
             annual_price_inr=None,
             monthly_price_usd=None,
@@ -120,18 +148,14 @@ def _build_plans() -> list[BillingPlan]:
             cta_text="Talk to Sales",
             cta_type="sales",
             limits=BillingPlanLimits(),
-            features=BillingPlanFeatures(
-                quality_gate=True,
-                domain_schemas=True,
-                cross_agent=True,
+            features=_plan_features(
                 audit_log_days=365,
-                support="Dedicated Slack",
-                sla="99.99%",
+                support="Custom success and procurement",
+                reliability_note="Custom reliability terms by agreement",
                 data_residency="Choose region",
             ),
         ),
     ]
-
 
 async def _read_cached_plans(request: Request) -> list[dict[str, Any]] | None:
     cache_service = getattr(request.app.state, "cache_service", None)
