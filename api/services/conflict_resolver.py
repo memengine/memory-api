@@ -25,10 +25,9 @@ from api.db.models import Memory
 from api.db.models import MemoryCategory
 from api.db.models import SharedContextEntityType
 from api.db.models import SharedContextSignal
-from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
+from api.infra.llm_providers.openai_provider import DEFAULT_OPENAI_EXTRACT_MODEL
 from api.infra.llm_router import LLMRouter
 from api.services.llm_service import AllProvidersFailedError
-from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.embedding_service import EmbeddingResult
@@ -522,7 +521,7 @@ class ConflictResolver:
         self.embedder = embedder
         self.client = client
         configured_model = (get_settings().extraction_model or "").strip()
-        self.model = model or configured_model or DEFAULT_GEMINI_EXTRACT_MODEL
+        self.model = model or configured_model or DEFAULT_OPENAI_EXTRACT_MODEL
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.default_source_conversation_id = default_source_conversation_id
@@ -530,7 +529,7 @@ class ConflictResolver:
         self.provenance_snapshot = provenance_snapshot
         self.llm_router = llm_router
         self.llm_service = llm_service or LLMService(
-            provider_clients={LLMProvider.GEMINI: self.client} if self.client is not None else None,
+            provider_clients=None,
             require_provider=False,
             use_state_store=self.client is None,
         )
