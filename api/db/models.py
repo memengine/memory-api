@@ -114,6 +114,7 @@ class PlanTier(str, enum.Enum):
     free = "free"
     starter = "starter"
     growth = "growth"
+    scale = "scale"
     enterprise = "enterprise"
 
 
