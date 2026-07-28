@@ -36,6 +36,15 @@ PLAN_LIMITS = {
         "overage_policy": "warn",
         "alert_threshold_pct": 0.8,
     },
+    "scale": {
+        "monthly_call_limit": 1_000_000,
+        "monthly_token_limit": 500_000_000,
+        "write_call_limit": 1_000_000,
+        "read_limit": None,
+        "rate_limit_per_user_per_minute": 80,
+        "overage_policy": "warn",
+        "alert_threshold_pct": 0.9,
+    },
     "enterprise": {
         "monthly_call_limit": None,
         "monthly_token_limit": None,
