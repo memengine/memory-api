@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 from datetime import datetime
@@ -15,7 +15,7 @@ from api.schemas.responses import ResponseEnvelope
 
 OveragePolicyValue = Literal["block", "warn", "charge"]
 QuotaModeValue = Literal["FULL", "PASSTHROUGH", "DEGRADED_RETRIEVE", "BLOCKED"]
-PlanTierValue = Literal["free", "starter", "growth", "enterprise"]
+PlanTierValue = Literal["free", "starter", "growth", "scale", "enterprise"]
 BlockedLayerValue = Literal["L1", "L2", "L3", "L4", "NONE"]
 DomainSchemaValue = Literal["edtech", "support"] | None
 DomainStatusValue = Literal["available", "coming_soon"]
