@@ -44,9 +44,9 @@ services:
       retries: 5
       start_period: 15s
 
-  celery-enterprise:
+  celery-scale:
     <<: *app-service
-    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "enterprise-extraction", "-c", "4", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-enterprise.pid"]
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "scale-extraction,enterprise-extraction", "-c", "${CELERY_SCALE_CONCURRENCY:-4}", "--prefetch-multiplier", "1", "--loglevel=${CELERY_LOG_LEVEL:-info}", "--pidfile=/tmp/celery-scale.pid"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
       localstack:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-enterprise.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
+      test: ["CMD-SHELL", "python -c \"import os; pid = int(open('/tmp/celery-scale.pid', 'r', encoding='utf-8').read().strip()); os.kill(pid, 0)\""]
       interval: 20s
       timeout: 5s
       retries: 5
@@ -65,7 +65,7 @@ services:
 
   celery-growth:
     <<: *app-service
-    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "growth-extraction", "-c", "3", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-growth.pid"]
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "growth-extraction", "-c", "${CELERY_GROWTH_CONCURRENCY:-3}", "--prefetch-multiplier", "1", "--loglevel=${CELERY_LOG_LEVEL:-info}", "--pidfile=/tmp/celery-growth.pid"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,7 +84,7 @@ services:
 
   celery-starter:
     <<: *app-service
-    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "starter-extraction,free-extraction", "-c", "3", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-starter.pid"]
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "starter-extraction,free-extraction", "-c", "${CELERY_STARTER_CONCURRENCY:-3}", "--prefetch-multiplier", "1", "--loglevel=${CELERY_LOG_LEVEL:-info}", "--pidfile=/tmp/celery-starter.pid"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -103,7 +103,7 @@ services:
 
   celery-background:
     <<: *app-service
-    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "celery,reembedding,dead-letter", "-c", "2", "--prefetch-multiplier", "1", "--loglevel=info", "--pidfile=/tmp/celery-background.pid"]
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "celery,reembedding,dead-letter", "-c", "${CELERY_BACKGROUND_CONCURRENCY:-2}", "--prefetch-multiplier", "1", "--loglevel=${CELERY_LOG_LEVEL:-info}", "--pidfile=/tmp/celery-background.pid"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,7 +122,7 @@ services:
 
   celery-beat:
     <<: *app-service
-    command: ["celery", "-A", "api.celery_app.celery_app", "beat", "--loglevel=info", "--pidfile=/tmp/celery-beat.pid", "--schedule=/tmp/celerybeat-schedule"]
+    command: ["celery", "-A", "api.celery_app.celery_app", "beat", "--loglevel=${CELERY_LOG_LEVEL:-info}", "--pidfile=/tmp/celery-beat.pid", "--schedule=/tmp/celerybeat-schedule"]
     depends_on:
       postgres:
         condition: service_healthy
