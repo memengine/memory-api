@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import uuid
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from api.infra.llm_providers import CohereProvider
 from api.infra.llm_providers import GeminiProvider
 from api.infra.llm_providers import LLMProvider
 from api.infra.llm_providers import LocalProvider
+from api.infra.llm_providers import OpenAIProvider
 
 
 class EmbeddingUnavailableError(RuntimeError):
@@ -29,10 +31,10 @@ class ExtractionUnavailableError(RuntimeError):
 
 @dataclass(slots=True)
 class ProviderConfigRecord:
-    embed_provider_primary: str = "gemini"
-    embed_provider_fallback: str = "cohere"
-    extract_provider_primary: str = "gemini"
-    extract_provider_fallback: str = "anthropic"
+    embed_provider_primary: str = "openai"
+    embed_provider_fallback: str = ""
+    extract_provider_primary: str = "openai"
+    extract_provider_fallback: str = ""
 
 
 class LLMRouter:
@@ -53,6 +55,7 @@ class LLMRouter:
             "anthropic": lambda **overrides: AnthropicProvider(**overrides),
             "cohere": lambda **overrides: CohereProvider(**overrides),
             "local": lambda **overrides: LocalProvider(**overrides),
+            "openai": lambda **overrides: OpenAIProvider(**overrides),
         }
 
     def get_provider(self, provider_name: str, **overrides) -> LLMProvider:
@@ -67,9 +70,6 @@ class LLMRouter:
             [
                 config.embed_provider_primary,
                 config.embed_provider_fallback,
-                "gemini",
-                "anthropic",
-                "cohere",
             ]
         )
         for provider_name in candidates:
@@ -86,8 +86,6 @@ class LLMRouter:
             [
                 config.extract_provider_primary,
                 config.extract_provider_fallback,
-                "gemini",
-                "anthropic",
             ]
         )
         for provider_name in candidates:
@@ -99,6 +97,9 @@ class LLMRouter:
         raise ExtractionUnavailableError("No extraction provider is available.")
 
     def _provider_config(self, tenant_id: str | None) -> ProviderConfigRecord:
+        env_config = self._env_provider_config()
+        if env_config is not None:
+            return env_config
         cache_key = self._config_cache_key(tenant_id)
         cached = self._get_cached(cache_key)
         if cached is not None:
@@ -107,6 +108,21 @@ class LLMRouter:
         record = self._load_provider_config(tenant_id)
         self._set_cached(cache_key, asdict(record), self.CONFIG_CACHE_TTL_SECONDS)
         return record
+
+    @staticmethod
+    def _env_provider_config() -> ProviderConfigRecord | None:
+        embed_provider = (os.getenv("EMBEDDING_PROVIDER") or "").strip().lower()
+        raw_extract_order = (os.getenv("LLM_PROVIDER_ORDER") or "").strip()
+        extract_providers = [name.strip().lower() for name in raw_extract_order.split(",") if name.strip()]
+        extract_provider = extract_providers[0] if extract_providers else ""
+        if not embed_provider and not extract_provider:
+            return None
+        return ProviderConfigRecord(
+            embed_provider_primary=embed_provider or "openai",
+            embed_provider_fallback="",
+            extract_provider_primary=extract_provider or "openai",
+            extract_provider_fallback="",
+        )
 
     def _load_provider_config(self, tenant_id: str | None) -> ProviderConfigRecord:
         if self.sync_session is None:
