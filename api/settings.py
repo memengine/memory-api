@@ -36,10 +36,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-haiku-4-5-20251001", alias="ANTHROPIC_MODEL")
     anthropic_timeout_seconds: int = Field(default=30, alias="ANTHROPIC_TIMEOUT_SECONDS")
-    llm_provider_order: str = Field(default="gemini,openai,anthropic", alias="LLM_PROVIDER_ORDER")
+    llm_provider_order: str = Field(default="openai", alias="LLM_PROVIDER_ORDER")
     local_embedding_endpoint: str = Field(default="", alias="LOCAL_EMBEDDING_ENDPOINT")
+    embedding_provider: str = Field(default="openai", alias="EMBEDDING_PROVIDER")
     extraction_model: str = Field(default="", alias="EXTRACTION_MODEL")
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
+    embedding_model_id: str = Field(default="", alias="EMBEDDING_MODEL_ID")
     embedding_dimensions: str = Field(default="", alias="EMBEDDING_DIMENSIONS")
     qdrant_collection: str = Field(default="", alias="QDRANT_COLLECTION")
     extraction_payload_retention_days: int = Field(

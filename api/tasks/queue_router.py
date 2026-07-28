@@ -27,11 +27,13 @@ QUEUE_DEPTH_CACHE_TTL_SECONDS = 15
 FREE_QUEUE = "free-extraction"
 STARTER_QUEUE = "starter-extraction"
 GROWTH_QUEUE = "growth-extraction"
+SCALE_QUEUE = "scale-extraction"
 ENTERPRISE_QUEUE = "enterprise-extraction"
 BACKGROUND_QUEUE = "celery"
 REEMBEDDING_QUEUE = "reembedding"
 DEAD_LETTER_QUEUE = "dead-letter"
 ALL_QUEUES = (
+    SCALE_QUEUE,
     ENTERPRISE_QUEUE,
     GROWTH_QUEUE,
     STARTER_QUEUE,
@@ -42,17 +44,20 @@ ALL_QUEUES = (
 )
 PLAN_QUEUE_MAP = {
     PlanTier.enterprise.value: ENTERPRISE_QUEUE,
+    PlanTier.scale.value: SCALE_QUEUE,
     PlanTier.growth.value: GROWTH_QUEUE,
     PlanTier.starter.value: STARTER_QUEUE,
     PlanTier.free.value: FREE_QUEUE,
 }
 PLAN_QUEUE_LIMITS = {
     PlanTier.enterprise.value: 1000,
+    PlanTier.scale.value: 500,
     PlanTier.growth.value: 200,
     PlanTier.starter.value: 50,
     PlanTier.free.value: 10,
 }
 QUEUE_THROUGHPUT_PER_MINUTE = {
+    SCALE_QUEUE: 8,
     ENTERPRISE_QUEUE: 8,
     GROWTH_QUEUE: 5,
     STARTER_QUEUE: 3,

@@ -17,7 +17,6 @@ from api.db.models import SupportMemory
 from api.schemas.support_schemas import SupportExtractionResult
 from api.services.claim_ledger_service import ClaimLedgerService
 from api.services.claim_ledger_service import serialize_claim_value
-from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
 from api.services.support.pii_redaction import count_redactions
 from api.services.support.pii_redaction import redact_support_pii
@@ -77,9 +76,7 @@ class SupportExtractor:
     ) -> None:
         self.session = session
         self.llm_service = llm_service or LLMService(
-            provider_clients={LLMProvider.GEMINI: client}
-            if client is not None
-            else None,
+            provider_clients=None,
             require_provider=client is None,
             use_state_store=client is None,
         )
