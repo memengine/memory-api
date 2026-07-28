@@ -25,7 +25,6 @@ from api.services.edtech.prompt_builder import EdTechPromptBuilder
 from api.services.edtech.edtech_schema import active_fields_for
 from api.services.claim_ledger_service import ClaimLedgerService
 from api.services.claim_ledger_service import serialize_claim_value
-from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
 
 try:  # pragma: no cover - dependency exists in production, tests can run without it.
@@ -112,9 +111,7 @@ class EdTechExtractor:
     ) -> None:
         self.session = session
         self.llm_service = llm_service or LLMService(
-            provider_clients={LLMProvider.GEMINI: client}
-            if client is not None
-            else None,
+            provider_clients=None,
             require_provider=client is None,
             use_state_store=client is None,
         )
