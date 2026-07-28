@@ -13,6 +13,12 @@ from api.infra.llm_router import ExtractionUnavailableError
 from api.infra.llm_router import LLMRouter
 
 
+@pytest.fixture(autouse=True)
+def clear_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_PROVIDER_ORDER", raising=False)
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+
+
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
@@ -69,25 +75,25 @@ class FakeProvider(LLMProvider):
         return self._available
 
 
-def test_get_extract_provider_falls_back_to_anthropic_when_gemini_unavailable() -> None:
+def test_get_extract_provider_uses_openai_by_default() -> None:
     router = LLMRouter(
         redis_client=FakeRedis(),
         provider_factories={
-            "gemini": lambda **kwargs: FakeProvider(provider_name="gemini", available=False),
+            "openai": lambda **kwargs: FakeProvider(provider_name="openai", available=True),
             "anthropic": lambda **kwargs: FakeProvider(provider_name="anthropic", available=True),
         },
     )
 
     provider = router.get_extract_provider()
 
-    assert provider.provider_name == "anthropic"
+    assert provider.provider_name == "openai"
 
 
-def test_get_embed_provider_falls_back_to_cohere_when_gemini_unavailable() -> None:
+def test_get_embed_provider_uses_openai_by_default() -> None:
     router = LLMRouter(
         redis_client=FakeRedis(),
         provider_factories={
-            "gemini": lambda **kwargs: FakeProvider(provider_name="gemini", available=False, embedding_dimensions=1536),
+            "openai": lambda **kwargs: FakeProvider(provider_name="openai", available=True, embedding_dimensions=1536),
             "anthropic": lambda **kwargs: FakeProvider(provider_name="anthropic", available=True, supports_embeddings=False),
             "cohere": lambda **kwargs: FakeProvider(provider_name="cohere", available=True, embedding_dimensions=1024),
         },
@@ -95,7 +101,7 @@ def test_get_embed_provider_falls_back_to_cohere_when_gemini_unavailable() -> No
 
     provider = router.get_embed_provider()
 
-    assert provider.provider_name == "cohere"
+    assert provider.provider_name == "openai"
 
 
 def test_tenant_specific_config_overrides_global_defaults() -> None:
@@ -131,27 +137,27 @@ def test_tenant_specific_config_overrides_global_defaults() -> None:
 
 def test_health_cache_prevents_repeat_availability_checks() -> None:
     redis_client = FakeRedis()
-    provider = FakeProvider(provider_name="gemini", available=True, embedding_dimensions=1536)
+    provider = FakeProvider(provider_name="openai", available=True, embedding_dimensions=1536)
     provider._check_availability = MagicMock(return_value=True)
     router = LLMRouter(
         redis_client=redis_client,
-        provider_factories={"gemini": lambda **kwargs: provider},
+        provider_factories={"openai": lambda **kwargs: provider},
     )
 
     first = router.get_embed_provider()
     second = router.get_embed_provider()
 
-    assert first.provider_name == "gemini"
-    assert second.provider_name == "gemini"
+    assert first.provider_name == "openai"
+    assert second.provider_name == "openai"
     assert provider._check_availability.call_count == 1
-    assert json.loads(redis_client.values["llm_provider_health:embed:gemini"])["available"] is True
+    assert json.loads(redis_client.values["llm_provider_health:embed:openai"])["available"] is True
 
 
 def test_extract_provider_raises_when_none_available() -> None:
     router = LLMRouter(
         redis_client=FakeRedis(),
         provider_factories={
-            "gemini": lambda **kwargs: FakeProvider(provider_name="gemini", available=False),
+            "openai": lambda **kwargs: FakeProvider(provider_name="openai", available=False),
             "anthropic": lambda **kwargs: FakeProvider(provider_name="anthropic", available=False),
         },
     )
@@ -164,7 +170,7 @@ def test_embed_provider_raises_when_none_available() -> None:
     router = LLMRouter(
         redis_client=FakeRedis(),
         provider_factories={
-            "gemini": lambda **kwargs: FakeProvider(provider_name="gemini", available=False),
+            "openai": lambda **kwargs: FakeProvider(provider_name="openai", available=False),
             "anthropic": lambda **kwargs: FakeProvider(provider_name="anthropic", available=True, supports_embeddings=False),
             "cohere": lambda **kwargs: FakeProvider(provider_name="cohere", available=False),
         },
