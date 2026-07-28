@@ -21,7 +21,7 @@ def test_plans_endpoint_requires_no_auth() -> None:
     assert response.status_code == 200
 
 
-def test_plans_returns_4_plans() -> None:
+def test_plans_returns_public_plan_ladder() -> None:
     app = build_test_app()
 
     with TestClient(app) as client:
@@ -29,7 +29,7 @@ def test_plans_returns_4_plans() -> None:
 
     assert response.status_code == 200
     plans = response.json()
-    assert [plan["name"] for plan in plans] == ["free", "starter", "growth", "enterprise"]
+    assert [plan["name"] for plan in plans] == ["free", "starter", "growth", "scale", "enterprise"]
 
 
 def test_popular_plan_is_starter() -> None:
@@ -45,15 +45,19 @@ def test_popular_plan_is_starter() -> None:
     assert popular_plans[0]["badge"] == "Most Popular"
 
 
-def test_growth_has_domain_schemas_and_cross_agent() -> None:
+def test_all_plans_show_core_product_features() -> None:
     app = build_test_app()
 
     with TestClient(app) as client:
         response = client.get("/v1/billing/plans")
 
-    growth = next(plan for plan in response.json() if plan["name"] == "growth")
-    assert growth["features"]["domain_schemas"] is True
-    assert growth["features"]["cross_agent"] is True
+    for plan in response.json():
+        assert plan["features"]["quality_gate"] is True
+        assert plan["features"]["domain_schemas"] is True
+        assert plan["features"]["cross_agent"] is True
+        assert plan["features"]["conflict_resolution"] is True
+        assert plan["features"]["multi_service_writers"] is True
+        assert "sla" not in plan["features"]
 
 
 def test_free_plan_price_is_zero() -> None:
@@ -67,3 +71,18 @@ def test_free_plan_price_is_zero() -> None:
     assert free["annual_price_inr"] == 0
     assert free["monthly_price_usd"] == 0
     assert free["annual_price_usd"] == 0
+
+
+def test_self_serve_plan_prices_match_public_pricing() -> None:
+    app = build_test_app()
+
+    with TestClient(app) as client:
+        response = client.get("/v1/billing/plans")
+
+    plans = {plan["name"]: plan for plan in response.json()}
+    assert plans["starter"]["monthly_price_inr"] == 1_800
+    assert plans["starter"]["annual_price_inr"] == 18_000
+    assert plans["growth"]["monthly_price_inr"] == 6_000
+    assert plans["growth"]["annual_price_inr"] == 60_000
+    assert plans["scale"]["monthly_price_inr"] == 18_000
+    assert plans["scale"]["annual_price_inr"] == 180_000

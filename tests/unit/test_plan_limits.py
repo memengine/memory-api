@@ -93,6 +93,20 @@ def test_get_limits_starter() -> None:
     }
 
 
+def test_get_limits_scale() -> None:
+    limits = get_limits("scale")
+
+    assert limits == {
+        "monthly_call_limit": 1_000_000,
+        "monthly_token_limit": 500_000_000,
+        "write_call_limit": 1_000_000,
+        "read_limit": None,
+        "rate_limit_per_user_per_minute": 80,
+        "overage_policy": "warn",
+        "alert_threshold_pct": 0.9,
+    }
+
+
 def test_get_limits_enterprise() -> None:
     limits = get_limits("enterprise")
 
