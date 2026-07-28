@@ -21,12 +21,13 @@ from api.db.models import EmbeddingProvider
 from api.infra.llm_providers import CohereProvider
 from api.infra.llm_providers import GeminiProvider
 from api.infra.llm_providers import LocalProvider
+from api.infra.llm_providers import OpenAIProvider
 from api.infra.llm_router import EmbeddingUnavailableError
 from api.infra.llm_router import LLMRouter
 from api.settings import get_settings
 
 
-DEFAULT_ACTIVE_MODEL_ID = "gemini-embedding-001-v1"
+DEFAULT_ACTIVE_MODEL_ID = "openai-text-embedding-3-small-v1"
 ACTIVE_MODEL_CACHE_KEY = "embedding_models:active"
 ACTIVE_MODEL_CACHE_TTL_SECONDS = 300
 REDIS_CONNECT_TIMEOUT_SECONDS = 0.2
@@ -113,6 +114,11 @@ class EmbeddingService:
                     endpoint=overrides.pop("endpoint", None) or self.local_endpoint,
                     **overrides,
                 ),
+                "openai": lambda **overrides: OpenAIProvider(
+                    http_client=overrides.pop("http_client", None) or self.sync_http_client,
+                    api_key=overrides.pop("api_key", None),
+                    **overrides,
+                ),
             },
         )
 
@@ -147,6 +153,9 @@ class EmbeddingService:
         )
 
     async def get_active_model(self) -> EmbeddingModelRecord:
+        if self._env_model_overrides_active_model():
+            return self._default_model_record()
+
         cached = await self._get_cached_active_model_async()
         if cached is not None:
             return cached
@@ -166,6 +175,9 @@ class EmbeddingService:
         return record
 
     def get_active_model_sync(self) -> EmbeddingModelRecord:
+        if self._env_model_overrides_active_model():
+            return self._default_model_record()
+
         cached = self._get_cached_active_model_sync()
         if cached is not None:
             return cached
@@ -284,7 +296,7 @@ class EmbeddingService:
     ) -> list[float]:
         provider_name = EmbeddingProvider(model.provider).value
         provider_kwargs: dict[str, object]
-        if provider_name in {"gemini", "cohere"}:
+        if provider_name in {"gemini", "cohere", "openai"}:
             provider_kwargs = {
                 "embed_model": model.model_name,
                 "embedding_dimensions": model.dimensions,
@@ -376,15 +388,36 @@ class EmbeddingService:
 
     @staticmethod
     def _default_model_record() -> EmbeddingModelRecord:
+        settings = get_settings()
+        provider_name = (os.getenv("EMBEDDING_PROVIDER") or settings.embedding_provider or EmbeddingProvider.openai.value).strip().lower()
+        try:
+            provider = EmbeddingProvider(provider_name).value
+        except ValueError as error:
+            raise ValueError(f"Unsupported EMBEDDING_PROVIDER '{provider_name}'.") from error
+
+        default_model = "text-embedding-3-small"
         return EmbeddingModelRecord(
-            id=DEFAULT_ACTIVE_MODEL_ID,
-            provider=EmbeddingProvider.gemini.value,
-            model_name=os.getenv("EMBEDDING_MODEL") or get_settings().embedding_model or "gemini-embedding-001",
-            dimensions=int(os.getenv("EMBEDDING_DIMENSIONS") or get_settings().embedding_dimensions or "1536"),
-            qdrant_collection=os.getenv("QDRANT_COLLECTION") or get_settings().qdrant_collection or "memories",
+            id=os.getenv("EMBEDDING_MODEL_ID") or settings.embedding_model_id or DEFAULT_ACTIVE_MODEL_ID,
+            provider=provider,
+            model_name=os.getenv("EMBEDDING_MODEL") or settings.embedding_model or default_model,
+            dimensions=int(os.getenv("EMBEDDING_DIMENSIONS") or settings.embedding_dimensions or "1536"),
+            qdrant_collection=os.getenv("QDRANT_COLLECTION") or settings.qdrant_collection or "memories",
             is_active=True,
             deprecated_at=None,
             created_at=datetime.now(UTC).isoformat(),
+        )
+
+    @staticmethod
+    def _env_model_overrides_active_model() -> bool:
+        return any(
+            os.getenv(name)
+            for name in (
+                "EMBEDDING_PROVIDER",
+                "EMBEDDING_MODEL",
+                "EMBEDDING_MODEL_ID",
+                "EMBEDDING_DIMENSIONS",
+                "QDRANT_COLLECTION",
+            )
         )
 
     @staticmethod
