@@ -15,7 +15,7 @@ CircuitStateValue = Literal["CLOSED", "OPEN", "HALF_OPEN"]
 QueueHealthValue = Literal["NORMAL", "BACKLOG", "CRITICAL"]
 OverallHealthValue = Literal["HEALTHY", "DEGRADED", "CRITICAL"]
 QuotaModeValue = Literal["FULL", "PASSTHROUGH", "DEGRADED_RETRIEVE", "BLOCKED"]
-PlanTierValue = Literal["free", "starter", "growth", "enterprise"]
+PlanTierValue = Literal["free", "starter", "growth", "scale", "enterprise"]
 BlockedLayerValue = Literal["L1", "L2", "L3", "L4"]
 OveragePolicyValue = Literal["block", "warn", "charge"]
 
