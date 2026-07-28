@@ -470,7 +470,7 @@ class LLMService:
             LLMProvider.OPENAI: ProviderConfig(
                 provider=LLMProvider.OPENAI,
                 api_key=self.settings.openai_api_key,
-                model=self.settings.openai_model or "gpt-4o-mini",
+                model=self.settings.extraction_model or self.settings.openai_model or "gpt-4o-mini",
                 timeout_seconds=int(self.settings.openai_timeout_seconds or 30),
             ),
             LLMProvider.ANTHROPIC: ProviderConfig(
@@ -490,9 +490,9 @@ class LLMService:
         return ordered
 
     def _provider_order(self) -> list[str]:
-        raw_order = self.settings.llm_provider_order or "gemini,openai,anthropic"
+        raw_order = self.settings.llm_provider_order or "openai"
         provider_names = [name.strip().lower() for name in raw_order.split(",") if name.strip()]
-        return provider_names or ["gemini", "openai", "anthropic"]
+        return provider_names or ["openai"]
 
     def _config_for(self, provider: LLMProvider) -> ProviderConfig | None:
         return next((config for config in self._configs if config.provider == provider), None)

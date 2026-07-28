@@ -10,10 +10,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from api.infra.llm_providers.gemini_provider import DEFAULT_GEMINI_EXTRACT_MODEL
+from api.infra.llm_providers.openai_provider import DEFAULT_OPENAI_EXTRACT_MODEL
 from api.schemas.memory_schemas import ExtractedMemory
 from api.schemas.memory_schemas import ExtractionResponseSchema
-from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMService
 from api.settings import get_settings
 
@@ -34,12 +33,12 @@ class ExtractionService:
     ) -> None:
         self.client = client
         configured_model = (get_settings().extraction_model or "").strip()
-        self.model = model or configured_model or DEFAULT_GEMINI_EXTRACT_MODEL
+        self.model = model or configured_model or DEFAULT_OPENAI_EXTRACT_MODEL
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.last_usage_events: list[dict[str, Any]] = []
         self.llm_service = llm_service or LLMService(
-            provider_clients={LLMProvider.GEMINI: self.client} if self.client is not None else None,
+            provider_clients=None,
             require_provider=self.client is None,
             use_state_store=self.client is None,
         )
