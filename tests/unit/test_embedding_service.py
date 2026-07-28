@@ -10,6 +10,15 @@ from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.embedding_service import EmbeddingService
 
 
+@pytest.fixture(autouse=True)
+def clear_embedding_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL_ID", raising=False)
+    monkeypatch.delenv("EMBEDDING_DIMENSIONS", raising=False)
+    monkeypatch.delenv("QDRANT_COLLECTION", raising=False)
+
+
 class FakeAsyncRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
