@@ -1737,7 +1737,7 @@ class GlobalAgent(Base):
     default_categories_requested: Mapped[list[str]] = mapped_column(
         ARRAY(Text()),
         nullable=False,
-        server_default=EMPTY_TEXT_ARRAY,
+        server_default=EMPTY_VARCHAR_ARRAY,
     )
     redirect_uri: Mapped[str] = mapped_column(
         String(500),
