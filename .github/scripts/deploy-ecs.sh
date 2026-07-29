@@ -87,6 +87,10 @@ run_migrations() {
   local container_name
   local task_arn
   local exit_code
+  local task_detail
+  local stopped_reason
+  local container_reason
+  local container_status
   local subnet_json
   local security_group_json
   local network_config
@@ -127,9 +131,54 @@ run_migrations() {
     --output text)"
 
   if [[ "$exit_code" != "0" ]]; then
+    task_detail="$(aws ecs describe-tasks \
+      --cluster "$ECS_CLUSTER" \
+      --tasks "$task_arn" \
+      --query 'tasks[0]' \
+      --output json)"
+    stopped_reason="$(jq -r '.stoppedReason // "unknown"' <<< "$task_detail")"
+    container_reason="$(jq -r '.containers[0].reason // "unknown"' <<< "$task_detail")"
+    container_status="$(jq -r '.containers[0].lastStatus // "unknown"' <<< "$task_detail")"
+
     echo "Migration task failed with exit code ${exit_code}. Task: ${task_arn}" >&2
+    echo "Stopped reason: ${stopped_reason}" >&2
+    echo "Container status: ${container_status}" >&2
+    echo "Container reason: ${container_reason}" >&2
+    print_task_logs "$task_arn" "$container_name" "$rendered_file" || true
     exit 1
   fi
+}
+
+print_task_logs() {
+  local task_arn="$1"
+  local container_name="$2"
+  local rendered_file="$3"
+  local task_id
+  local log_group
+  local log_region
+  local stream_prefix
+  local log_stream
+
+  task_id="${task_arn##*/}"
+  log_group="$(jq -r '.containerDefinitions[0].logConfiguration.options["awslogs-group"] // empty' "$rendered_file")"
+  log_region="$(jq -r '.containerDefinitions[0].logConfiguration.options["awslogs-region"] // empty' "$rendered_file")"
+  stream_prefix="$(jq -r '.containerDefinitions[0].logConfiguration.options["awslogs-stream-prefix"] // empty' "$rendered_file")"
+
+  if [[ -z "$log_group" || -z "$stream_prefix" ]]; then
+    echo "No awslogs configuration found on task definition; cannot tail migration logs." >&2
+    return 0
+  fi
+
+  log_region="${log_region:-$AWS_REGION}"
+  log_stream="${stream_prefix}/${container_name}/${task_id}"
+  echo "Last migration logs from ${log_group}:${log_stream}" >&2
+  aws logs get-log-events \
+    --region "$log_region" \
+    --log-group-name "$log_group" \
+    --log-stream-name "$log_stream" \
+    --limit 80 \
+    --query 'events[].message' \
+    --output text >&2 || true
 }
 
 echo "Deploying ${IMAGE_URI} to ECS cluster ${ECS_CLUSTER}"
