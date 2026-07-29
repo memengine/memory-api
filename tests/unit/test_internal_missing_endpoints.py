@@ -79,7 +79,27 @@ async def test_cost_summary_avg_cost_per_call_is_none_when_no_calls() -> None:
     session = FakeAsyncSession(
         [
             FakeResult(one_value=SimpleNamespace(total_tokens=1_500_000, total_calls=0)),
-            FakeResult(all_value=[SimpleNamespace(tenant_id=tenant_id, company_name="Acme", tokens=1_000_000)]),
+            FakeResult(
+                one_value=SimpleNamespace(
+                    add_calls=0,
+                    jobs_with_memories=0,
+                    nothing_to_extract_jobs=0,
+                    avg_extraction_tokens=0,
+                )
+            ),
+            FakeResult(
+                all_value=[
+                    SimpleNamespace(
+                        tenant_id=tenant_id,
+                        company_name="Acme",
+                        tokens=1_000_000,
+                        add_calls=0,
+                        jobs_with_memories=0,
+                        nothing_to_extract_jobs=0,
+                    )
+                ]
+            ),
+            FakeResult(all_value=[]),
             FakeResult(one_value=SimpleNamespace(blocked_calls=3)),
         ]
     )
