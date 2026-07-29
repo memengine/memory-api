@@ -18,10 +18,6 @@ from sqlalchemy.orm import Session
 
 from api.db.models import EmbeddingModel
 from api.db.models import EmbeddingProvider
-from api.infra.llm_providers import CohereProvider
-from api.infra.llm_providers import GeminiProvider
-from api.infra.llm_providers import LocalProvider
-from api.infra.llm_providers import OpenAIProvider
 from api.infra.llm_router import EmbeddingUnavailableError
 from api.infra.llm_router import LLMRouter
 from api.settings import get_settings
@@ -32,6 +28,30 @@ ACTIVE_MODEL_CACHE_KEY = "embedding_models:active"
 ACTIVE_MODEL_CACHE_TTL_SECONDS = 300
 REDIS_CONNECT_TIMEOUT_SECONDS = 0.2
 REDIS_IO_TIMEOUT_SECONDS = 0.2
+
+
+def _gemini_provider(**overrides):
+    from api.infra.llm_providers.gemini_provider import GeminiProvider
+
+    return GeminiProvider(**overrides)
+
+
+def _cohere_provider(**overrides):
+    from api.infra.llm_providers.cohere_provider import CohereProvider
+
+    return CohereProvider(**overrides)
+
+
+def _local_provider(**overrides):
+    from api.infra.llm_providers.local_provider import LocalProvider
+
+    return LocalProvider(**overrides)
+
+
+def _openai_provider(**overrides):
+    from api.infra.llm_providers.openai_provider import OpenAIProvider
+
+    return OpenAIProvider(**overrides)
 
 
 def _require_redis_url() -> str:
@@ -99,22 +119,22 @@ class EmbeddingService:
             sync_session=sync_session,
             redis_client=self.sync_redis_client,
             provider_factories={
-                "gemini": lambda **overrides: GeminiProvider(
+                "gemini": lambda **overrides: _gemini_provider(
                     client=overrides.pop("client", None) or self.gemini_client,
                     api_key=overrides.pop("api_key", None),
                     **overrides,
                 ),
-                "cohere": lambda **overrides: CohereProvider(
+                "cohere": lambda **overrides: _cohere_provider(
                     http_client=overrides.pop("http_client", None) or self.sync_http_client,
                     api_key=overrides.pop("api_key", None),
                     **overrides,
                 ),
-                "local": lambda **overrides: LocalProvider(
+                "local": lambda **overrides: _local_provider(
                     http_client=overrides.pop("http_client", None) or self.sync_http_client,
                     endpoint=overrides.pop("endpoint", None) or self.local_endpoint,
                     **overrides,
                 ),
-                "openai": lambda **overrides: OpenAIProvider(
+                "openai": lambda **overrides: _openai_provider(
                     http_client=overrides.pop("http_client", None) or self.sync_http_client,
                     api_key=overrides.pop("api_key", None),
                     **overrides,

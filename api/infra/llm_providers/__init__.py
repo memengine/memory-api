@@ -1,4 +1,4 @@
-﻿from api.infra.llm_providers.base import LLMProvider
+from api.infra.llm_providers.base import LLMProvider
 
 
 def __getattr__(name: str):
