@@ -35,37 +35,78 @@ def _parse_conversation(block: str) -> list[dict[str, str]]:
         if not line or ":" not in line:
             continue
         speaker, content = line.split(":", 1)
-        role = "assistant" if speaker.strip().lower() == "ai" else "user"
+        role = "assistant" if speaker.strip().lower() in {"ai", "assistant"} else "user"
         messages.append({"role": role, "content": content.strip()})
     return messages
 
 
-def _find_conversation_block(section: str) -> str:
+_CONVERSATION_HEADING_RE = r"(?:Conversation|Input|Transcript|Dialog)[^*\n]*"
+_SHOULD_EXTRACT_HEADING_RE = r"^\*\*SHOULD extract(?: / UPDATE)?[^\n]*\*\*"
+
+
+def _strip_markdown_fence(block: str) -> str:
+    stripped = block.strip()
+    fence_match = re.match(r"^```[^\n]*\r?\n?(.*?)\r?\n?```$", stripped, re.S)
+    return fence_match.group(1) if fence_match is not None else block
+
+
+def _contains_conversation_lines(block: str) -> bool:
+    allowed_speakers = {"user", "ai", "assistant"}
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        speaker, _ = line.split(":", 1)
+        if speaker.strip().lower() in allowed_speakers:
+            return True
+    return False
+
+
+def _find_conversation_block(section: str, example_number: str | None = None) -> str:
     fenced_match = re.search(
-        r"^\*\*Conversation[^\n]*\*\*\s*\r?\n```[^\n]*\r?\n(.*?)\r?\n```",
+        rf"^\*\*{_CONVERSATION_HEADING_RE}\*\*\s*\r?\n```[^\n]*\r?\n(.*?)\r?\n```",
         section,
-        re.S | re.M,
+        re.S | re.M | re.I,
     )
     if fenced_match is not None:
         return fenced_match.group(1)
 
     inline_fenced_match = re.search(
-        r"\*\*Conversation[^\n]*\*\*\s*```(.*?)```",
+        rf"\*\*{_CONVERSATION_HEADING_RE}\*\*\s*```[^\n]*\r?\n?(.*?)```",
         section,
-        re.S,
+        re.S | re.I,
     )
     if inline_fenced_match is not None:
         return inline_fenced_match.group(1)
 
     plain_match = re.search(
-        r"^\*\*Conversation[^\n]*\*\*\s*(.*?)(?=^\*\*SHOULD extract)",
+        rf"^\*\*{_CONVERSATION_HEADING_RE}\*\*\s*(.*?)(?={_SHOULD_EXTRACT_HEADING_RE})",
         section,
-        re.S | re.M,
+        re.S | re.M | re.I,
     )
     if plain_match is not None:
-        return plain_match.group(1)
+        return _strip_markdown_fence(plain_match.group(1))
 
-    raise AssertionError("Example is missing a Conversation block")
+    fallback_match = re.search(
+        rf"\A(.*?)(?={_SHOULD_EXTRACT_HEADING_RE})",
+        section,
+        re.S | re.M | re.I,
+    )
+    if fallback_match is not None:
+        fallback = re.sub(
+            rf"^\*\*{_CONVERSATION_HEADING_RE}\*\*\s*",
+            "",
+            fallback_match.group(1),
+            flags=re.M | re.I,
+        )
+        fallback = _strip_markdown_fence(fallback)
+        if _contains_conversation_lines(fallback):
+            return fallback
+
+    preview = " ".join(section.strip().split())[:160]
+    raise AssertionError(
+        f"Example {example_number or '?'} is missing a Conversation block. Preview: {preview}"
+    )
 
 
 def _find_should_extract_block(section: str) -> str:
@@ -91,7 +132,7 @@ def _parse_examples() -> list[dict[str, object]]:
     for match in matches:
         example_number = match.group(1)
         section = match.group(2)
-        conversation = _parse_conversation(_find_conversation_block(section))
+        conversation = _parse_conversation(_find_conversation_block(section, example_number))
 
         should_extract_block = _find_should_extract_block(section)
 
