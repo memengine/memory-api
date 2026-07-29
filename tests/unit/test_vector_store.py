@@ -17,23 +17,37 @@ def test_initialization_creates_collection_and_payload_indexes() -> None:
 
     QdrantService(client=client)
 
-    client.create_collection.assert_called_once()
-    assert client.create_payload_index.call_count == 7
-    indexed_fields = [call.kwargs["field_name"] for call in client.create_payload_index.call_args_list]
-    assert indexed_fields == [
-        "tenant_id",
-        "proxy_user_id",
-        "agent_id",
-        "category",
-        "importance_score",
-        "is_archived",
-        "created_at",
+    assert client.create_collection.call_count == 2
+    created_collections = [
+        call.kwargs["collection_name"] for call in client.create_collection.call_args_list
     ]
+    assert created_collections == ["memories", "universal_memories"]
 
-    create_collection_kwargs = client.create_collection.call_args.kwargs
-    assert create_collection_kwargs["collection_name"] == "memories"
-    assert create_collection_kwargs["vectors_config"].size == 1536
-    assert create_collection_kwargs["vectors_config"].distance == qmodels.Distance.COSINE
+    for call in client.create_collection.call_args_list:
+        create_collection_kwargs = call.kwargs
+        assert create_collection_kwargs["vectors_config"].size == 1536
+        assert create_collection_kwargs["vectors_config"].distance == qmodels.Distance.COSINE
+
+    assert client.create_payload_index.call_count == 13
+    indexed_fields = [
+        (call.kwargs["collection_name"], call.kwargs["field_name"])
+        for call in client.create_payload_index.call_args_list
+    ]
+    assert indexed_fields == [
+        ("memories", "tenant_id"),
+        ("memories", "proxy_user_id"),
+        ("memories", "agent_id"),
+        ("memories", "category"),
+        ("memories", "importance_score"),
+        ("memories", "is_archived"),
+        ("memories", "created_at"),
+        ("universal_memories", "user_uui_id"),
+        ("universal_memories", "source_agent_id"),
+        ("universal_memories", "category"),
+        ("universal_memories", "importance_score"),
+        ("universal_memories", "is_archived"),
+        ("universal_memories", "created_at"),
+    ]
 
 
 def test_shared_client_is_reused_across_instances() -> None:
@@ -47,7 +61,7 @@ def test_shared_client_is_reused_across_instances() -> None:
 
         assert first.client is second.client
         client_cls.assert_called_once()
-    assert client_instance.create_payload_index.call_count == 7
+    assert client_instance.create_payload_index.call_count == 13
 
 
 def test_upsert_memory_retries_connection_errors() -> None:
