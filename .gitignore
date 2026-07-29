@@ -61,7 +61,6 @@ tmp_uvicorn_*.log
 pytest-cache-files-*/
 
 # Local editor/project notes
-.docs/
 .vscode/
 .idea/
 Thumbs.db
@@ -69,5 +68,7 @@ Thumbs.db
 *.temp
 *.bak
 *.orig
-# GitHub Actions workflows are part of the deploy surface.
 docker-compose.override.yml
+docs/*
+!docs/
+!docs/extraction_spec.example.md
