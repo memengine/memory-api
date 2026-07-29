@@ -10,7 +10,6 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
 
 from api.db.cache import CacheService
 from api.db.models import AgentApiKey
@@ -121,12 +120,7 @@ class GlobalAgentService:
         return None
 
     async def get_public_profile(self, agent_id: str) -> GlobalAgentPublic | None:
-        result = await self.session.execute(
-            select(GlobalAgent)
-            .options(joinedload(GlobalAgent.owner_tenant))
-            .where(GlobalAgent.id == self._as_uuid(agent_id))
-        )
-        global_agent = result.scalar_one_or_none()
+        global_agent = await self.session.get(GlobalAgent, self._as_uuid(agent_id))
         if global_agent is None or not bool(global_agent.is_active) or not bool(global_agent.is_public):
             return None
         tenant_metadata = getattr(getattr(global_agent, "owner_tenant", None), "metadata_json", None) or {}
