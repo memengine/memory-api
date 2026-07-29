@@ -1,0 +1,97 @@
+name: Deploy Staging API to ECS
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_migrations:
+        description: "Run Alembic migrations before rolling services"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+  push:
+    branches:
+      - main
+    paths:
+      - "api/**"
+      - "docs/**"
+      - "sdk/**"
+      - "tests/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "Dockerfile"
+      - ".github/scripts/deploy-ecs.sh"
+      - ".github/workflows/deploy-staging-ecs.yml"
+
+concurrency:
+  group: staging-ecs-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: staging
+    permissions:
+      contents: read
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_API_SERVICE: ${{ secrets.ECS_API_SERVICE }}
+      ECS_WORKER_SERVICES: ${{ secrets.ECS_WORKER_SERVICES }}
+      ECS_PRIVATE_SUBNETS: ${{ secrets.ECS_PRIVATE_SUBNETS }}
+      ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
+      RUN_MIGRATIONS: ${{ github.event.inputs.run_migrations || 'true' }}
+      HEALTHCHECK_URL: ${{ secrets.STAGING_HEALTHCHECK_URL }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Compute image tags
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:staging-${SHORT_SHA}"
+          LATEST_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:staging-latest"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          echo "LATEST_URI=${LATEST_URI}" >> "$GITHUB_ENV"
+
+      - name: Log in to Amazon ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build Docker image
+        run: |
+          docker build --no-cache \
+            --build-arg INSTALL_DEV_DEPS=false \
+            -t "$IMAGE_URI" \
+            -t "$LATEST_URI" \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push "$IMAGE_URI"
+          docker push "$LATEST_URI"
+
+      - name: Deploy image to ECS services
+        run: bash .github/scripts/deploy-ecs.sh
+
+      - name: Smoke test staging API
+        if: ${{ env.HEALTHCHECK_URL != '' }}
+        run: curl --fail --show-error --silent "$HEALTHCHECK_URL"
+

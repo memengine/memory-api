@@ -1,0 +1,120 @@
+name: Deploy Production API to ECS
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_migrations:
+        description: "Run Alembic migrations before rolling production services"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      image_tag:
+        description: "Optional ECR image tag to deploy. Leave blank to build from the selected commit."
+        required: false
+        default: ""
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    permissions:
+      contents: read
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_API_SERVICE: ${{ secrets.ECS_API_SERVICE }}
+      ECS_WORKER_SERVICES: ${{ secrets.ECS_WORKER_SERVICES }}
+      ECS_PRIVATE_SUBNETS: ${{ secrets.ECS_PRIVATE_SUBNETS }}
+      ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
+      RUN_MIGRATIONS: ${{ github.event.inputs.run_migrations || 'true' }}
+      PRODUCTION_HEALTHCHECK_URL: ${{ secrets.PRODUCTION_HEALTHCHECK_URL }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set image metadata
+        run: |
+          FULL_SHA="${GITHUB_SHA}"
+          SHORT_SHA="${FULL_SHA::7}"
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          REQUESTED_TAG="${{ github.event.inputs.image_tag }}"
+          if [ -n "$REQUESTED_TAG" ]; then
+            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${REQUESTED_TAG}"
+            BUILD_IMAGE="false"
+          else
+            IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${SHORT_SHA}"
+            BUILD_IMAGE="true"
+          fi
+          LATEST_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+          echo "FULL_SHA=${FULL_SHA}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          echo "LATEST_URI=${LATEST_URI}" >> "$GITHUB_ENV"
+          echo "BUILD_IMAGE=${BUILD_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Authenticate Docker to ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build image
+        if: ${{ env.BUILD_IMAGE == 'true' }}
+        run: |
+          docker build --no-cache \
+            --build-arg INSTALL_DEV_DEPS=false \
+            -t "$IMAGE_URI" \
+            -t "$LATEST_URI" \
+            .
+
+      - name: Push image to ECR
+        if: ${{ env.BUILD_IMAGE == 'true' }}
+        run: |
+          docker push "$IMAGE_URI"
+          docker push "$LATEST_URI"
+
+      - name: Deploy image to ECS services
+        run: bash .github/scripts/deploy-ecs.sh
+
+      - name: Smoke test production health endpoint
+        run: curl --fail --show-error --silent "$PRODUCTION_HEALTHCHECK_URL"
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL is not configured; skipping Slack failure notification."
+            exit 0
+          fi
+
+          payload=$(cat <<EOF
+          {
+            "text": "MemoryOS production deploy failed for commit ${FULL_SHA} in workflow ${GITHUB_WORKFLOW}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          }
+          EOF
+          )
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"
