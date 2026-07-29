@@ -6,6 +6,7 @@ import math
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from pydantic import ValidationError
@@ -17,6 +18,11 @@ from api.services.llm_service import LLMService
 from api.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+try:  # Compatibility for tests and older injected Gemini clients.
+    from google.genai import types as genai_types
+except Exception:  # pragma: no cover - optional dependency guard
+    genai_types = None
 
 PROMPT_PATH = Path(__file__).with_name("prompts") / "extraction_prompt.txt"
 MAX_CHUNK_TOKENS = 4000
@@ -37,11 +43,13 @@ class ExtractionService:
         self.prompt_path = prompt_path or PROMPT_PATH
         self.system_prompt = self.prompt_path.read_text(encoding="utf-8")
         self.last_usage_events: list[dict[str, Any]] = []
-        self.llm_service = llm_service or LLMService(
-            provider_clients=None,
-            require_provider=self.client is None,
-            use_state_store=self.client is None,
-        )
+        self.llm_service = llm_service
+        if self.llm_service is None and self.client is None:
+            self.llm_service = LLMService(
+                provider_clients=None,
+                require_provider=True,
+                use_state_store=True,
+            )
 
     def extract(self, messages: list[dict[str, Any]], user_id: str) -> list[ExtractedMemory]:
         self.last_usage_events = []
@@ -70,13 +78,7 @@ class ExtractionService:
                 retry_feedback=retry_feedback,
             )
 
-            response = self.llm_service.complete_sync(
-                system_prompt=self.system_prompt,
-                user_message=user_prompt,
-                temperature=0.1,
-                max_tokens=2000,
-                response_format="json",
-            )
+            response = self._complete_extraction_prompt(user_prompt)
             raw_content = response.content or "{}"
             self._log_usage(
                 provider_name=response.provider_used,
@@ -116,6 +118,74 @@ class ExtractionService:
             chunk_index,
         )
         return []
+
+    def _complete_extraction_prompt(self, user_prompt: str) -> Any:
+        if self.client is not None:
+            return self._complete_with_legacy_client(user_prompt)
+
+        if self.llm_service is None:
+            self.llm_service = LLMService(
+                provider_clients=None,
+                require_provider=True,
+                use_state_store=True,
+            )
+        return self.llm_service.complete_sync(
+            system_prompt=self.system_prompt,
+            user_message=user_prompt,
+            temperature=0.1,
+            max_tokens=2000,
+            response_format="json",
+        )
+
+    def _complete_with_legacy_client(self, user_prompt: str) -> Any:
+        if genai_types is not None:
+            config: Any = genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                max_output_tokens=2000,
+            )
+        else:
+            config = {
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": 2000,
+            }
+
+        completion = self.client.models.generate_content(
+            model=self.model,
+            contents=user_prompt,
+            config=config,
+        )
+        raw_text = getattr(completion, "text", None)
+        if raw_text is None:
+            raw_text = self._extract_legacy_text(completion)
+
+        usage_metadata = getattr(completion, "usage_metadata", None)
+        input_tokens = int(getattr(usage_metadata, "prompt_token_count", 0) or 0)
+        output_tokens = int(getattr(usage_metadata, "candidates_token_count", 0) or 0)
+        total_tokens = getattr(usage_metadata, "total_token_count", None)
+        if total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+
+        return SimpleNamespace(
+            content=raw_text or "",
+            provider_used="gemini",
+            model_used=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=int(total_tokens or 0),
+            latency_ms=None,
+        )
+
+    @staticmethod
+    def _extract_legacy_text(completion: Any) -> str:
+        try:
+            candidates = getattr(completion, "candidates", None) or []
+            content = getattr(candidates[0], "content", None)
+            parts = getattr(content, "parts", None) or []
+            return str(getattr(parts[0], "text", "") or "")
+        except (IndexError, TypeError, AttributeError):
+            return ""
 
     @staticmethod
     def _messages_to_text(messages: list[dict[str, Any]]) -> str:
