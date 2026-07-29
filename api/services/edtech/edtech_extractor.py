@@ -998,9 +998,9 @@ def _extract_explicit_exam_date(lower: str) -> date | None:
 
     month_pattern = _month_name_pattern()
     patterns = (
-        rf"\b(?:on|by|before)\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{month_pattern})\b",
-        rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{month_pattern})\b",
-        rf"\b(?P<month>{month_pattern})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\b",
+        rf"\b(?:on|by|before)\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{month_pattern})(?:\s*,?\s*(?P<year>\d{{4}}))?\b",
+        rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{month_pattern})(?:\s*,?\s*(?P<year>\d{{4}}))?\b",
+        rf"\b(?P<month>{month_pattern})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,?\s*(?P<year>\d{{4}}))?\b",
     )
     today = date.today()
     for pattern in patterns:
@@ -1012,9 +1012,12 @@ def _extract_explicit_exam_date(lower: str) -> date | None:
         if month is None:
             continue
         try:
-            parsed = date(today.year, month, day)
+            year = match.groupdict().get("year")
+            parsed = date(int(year) if year else today.year, month, day)
         except ValueError:
             continue
+        if year:
+            return parsed
         return parsed if parsed >= today else date(today.year + 1, month, day)
     return None
 
