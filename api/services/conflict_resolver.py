@@ -1145,13 +1145,16 @@ class ConflictResolver:
             )
         incoming_identity = self._source_identity(incoming_provenance)
         existing_identity = self._source_identity(existing_provenance)
-        if not incoming_identity or incoming_identity != existing_identity:
-            return None
-
         incoming_observed_at = self._provenance_observed_at(incoming_provenance)
         existing_observed_at = self._provenance_observed_at(existing_provenance)
+        same_or_legacy_source = (
+            incoming_identity == existing_identity
+            or not incoming_identity
+            or not existing_identity
+        )
         if (
-            incoming_observed_at is not None
+            same_or_legacy_source
+            and incoming_observed_at is not None
             and existing_observed_at is not None
             and incoming_observed_at < existing_observed_at
         ):
