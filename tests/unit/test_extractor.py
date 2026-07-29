@@ -40,6 +40,45 @@ def _parse_conversation(block: str) -> list[dict[str, str]]:
     return messages
 
 
+def _find_conversation_block(section: str) -> str:
+    fenced_match = re.search(
+        r"^\*\*Conversation[^\n]*\*\*\s*\r?\n```[^\n]*\r?\n(.*?)\r?\n```",
+        section,
+        re.S | re.M,
+    )
+    if fenced_match is not None:
+        return fenced_match.group(1)
+
+    inline_fenced_match = re.search(
+        r"\*\*Conversation[^\n]*\*\*\s*```(.*?)```",
+        section,
+        re.S,
+    )
+    if inline_fenced_match is not None:
+        return inline_fenced_match.group(1)
+
+    plain_match = re.search(
+        r"^\*\*Conversation[^\n]*\*\*\s*(.*?)(?=^\*\*SHOULD extract)",
+        section,
+        re.S | re.M,
+    )
+    if plain_match is not None:
+        return plain_match.group(1)
+
+    raise AssertionError("Example is missing a Conversation block")
+
+
+def _find_should_extract_block(section: str) -> str:
+    match = re.search(
+        r"^\*\*SHOULD extract(?: / UPDATE)?[^\n]*\*\*\s*(.*?)(?=^\*\*Should NOT extract:|^\*\*Conflict resolution|^\*\*Note on scoring:|^\*\*Note:|^---|\Z)",
+        section,
+        re.S | re.M,
+    )
+    if match is None:
+        raise AssertionError("Example is missing a SHOULD extract block")
+    return match.group(1).strip()
+
+
 def _parse_examples() -> list[dict[str, object]]:
     text = SPEC_PATH.read_text(encoding="utf-8")
     examples: list[dict[str, object]] = []
@@ -52,17 +91,9 @@ def _parse_examples() -> list[dict[str, object]]:
     for match in matches:
         example_number = match.group(1)
         section = match.group(2)
-        conversation_match = re.search(r"\*\*Conversation.*?\*\*\s*```(.*?)```", section, re.S)
-        assert conversation_match is not None
-        conversation = _parse_conversation(conversation_match.group(1))
+        conversation = _parse_conversation(_find_conversation_block(section))
 
-        should_extract_match = re.search(
-            r"\*\*SHOULD extract(?: / UPDATE)?:\*\*(.*?)(?:\n\*\*Should NOT extract:|\n\*\*Conflict resolution|\n\*\*Note on scoring:|\n\*\*Note:|\n---)",
-            section,
-            re.S,
-        )
-        assert should_extract_match is not None
-        should_extract_block = should_extract_match.group(1).strip()
+        should_extract_block = _find_should_extract_block(section)
 
         expected_memories: list[dict[str, object]] = []
         if "NOTHING" not in should_extract_block.upper():
