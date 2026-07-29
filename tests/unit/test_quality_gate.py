@@ -58,18 +58,13 @@ class FakeRedis:
         return True
 
 
-class FakeAioModels:
+class FakeEmbeddingService:
     def __init__(self, embedding: list[float]) -> None:
-        self.embed_content = AsyncMock(
+        self.embed = AsyncMock(
             return_value=SimpleNamespace(
-                embeddings=[SimpleNamespace(values=embedding)]
+                vector=embedding,
             )
         )
-
-
-class FakeGenAIClient:
-    def __init__(self, embedding: list[float]) -> None:
-        self.aio = SimpleNamespace(models=FakeAioModels(embedding))
 
 
 def make_tenant_budget(
@@ -118,7 +113,7 @@ def build_service(
         session=session,
         cache_service=cache_service,
         budget_governor=governor,
-        client=FakeGenAIClient(embedding or [1.0, 0.0]),
+        embedding_service=FakeEmbeddingService(embedding or [1.0, 0.0]),
     )
     return service, session, redis_client, dispatch_task
 
