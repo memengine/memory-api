@@ -13,13 +13,37 @@ from sqlalchemy.orm import Session
 
 from api.db.models import LLMProviderConfig
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
-from api.infra.llm_providers import AnthropicProvider
-from api.infra.llm_providers import CohereProvider
-from api.infra.llm_providers import GeminiProvider
-from api.infra.llm_providers import LLMProvider
-from api.infra.llm_providers import LocalProvider
-from api.infra.llm_providers import OpenAIProvider
+from api.infra.llm_providers.base import LLMProvider
 
+
+def _gemini_provider(**overrides) -> LLMProvider:
+    from api.infra.llm_providers.gemini_provider import GeminiProvider
+
+    return GeminiProvider(**overrides)
+
+
+def _anthropic_provider(**overrides) -> LLMProvider:
+    from api.infra.llm_providers.anthropic_provider import AnthropicProvider
+
+    return AnthropicProvider(**overrides)
+
+
+def _cohere_provider(**overrides) -> LLMProvider:
+    from api.infra.llm_providers.cohere_provider import CohereProvider
+
+    return CohereProvider(**overrides)
+
+
+def _local_provider(**overrides) -> LLMProvider:
+    from api.infra.llm_providers.local_provider import LocalProvider
+
+    return LocalProvider(**overrides)
+
+
+def _openai_provider(**overrides) -> LLMProvider:
+    from api.infra.llm_providers.openai_provider import OpenAIProvider
+
+    return OpenAIProvider(**overrides)
 
 class EmbeddingUnavailableError(RuntimeError):
     pass
@@ -51,11 +75,11 @@ class LLMRouter:
         self.sync_session = sync_session
         self.redis_client = redis_client
         self.provider_factories = provider_factories or {
-            "gemini": lambda **overrides: GeminiProvider(**overrides),
-            "anthropic": lambda **overrides: AnthropicProvider(**overrides),
-            "cohere": lambda **overrides: CohereProvider(**overrides),
-            "local": lambda **overrides: LocalProvider(**overrides),
-            "openai": lambda **overrides: OpenAIProvider(**overrides),
+            "gemini": lambda **overrides: _gemini_provider(**overrides),
+            "anthropic": lambda **overrides: _anthropic_provider(**overrides),
+            "cohere": lambda **overrides: _cohere_provider(**overrides),
+            "local": lambda **overrides: _local_provider(**overrides),
+            "openai": lambda **overrides: _openai_provider(**overrides),
         }
 
     def get_provider(self, provider_name: str, **overrides) -> LLMProvider:
