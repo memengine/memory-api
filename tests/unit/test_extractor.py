@@ -14,7 +14,7 @@ from api.services.extractor import ExtractionService
 from api.settings import get_settings
 
 
-SPEC_PATH = Path("docs/extraction_spec.md")
+SPEC_PATH = Path(__file__).resolve().parents[2] / "docs" / "extraction_spec.md"
 
 
 def _make_completion(content: str, prompt_tokens: int = 100, completion_tokens: int = 50) -> SimpleNamespace:
@@ -44,9 +44,9 @@ def _parse_examples() -> list[dict[str, object]]:
     text = SPEC_PATH.read_text(encoding="utf-8")
     examples: list[dict[str, object]] = []
     matches = re.finditer(
-        r"### Example (\d+) .*?\n(.*?)(?=\n### Example \d+ |\n## 4\. What Should NEVER Be Stored)",
+        r"^### Example\s+(\d+)\b[^\n]*\n(.*?)(?=^### Example\s+\d+\b|^##\s+4\.\s+What Should NEVER Be Stored|\Z)",
         text,
-        re.S,
+        re.S | re.M,
     )
 
     for match in matches:
