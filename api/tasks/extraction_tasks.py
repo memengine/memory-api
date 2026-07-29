@@ -137,11 +137,7 @@ def _sanitize_job_error(exc: Exception | str) -> tuple[str, str]:
 def _capture_error_detail() -> str:
     error_detail = traceback.format_exc()
     if len(error_detail) > 3000:
-        error_detail = (
-            error_detail[:1500]
-            + "\n\n... [truncated] ...\n\n"
-            + error_detail[-1500:]
-        )
+        error_detail = error_detail[-2000:]
     return error_detail
 
 
