@@ -269,10 +269,15 @@ class QualityGateService:
             if previous_query and self._has_conflicting_salient_entities(previous_query, query_text):
                 similarity_scores.append(0.0)
                 continue
-            if previous_query and self._token_overlap(previous_query, query_text) < MIN_LEXICAL_OVERLAP_FOR_SEMANTIC_DUPLICATE:
+            semantic_similarity = self._cosine_similarity(embedding, previous_embedding)
+            if (
+                previous_query
+                and semantic_similarity < SEMANTIC_DUPLICATE_THRESHOLD
+                and self._token_overlap(previous_query, query_text) < MIN_LEXICAL_OVERLAP_FOR_SEMANTIC_DUPLICATE
+            ):
                 similarity_scores.append(0.0)
                 continue
-            similarity_scores.append(self._cosine_similarity(embedding, previous_embedding))
+            similarity_scores.append(semantic_similarity)
 
         await self._store_recent_query(redis_key, query_text=query_text, embedding=embedding)
 
