@@ -880,17 +880,22 @@ class ConflictResolver:
             conflict_type=conflict_type,
         )
 
-        try:
-            response = self.llm_service.complete_sync(
-                system_prompt=self._system_prompt_for_conflict_type(conflict_type),
-                user_message=content,
-                temperature=0.0,
-                max_tokens=200,
-                response_format="json",
-            )
-            raw_content = response.content
-        except AllProvidersFailedError:
-            raw_content = "{}"
+        raw_content = self._complete_with_legacy_client(
+            system_prompt=self._system_prompt_for_conflict_type(conflict_type),
+            user_message=content,
+        )
+        if raw_content is None:
+            try:
+                response = self.llm_service.complete_sync(
+                    system_prompt=self._system_prompt_for_conflict_type(conflict_type),
+                    user_message=content,
+                    temperature=0.0,
+                    max_tokens=200,
+                    response_format="json",
+                )
+                raw_content = response.content
+            except AllProvidersFailedError:
+                raw_content = "{}"
 
         payload = json.loads(raw_content or "{}")
         action = self._action_from_payload(payload)
@@ -962,6 +967,27 @@ class ConflictResolver:
             "Do not include markdown or explanation outside JSON."
         )
 
+    def _complete_with_legacy_client(self, *, system_prompt: str, user_message: str) -> str | None:
+        """Support older tests/integrations that inject a Gemini-style client."""
+        client = self.client
+        if client is None or not hasattr(client, "models"):
+            return None
+
+        try:
+            response = client.models.generate_content(
+                model=self.model,
+                contents=[system_prompt, user_message],
+                generation_config={
+                    "temperature": 0.0,
+                    "max_output_tokens": 200,
+                    "response_mime_type": "application/json",
+                },
+            )
+        except Exception:
+            return None
+
+        text = getattr(response, "text", None)
+        return str(text) if text else "{}"
     @staticmethod
     def _action_from_payload(payload: dict[str, Any]) -> str:
         if payload.get("archive_A") is True:
@@ -1013,11 +1039,32 @@ class ConflictResolver:
         )
 
     @staticmethod
+    def _authority_rules(provenance: dict[str, Any] | None) -> dict[str, Any]:
+        return dict((provenance or {}).get("authority_rules") or {})
+
+    @classmethod
+    def _has_explicit_authority_rules(
+        cls,
+        provenance: dict[str, Any] | None,
+        category: str,
+    ) -> bool:
+        rules = cls._authority_rules(provenance)
+        category_rules = dict(rules.get("categories") or {})
+        return category in category_rules or "default_priority" in rules
+
+    @staticmethod
+    def _source_identity(provenance: dict[str, Any] | None) -> str | None:
+        provenance = provenance or {}
+        raw_identity = provenance.get("writer_id") or provenance.get("service")
+        return str(raw_identity) if raw_identity else None
+
+    @classmethod
     def _authority_priority(
+        cls,
         provenance: dict[str, Any] | None,
         category: str,
     ) -> int:
-        rules = dict((provenance or {}).get("authority_rules") or {})
+        rules = cls._authority_rules(provenance)
         category_rules = dict(rules.get("categories") or {})
         raw_priority = category_rules.get(category, rules.get("default_priority", 50))
         try:
@@ -1030,15 +1077,31 @@ class ConflictResolver:
         new_memory: ExtractedMemory,
         existing_memory: Memory,
     ) -> ConflictDecision | None:
+        incoming_provenance = dict(self.provenance_snapshot or {})
+        existing_provenance = dict(
+            dict(existing_memory.metadata_json or {}).get("provenance") or {}
+        )
         incoming_priority = self._authority_priority(
-            self.provenance_snapshot,
+            incoming_provenance,
             new_memory.category,
         )
         existing_priority = self._authority_priority(
-            dict(existing_memory.metadata_json or {}).get("provenance"),
+            existing_provenance,
             existing_memory.category.value,
         )
-        if incoming_priority > existing_priority:
+        incoming_has_authority = self._has_explicit_authority_rules(
+            incoming_provenance,
+            new_memory.category,
+        )
+        existing_has_authority = self._has_explicit_authority_rules(
+            existing_provenance,
+            existing_memory.category.value,
+        )
+        if (
+            incoming_has_authority
+            and existing_has_authority
+            and incoming_priority > existing_priority
+        ):
             return ConflictDecision(
                 action="UPDATE",
                 reasoning=(
@@ -1057,7 +1120,11 @@ class ConflictResolver:
                     },
                 ),
             )
-        if incoming_priority < existing_priority:
+        if (
+            incoming_has_authority
+            and existing_has_authority
+            and incoming_priority < existing_priority
+        ):
             return ConflictDecision(
                 action="REJECT",
                 reasoning=(
@@ -1076,10 +1143,13 @@ class ConflictResolver:
                     },
                 ),
             )
-        incoming_observed_at = self._provenance_observed_at(self.provenance_snapshot)
-        existing_observed_at = self._provenance_observed_at(
-            dict(existing_memory.metadata_json or {}).get("provenance")
-        )
+        incoming_identity = self._source_identity(incoming_provenance)
+        existing_identity = self._source_identity(existing_provenance)
+        if not incoming_identity or incoming_identity != existing_identity:
+            return None
+
+        incoming_observed_at = self._provenance_observed_at(incoming_provenance)
+        existing_observed_at = self._provenance_observed_at(existing_provenance)
         if (
             incoming_observed_at is not None
             and existing_observed_at is not None
@@ -1123,6 +1193,14 @@ class ConflictResolver:
         ):
             return False
         if new_memory.content.strip().casefold() == existing_memory.content.strip().casefold():
+            return False
+        if not (
+            self._has_explicit_authority_rules(incoming, new_memory.category)
+            and self._has_explicit_authority_rules(
+                existing,
+                existing_memory.category.value,
+            )
+        ):
             return False
         return self._authority_priority(
             incoming,
