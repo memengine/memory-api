@@ -1301,10 +1301,10 @@ async def _get_system_cost_summary(session: AsyncSession) -> CostSummaryResponse
             )
         )
     ).one()
-    total_extraction_calls_mtd = int(system_extraction_row.add_calls or 0)
-    jobs_with_memories = int(system_extraction_row.jobs_with_memories or 0)
-    nothing_to_extract_jobs = int(system_extraction_row.nothing_to_extract_jobs or 0)
-    avg_extraction_tokens = round(float(system_extraction_row.avg_extraction_tokens or 0.0), 2)
+    total_extraction_calls_mtd = int(getattr(system_extraction_row, "add_calls", 0) or 0)
+    jobs_with_memories = int(getattr(system_extraction_row, "jobs_with_memories", 0) or 0)
+    nothing_to_extract_jobs = int(getattr(system_extraction_row, "nothing_to_extract_jobs", 0) or 0)
+    avg_extraction_tokens = round(float(getattr(system_extraction_row, "avg_extraction_tokens", 0.0) or 0.0), 2)
     extraction_success_rate = (
         round(jobs_with_memories / total_extraction_calls_mtd, 4)
         if total_extraction_calls_mtd > 0
@@ -2176,9 +2176,9 @@ async def dead_letter_jobs(
                 "status": job.status.value,
                 "attempts": int(job.attempts or 0),
                 "queue_name": job.queue_name,
-                "error": (dead_letter.error if dead_letter is not None else None) or job.error,
-                "error_type": (dead_letter.error_type if dead_letter is not None else None) or job.error_type,
-                "payload": (dead_letter.payload if dead_letter is not None else None) or job.payload,
+                "error": (getattr(dead_letter, "error", None) if dead_letter is not None else None) or getattr(job, "error", None),
+                "error_type": (getattr(dead_letter, "error_type", None) if dead_letter is not None else None) or getattr(job, "error_type", None),
+                "payload": (getattr(dead_letter, "payload", None) if dead_letter is not None else None) or getattr(job, "payload", None),
                 "queued_at": None
                 if getattr(job, "created_at", None) is None and getattr(job, "queued_at", None) is None
                 else (getattr(job, "created_at", None) or getattr(job, "queued_at", None)).isoformat(),
