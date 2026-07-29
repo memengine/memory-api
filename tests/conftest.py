@@ -8,8 +8,7 @@ import pytest
 
 TEST_ADMIN_SECRET = "test-secret-32-chars-minimum-xyz!"
 
-if len(os.environ.get("ADMIN_SECRET", "").strip()) < 32:
-    os.environ["ADMIN_SECRET"] = TEST_ADMIN_SECRET
+os.environ["ADMIN_SECRET"] = TEST_ADMIN_SECRET
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
