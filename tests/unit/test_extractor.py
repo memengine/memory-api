@@ -35,13 +35,15 @@ def _parse_conversation(block: str) -> list[dict[str, str]]:
         if not line or ":" not in line:
             continue
         speaker, content = line.split(":", 1)
-        role = "assistant" if speaker.strip().lower() in {"ai", "assistant"} else "user"
+        normalized_speaker = speaker.strip().lower().strip("[]")
+        role = "assistant" if normalized_speaker in {"ai", "assistant"} else "user"
         messages.append({"role": role, "content": content.strip()})
     return messages
 
 
-_CONVERSATION_HEADING_RE = r"(?:Conversation|Input|Transcript|Dialog)[^*\n]*"
-_SHOULD_EXTRACT_HEADING_RE = r"^\*\*SHOULD extract(?: / UPDATE)?[^\n]*\*\*"
+_CONVERSATION_HEADING_RE = r"(?:Conversation|Input|Transcript|Dialog)[^*\n:]*"
+_CONVERSATION_MARKER_RE = rf"(?:^\s*\*\*{_CONVERSATION_HEADING_RE}:?\*\*|^\s*{_CONVERSATION_HEADING_RE}:)"
+_SHOULD_EXTRACT_HEADING_RE = r"^\s*(?:\*\*SHOULD extract(?: / UPDATE)?[^\n]*\*\*|Expected:)"
 
 
 def _strip_markdown_fence(block: str) -> str:
@@ -57,14 +59,14 @@ def _contains_conversation_lines(block: str) -> bool:
         if ":" not in line:
             continue
         speaker, _ = line.split(":", 1)
-        if speaker.strip().lower() in allowed_speakers:
+        if speaker.strip().lower().strip("[]") in allowed_speakers:
             return True
     return False
 
 
 def _find_conversation_block(section: str, example_number: str | None = None) -> str:
     fenced_match = re.search(
-        rf"^\*\*{_CONVERSATION_HEADING_RE}\*\*\s*\r?\n```[^\n]*\r?\n(.*?)\r?\n```",
+        rf"{_CONVERSATION_MARKER_RE}\s*\r?\n```[^\n]*\r?\n(.*?)\r?\n```",
         section,
         re.S | re.M | re.I,
     )
@@ -72,15 +74,15 @@ def _find_conversation_block(section: str, example_number: str | None = None) ->
         return fenced_match.group(1)
 
     inline_fenced_match = re.search(
-        rf"\*\*{_CONVERSATION_HEADING_RE}\*\*\s*```[^\n]*\r?\n?(.*?)```",
+        rf"{_CONVERSATION_MARKER_RE}\s*```[^\s`]*\s*(.*?)\s*```",
         section,
-        re.S | re.I,
+        re.S | re.M | re.I,
     )
     if inline_fenced_match is not None:
         return inline_fenced_match.group(1)
 
     plain_match = re.search(
-        rf"^\*\*{_CONVERSATION_HEADING_RE}\*\*\s*(.*?)(?={_SHOULD_EXTRACT_HEADING_RE})",
+        rf"{_CONVERSATION_MARKER_RE}\s*(.*?)(?={_SHOULD_EXTRACT_HEADING_RE})",
         section,
         re.S | re.M | re.I,
     )
@@ -94,7 +96,7 @@ def _find_conversation_block(section: str, example_number: str | None = None) ->
     )
     if fallback_match is not None:
         fallback = re.sub(
-            rf"^\*\*{_CONVERSATION_HEADING_RE}\*\*\s*",
+            rf"{_CONVERSATION_MARKER_RE}\s*",
             "",
             fallback_match.group(1),
             flags=re.M | re.I,
@@ -111,9 +113,9 @@ def _find_conversation_block(section: str, example_number: str | None = None) ->
 
 def _find_should_extract_block(section: str) -> str:
     match = re.search(
-        r"^\*\*SHOULD extract(?: / UPDATE)?[^\n]*\*\*\s*(.*?)(?=^\*\*Should NOT extract:|^\*\*Conflict resolution|^\*\*Note on scoring:|^\*\*Note:|^---|\Z)",
+        r"^\s*(?:\*\*SHOULD extract(?: / UPDATE)?[^\n]*\*\*|Expected:)\s*(.*?)(?=^\s*\*\*Should NOT extract:|^\s*\*\*Conflict resolution|^\s*\*\*Note on scoring:|^\s*\*\*Note:|^---|\Z)",
         section,
-        re.S | re.M,
+        re.S | re.M | re.I,
     )
     if match is None:
         raise AssertionError("Example is missing a SHOULD extract block")
@@ -126,7 +128,7 @@ def _parse_examples() -> list[dict[str, object]]:
     matches = re.finditer(
         r"^### Example\s+(\d+)\b[^\n]*\n(.*?)(?=^### Example\s+\d+\b|^##\s+4\.\s+What Should NEVER Be Stored|\Z)",
         text,
-        re.S | re.M,
+        re.S | re.M | re.I,
     )
 
     for match in matches:
