@@ -72,4 +72,4 @@ Thumbs.db
 docker-compose.override.yml
 docs/*
 !docs/
-!docs/extraction_spec.example.md
+!docs/extraction_spec.md
