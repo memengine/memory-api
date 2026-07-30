@@ -50,7 +50,7 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Copy extraction spec example
-        run: cp docs/extraction_spec.example.md docs/extraction_spec.md
+        run: cp docs/extraction_spec.md docs/extraction_spec.md
 
       - name: Run migrations
         env:
