@@ -28,7 +28,10 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
 
         tenant_id = getattr(request.state, "tenant_id", None)
         auth_scheme = getattr(request.state, "auth_scheme", None)
-        cache_service = getattr(request.app.state, "cache_service", None)
+        app = request.app
+        if app is None:
+            return await call_next(request)
+        cache_service = getattr(app.state, "cache_service", None)
 
         if not tenant_id or auth_scheme != "apikey" or not hasattr(cache_service, "client"):
             return await call_next(request)
