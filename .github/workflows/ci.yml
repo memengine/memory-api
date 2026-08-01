@@ -50,8 +50,17 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Validate extraction spec
-        run: test -f docs/extraction_spec.md
+        run: |
+          test -f docs/extraction_spec.md
+          python - <<'PY'
+          from pathlib import Path
+          import re
 
+          spec = Path("docs/extraction_spec.md").read_text(encoding="utf-8")
+          count = len(re.findall(r"^### Example\s+\d+\b", spec, flags=re.MULTILINE))
+          if count != 20:
+              raise SystemExit(f"docs/extraction_spec.md must contain 20 golden examples; found {count}")
+          PY
       - name: Run migrations
         env:
           DATABASE_URL: postgresql+asyncpg://memoryos:testpassword@localhost:5432/memoryos_test
@@ -76,7 +85,7 @@ jobs:
         run: pytest tests/unit/ -v --tb=short
 
       - name: Type check
-        run: python -m mypy api/ --ignore-missing-imports
+        run: python -m mypy api/ --ignore-missing-imports --cache-dir=/tmp/mypy-cache
 
   sdk-typecheck:
     runs-on: ubuntu-latest
