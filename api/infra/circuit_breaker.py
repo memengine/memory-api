@@ -337,7 +337,7 @@ class CircuitBreaker:
         return (host, int(port))
 
     async def _await_with_fast_timeout(self, awaitable: Awaitable[Any], *, timeout: float) -> Any:
-        task = asyncio.create_task(awaitable)
+        task = asyncio.ensure_future(awaitable)
         done, pending = await asyncio.wait({task}, timeout=timeout)
         if task in done:
             return await task
@@ -347,7 +347,7 @@ class CircuitBreaker:
         raise asyncio.TimeoutError
 
     @staticmethod
-    def _consume_background_exception(task: asyncio.Task[Any]) -> None:
+    def _consume_background_exception(task: asyncio.Future[Any]) -> None:
         try:
             task.exception()
         except (asyncio.CancelledError, Exception):
