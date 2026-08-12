@@ -44,6 +44,7 @@ from api.services.conflict_decision_evidence import review_evidence
 from api.services.conflict_routing.generic_router import GenericEntityRouter
 from api.services.conflict_routing.registry import get_router
 from api.services.extractor import ExtractedMemory
+from api.services.temporal_validity import temporal_validity_from_provenance
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
@@ -1335,15 +1336,6 @@ class ConflictResolver:
         self.session.add(conflict)
         if hasattr(self.session, "flush"):
             self.session.flush()
-        _queue_user_session_clarification(
-            db_session=self.session,
-            conflict=conflict,
-            target_memory=existing_memory,
-            question_context=(
-                "Two trusted services reported different values. "
-                "Which memory is correct?"
-            ),
-        )
         self.last_cross_user_conflicts_flagged += 1
 
     def _record_shared_context_for_stored_memory(
@@ -1539,6 +1531,10 @@ class ConflictResolver:
             else (self.default_source_conversation_id or uuid.uuid4())
         )
 
+        effective_from, effective_until = temporal_validity_from_provenance(
+            self.provenance_snapshot
+        )
+
         memory = Memory(
             id=memory_id,
             user_id=uuid.UUID(user_id) if self._is_uuid(user_id) else user_id,  # type: ignore[arg-type]
@@ -1558,6 +1554,8 @@ class ConflictResolver:
             source_conversation_id=resolved_source_conversation_id,
             source_event_id=self.default_source_event_id,
             expires_at=None,
+            effective_from=effective_from,
+            effective_until=effective_until,
             metadata_json={
                 "expiry": extracted_memory.expiry,
                 "reasoning": extracted_memory.reasoning,
@@ -1588,6 +1586,8 @@ class ConflictResolver:
             tenant_id=tenant_id,
             proxy_user_id=str(memory.proxy_user_id),
             resolution=resolution,
+            decision_evidence=decision_evidence,
+            predecessor_memory_id=previous_version_id,
         )
 
         if not is_archived:
@@ -1624,6 +1624,8 @@ class ConflictResolver:
         tenant_id: str | None,
         proxy_user_id: str | None,
         resolution: str,
+        decision_evidence: dict[str, Any] | None,
+        predecessor_memory_id: str | None,
     ) -> None:
         if tenant_id is None or proxy_user_id is None:
             return
@@ -1635,6 +1637,7 @@ class ConflictResolver:
                 provenance=self.provenance_snapshot,
                 resolution=resolution,
                 decision_evidence=decision_evidence,
+                predecessor_memory_id=predecessor_memory_id,
             )
         except Exception:
             # The claim ledger is governance metadata. It must never block the
