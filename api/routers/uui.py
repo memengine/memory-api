@@ -25,6 +25,7 @@ from jose import JWTError
 from jose import jwt
 from sqlalchemy import desc
 from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.orm import selectinload
@@ -1511,8 +1512,16 @@ async def list_my_clarifications(
                 selectinload(ClarificationQueue.conflict).selectinload(CrossUserConflict.user_a_memory),
                 selectinload(ClarificationQueue.conflict).selectinload(CrossUserConflict.user_b_memory),
             )
+            .outerjoin(
+                CrossUserConflict,
+                ClarificationQueue.conflict_id == CrossUserConflict.id,
+            )
             .where(
                 ClarificationQueue.proxy_user_id.in_(proxy_ids),
+                or_(
+                    ClarificationQueue.conflict_id.is_(None),
+                    CrossUserConflict.resolution_path == "user_session",
+                ),
                 ClarificationQueue.status.in_(
                     [ClarificationQueueStatus.pending, ClarificationQueueStatus.triggered]
                 ),
@@ -1608,6 +1617,12 @@ async def answer_my_clarification(
                 status_code=409,
                 code="CLR_409",
                 error="clarification_already_resolved",
+            )
+        if conflict.resolution_path != "user_session":
+            raise APIError(
+                status_code=400,
+                code="CLR_400",
+                error="conflict_not_user_session",
             )
         answer = payload.answer if payload.answer in {"A", "B", "both"} else "neither"
         reason = payload.free_text or {
