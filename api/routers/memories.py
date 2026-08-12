@@ -13,6 +13,7 @@ from fastapi import Query
 from fastapi import Request
 from fastapi import Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,7 @@ from api.dependencies import get_quality_gate_service
 from api.dependencies import get_retriever_service
 from api.db.models import ClarificationQueue
 from api.db.models import ClarificationQueueStatus
+from api.db.models import CrossUserConflict
 from api.db.models import EdTechMemory
 from api.db.models import Tenant
 from api.db.cache import CacheService
@@ -340,6 +342,7 @@ async def retrieve_memories(
         agent_id=payload.agent_id,
         tenant_id=tenant_id,
         time_filter_days=payload.time_filter_days,
+        as_of=payload.as_of,
         quota_mode=getattr(getattr(request.state, "quota_envelope", None), "mode", None)
         or getattr(request.state, "quota_mode", None),
     )
@@ -495,8 +498,16 @@ async def _pop_next_clarification_question(
 ) -> str | None:
     result = await session.execute(
         select(ClarificationQueue)
+        .outerjoin(
+            CrossUserConflict,
+            ClarificationQueue.conflict_id == CrossUserConflict.id,
+        )
         .where(
             ClarificationQueue.proxy_user_id == proxy_user_id,
+            or_(
+                ClarificationQueue.conflict_id.is_(None),
+                CrossUserConflict.resolution_path == "user_session",
+            ),
             ClarificationQueue.status == ClarificationQueueStatus.pending,
             ClarificationQueue.trigger_on == "next_session",
             ClarificationQueue.expires_at > utc_now(),
