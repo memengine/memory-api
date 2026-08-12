@@ -214,6 +214,7 @@ class QdrantService:
         user_id: str | None = None,
         limit: int = 20,
         category_filter: str | None = None,
+        agent_id: str | None = None,
         include_archived: bool = False,
         collection_name: str | None = None,
         collection_names: list[str] | None = None,
@@ -227,6 +228,7 @@ class QdrantService:
             proxy_user_id=proxy_user_id,
             user_id=user_id,
             category_filter=category_filter,
+            agent_id=agent_id,
             include_archived=include_archived,
             created_after=created_after,
         )
@@ -266,6 +268,7 @@ class QdrantService:
         proxy_user_id: str | None,
         user_id: str | None,
         category_filter: str | None,
+        agent_id: str | None,
         include_archived: bool,
         created_after: datetime | str | None,
     ) -> list[qmodels.FieldCondition]:
@@ -302,6 +305,14 @@ class QdrantService:
                 )
             )
 
+        if agent_id is not None:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="agent_id",
+                    match=qmodels.MatchValue(value=str(agent_id)),
+                )
+            )
+
         if not include_archived:
             must_conditions.append(
                 qmodels.FieldCondition(
@@ -329,6 +340,7 @@ class QdrantService:
         user_id: str | None = None,
         limit: int = 20,
         category_filter: str | None = None,
+        agent_id: str | None = None,
         include_archived: bool = False,
         collection_name: str | None = None,
         collection_names: list[str] | None = None,
@@ -343,6 +355,7 @@ class QdrantService:
                 user_id=user_id,
                 limit=limit,
                 category_filter=category_filter,
+                agent_id=agent_id,
                 include_archived=include_archived,
                 collection_name=collection_name,
                 collection_names=collection_names,
@@ -355,6 +368,7 @@ class QdrantService:
             proxy_user_id=proxy_user_id,
             user_id=user_id,
             category_filter=category_filter,
+            agent_id=agent_id,
             include_archived=include_archived,
             created_after=created_after,
         )
