@@ -723,6 +723,12 @@ class Conversation(Base):
 
 class Memory(Base):
     __tablename__ = "memories"
+    __table_args__ = (
+        CheckConstraint(
+            "effective_from IS NULL OR effective_until IS NULL OR effective_until > effective_from",
+            name="ck_memories_effective_interval",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -779,6 +785,12 @@ class Memory(Base):
         server_default=text("0"),
     )
     expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     previous_version_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -971,7 +983,17 @@ class MemoryClaimRevision(Base):
         Index("ix_memory_claim_revisions_memory", "memory_id"),
         Index("ix_memory_claim_revisions_domain_field", "source_domain", "source_field"),
         Index("ix_memory_claim_revisions_versions", "schema_version", "processor_version"),
+        Index(
+            "uq_memory_claim_revisions_one_activated",
+            "claim_id",
+            unique=True,
+            postgresql_where=text("status = 'activated'"),
+        ),
         CheckConstraint("schema_version > 0", name="ck_memory_claim_revisions_schema_version_positive"),
+        CheckConstraint(
+            "effective_from IS NULL OR effective_until IS NULL OR effective_until > effective_from",
+            name="ck_memory_claim_revisions_effective_interval",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1017,6 +1039,12 @@ class MemoryClaimRevision(Base):
         server_default=text("0"),
     )
     observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     evidence_refs: Mapped[list[dict[str, Any]]] = mapped_column(
@@ -1366,7 +1394,7 @@ class SupportMemory(Base):
             name="ck_support_memories_support_type",
         ),
         CheckConstraint(
-            "support_type_source IN ('detected','tenant_configured')",
+            "support_type_source IN ('detected','allowed_detected','tenant_configured')",
             name="ck_support_memories_support_type_source",
         ),
     )
