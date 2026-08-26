@@ -90,12 +90,6 @@ class GlobalAgentService:
             return None
 
         prefix = raw_key[:12]
-        cached_agent_id = await self._get_cached_agent_id(prefix)
-        if cached_agent_id is not None:
-            global_agent = await self.session.get(GlobalAgent, self._as_uuid(cached_agent_id))
-            if global_agent is not None and bool(global_agent.is_active):
-                return global_agent
-
         result = await self.session.execute(
             select(AgentApiKey)
             .where(

@@ -137,6 +137,31 @@ async def test_resolve_from_api_key_returns_agent_for_valid_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cached_prefix_does_not_authenticate_a_forged_key() -> None:
+    session = FakeSession()
+    cache_client = FakeRedisClient()
+    cache_service = type("CacheService", (), {"client": cache_client, "breaker": None})()
+    service = GlobalAgentService(session=session, cache_service=cache_service)
+    agent, raw_key = await service.register(
+        tenant_id=str(uuid.uuid4()),
+        name="Cached Agent",
+        description=None,
+        logo_url=None,
+        website_url=None,
+        default_categories_requested=["fact"],
+        redirect_uri="https://example.com/return",
+    )
+
+    assert (await service.resolve_from_api_key(raw_key)).id == agent.id
+    forged_key = raw_key[:12] + ("0" * (len(raw_key) - 12))
+    assert forged_key != raw_key
+
+    resolved = await service.resolve_from_api_key(forged_key)
+
+    assert resolved is None
+
+
+@pytest.mark.asyncio
 async def test_get_public_profile_hides_owner_tenant_id() -> None:
     session = FakeSession()
     service = GlobalAgentService(session=session)
