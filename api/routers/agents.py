@@ -30,6 +30,7 @@ from api.schemas.uui_schemas import GlobalAgentRegistrationData
 from api.schemas.uui_schemas import GlobalAgentRegistrationResponse
 from api.services.agent_service import AgentService
 from api.services.global_agent_service import GlobalAgentService
+from api.services.global_agent_retirement_service import GlobalAgentRetirementService
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
 
@@ -125,6 +126,31 @@ async def register_global_agent(
         timestamp=utc_now(),
     )
 
+
+@router.post("/global/{agent_id}/retire")
+async def retire_global_agent(
+    request: Request,
+    agent_id: str,
+    session: DbSession,
+    authenticated_tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+):
+    result = await GlobalAgentRetirementService(session=session).retire(
+        tenant_id=authenticated_tenant_id,
+        agent_id=agent_id,
+    )
+    if result is None:
+        raise APIError(status_code=404, code="AGN_404", error="global_agent_not_found")
+    return {
+        "data": {
+            "agent_id": str(result.agent.id),
+            "retired": True,
+            "revoked_api_keys": result.revoked_api_keys,
+            "revoked_grants": result.revoked_grants,
+            "memories_deleted": 0,
+        },
+        "request_id": get_request_id(request),
+        "timestamp": utc_now(),
+    }
 
 @router.get("", response_model=AgentListResponse)
 async def list_agents(
