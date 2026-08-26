@@ -17,6 +17,7 @@ from api.schemas.extraction_schemas import ExtractionResult
 from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.llm_service import LLMService
+from api.settings import get_settings
 
 try:  # pragma: no cover - exercised implicitly when dependency is installed.
     import tiktoken
@@ -79,6 +80,9 @@ class ExtractionService:
         spec_path: Path | str | None = None,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         pending_confidence_threshold: float = DEFAULT_PENDING_CONFIDENCE_THRESHOLD,
+        importance_shadow_enabled: bool | None = None,
+        app_env: str | None = None,
+        importance_shadow_service: Any | None = None,
     ) -> None:
         self.client = client
         self.llm_service = llm_service or LLMService(
@@ -89,6 +93,20 @@ class ExtractionService:
         self.cache_service = cache_service
         self._confidence_threshold = float(confidence_threshold)
         self._pending_confidence_threshold = min(float(pending_confidence_threshold), self._confidence_threshold)
+        settings = get_settings() if importance_shadow_enabled is None or app_env is None else None
+        resolved_shadow_enabled = (
+            settings.importance_shadow_enabled
+            if importance_shadow_enabled is None and settings is not None
+            else bool(importance_shadow_enabled)
+        )
+        resolved_app_env = settings.app_env if app_env is None and settings is not None else str(app_env or "")
+        self._importance_shadow_enabled = bool(
+            resolved_shadow_enabled and resolved_app_env.strip().lower() == "development"
+        )
+        self._importance_shadow_review_dir = (
+            settings.importance_shadow_review_dir if settings is not None else ""
+        )
+        self._importance_shadow_service = importance_shadow_service
         resolved_spec_path = Path(spec_path) if spec_path is not None else self._default_spec_path()
         parsed = self._load_spec(resolved_spec_path)
         self._category_definitions = parsed.category_definitions
@@ -169,6 +187,14 @@ class ExtractionService:
         provider_used = response.provider_used or provider_used
         await self._record_provider_usage(response.provider_used)
         kept, pending, filtered_count, nothing_to_extract = self._parse_and_validate_response(response.content)
+        self._observe_importance_shadow(
+            kept=kept,
+            pending=pending,
+            messages=messages,
+            tenant_id=tenant_id,
+            proxy_user_id=resolved_user_id,
+            job_id=job_id,
+        )
         LOGGER.info(
             "extraction_completed",
             extra={
@@ -203,6 +229,58 @@ class ExtractionService:
                 "compositional_error": composition_prepass_error,
             },
         )
+
+    def _observe_importance_shadow(
+        self,
+        *,
+        kept: list[ExtractedMemory],
+        pending: list[PendingExtractedMemory],
+        messages: list[dict[str, Any]],
+        tenant_id: str | None,
+        proxy_user_id: str,
+        job_id: str | None,
+    ) -> None:
+        if not self._importance_shadow_enabled:
+            return
+        try:
+            if self._importance_shadow_service is None:
+                from api.services.importance_shadow_service import ImportanceShadowService
+
+                self._importance_shadow_service = ImportanceShadowService(
+                    review_dir=self._importance_shadow_review_dir,
+                )
+            self._importance_shadow_service.observe(
+                stored=kept,
+                pending=pending,
+                messages=messages,
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                job_id=job_id,
+            )
+        except Exception as exc:  # pragma: no cover - fail-open observer boundary.
+            try:
+                recorder = getattr(self._importance_shadow_service, "record_failure", None)
+                if recorder is not None:
+                    recorder(
+                        error=exc,
+                        tenant_id=tenant_id,
+                        proxy_user_id=proxy_user_id,
+                        job_id=job_id,
+                    )
+            except Exception:
+                pass
+            LOGGER.warning(
+                "importance_shadow_failed: %s: %s",
+                exc.__class__.__name__,
+                exc,
+                extra={
+                    "event": "importance_shadow_failed",
+                    "tenant_id": tenant_id,
+                    "proxy_user_id": proxy_user_id,
+                    "job_id": job_id,
+                    "error": str(exc),
+                },
+            )
     async def _record_provider_usage(self, provider: str | None) -> None:
         if not provider:
             return

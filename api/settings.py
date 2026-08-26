@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     local_embedding_endpoint: str = Field(default="", alias="LOCAL_EMBEDDING_ENDPOINT")
     embedding_provider: str = Field(default="openai", alias="EMBEDDING_PROVIDER")
     extraction_model: str = Field(default="", alias="EXTRACTION_MODEL")
+    importance_shadow_enabled: bool = Field(default=False, alias="IMPORTANCE_SHADOW_ENABLED")
+    importance_shadow_review_dir: str = Field(default="", alias="IMPORTANCE_SHADOW_REVIEW_DIR")
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_model_id: str = Field(default="", alias="EMBEDDING_MODEL_ID")
     embedding_dimensions: str = Field(default="", alias="EMBEDDING_DIMENSIONS")
