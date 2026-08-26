@@ -151,6 +151,7 @@ class RetrievalFeedbackService:
                 "outcome": outcome,
                 "retrospective_extraction": True,
             },
+            idempotency_key=f"retrieval-feedback:{feedback.id}",
             tenant_id=str(retrieval.tenant_id),
             external_user_id=retrieval.external_user_id,
             proxy_user_id=str(retrieval.proxy_user_id),

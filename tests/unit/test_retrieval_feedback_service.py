@@ -128,6 +128,7 @@ async def test_user_correction_feedback_queues_retrospective_extraction_job() ->
     assert kwargs["tenant_id"] == str(tenant_id)
     assert kwargs["external_user_id"] == "customer-1"
     assert kwargs["source"]["service"] == "retrieval-feedback"
+    assert kwargs["idempotency_key"] == f"retrieval-feedback:{feedback.id}"
     assert kwargs["messages"][-1]["content"] == "Actually I prefer Hindi, not English."
 
 @pytest.mark.asyncio
