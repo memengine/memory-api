@@ -11,11 +11,17 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.pytest-*/
+.test-temp/
+.test-tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage
 coverage.xml
 htmlcov/
+artifacts/
+benchmarks/public/data/
+benchmarks/public/results/
 *.egg-info/
 dist/
 build/
@@ -64,6 +70,7 @@ pytest-cache-files-*/
 # Local editor/project notes
 .vscode/
 .idea/
+*.code-workspace
 Thumbs.db
 *.tmp
 *.temp
