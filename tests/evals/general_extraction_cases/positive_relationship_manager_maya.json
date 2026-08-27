@@ -16,7 +16,7 @@
       "content": "Maya is user's manager and reviews user's roadmap documents before leadership meetings.",
       "category": "relationship",
       "confidence": 0.89,
-      "importance_score": 7.5
+      "importance_score": 7.0
     }
   ],
   "expected_nothing_to_extract": false,

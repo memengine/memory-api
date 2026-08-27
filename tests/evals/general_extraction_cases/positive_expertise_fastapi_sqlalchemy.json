@@ -22,7 +22,7 @@
       "content": "User is still learning async Python patterns.",
       "category": "expertise",
       "confidence": 0.86,
-      "importance_score": 6.5
+      "importance_score": 5.0
     }
   ],
   "expected_nothing_to_extract": false,

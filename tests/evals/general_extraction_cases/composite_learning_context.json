@@ -28,19 +28,19 @@
       "content": "User is in class 12.",
       "category": "fact",
       "confidence": 0.9,
-      "importance_score": 8.0
+      "importance_score": 7.0
     },
     {
       "content": "User is weak in organic chemistry mechanisms.",
       "category": "expertise",
       "confidence": 0.86,
-      "importance_score": 8.0
+      "importance_score": 7.0
     },
     {
       "content": "User's board exam starts in 34 days.",
       "category": "goal",
       "confidence": 0.84,
-      "importance_score": 8.5
+      "importance_score": 7.0
     }
   ],
   "expected_nothing_to_extract": false,

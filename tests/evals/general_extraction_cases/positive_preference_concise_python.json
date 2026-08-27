@@ -16,7 +16,7 @@
       "content": "User prefers concise Python-first coding explanations over long theory.",
       "category": "preference",
       "confidence": 0.92,
-      "importance_score": 7.5
+      "importance_score": 7.0
     }
   ],
   "expected_nothing_to_extract": false,

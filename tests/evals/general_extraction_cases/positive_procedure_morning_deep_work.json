@@ -16,7 +16,7 @@
       "content": "User usually does deep work from 7 to 10 in the morning before meetings.",
       "category": "procedure",
       "confidence": 0.9,
-      "importance_score": 7.0
+      "importance_score": 3.0
     }
   ],
   "expected_nothing_to_extract": false,

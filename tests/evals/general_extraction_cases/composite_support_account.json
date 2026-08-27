@@ -28,19 +28,19 @@
       "content": "User's workspace billing failed after upgrading to Growth.",
       "category": "fact",
       "confidence": 0.88,
-      "importance_score": 7.5
+      "importance_score": 3.0
     },
     {
       "content": "User's workspace uses Slack and webhook integrations.",
       "category": "fact",
       "confidence": 0.85,
-      "importance_score": 6.5
+      "importance_score": 5.0
     },
     {
       "content": "User needs the invoice fixed before a finance review.",
       "category": "goal",
       "confidence": 0.86,
-      "importance_score": 8.0
+      "importance_score": 3.0
     }
   ],
   "expected_nothing_to_extract": false,
