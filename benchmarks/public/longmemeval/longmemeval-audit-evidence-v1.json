@@ -1,0 +1,52 @@
+{
+  "schema_version": "memoryos-longmemeval-audit-evidence-v1",
+  "created_at": "2026-08-28",
+  "classification": "public-development-diagnostic",
+  "dataset_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "sample_manifest": "benchmarks/public/longmemeval/samples/role-aware-generalization-v1.json",
+  "sample_case_count": 30,
+  "holdout_accessed": false,
+  "production_behavior_changed": false,
+  "conclusions": {
+    "top10_hybrid_session_recall": 0.9833333333333333,
+    "initial_answer_turn_coverage": 0.5470238095238095,
+    "best_offline_answer_turn_coverage": 0.8904761904761905,
+    "best_offline_complete_answer_turn_coverage": 0.7857142857142857,
+    "selected_context_policy": "bounded semantic+lexical union; sequential +/-2 same-session chunks; 6000-token cap",
+    "larger_cap_improved_coverage": false,
+    "preview_answer_accuracy": 0.36666666666666664,
+    "preview_abstention_accuracy": 1.0,
+    "preview_answer_calls": 30,
+    "preview_judge_calls": 30,
+    "preview_estimated_cost_usd": 0.2061075,
+    "preview_is_official_score": false
+  },
+  "root_cause_classification": {
+    "missing_production_episodic_plane": "architecture_gap",
+    "exhaustive_multi_session_retrieval": "retrieval_architecture_gap",
+    "correct_session_wrong_chunk": "retrieval_context_boundary_gap",
+    "preference_answer_instruction": "benchmark_harness_defect",
+    "raw_conversation_instruction_isolation": "context_safety_gap",
+    "empty_abstention_scoring": "corrected_harness_defect",
+    "semantic_threshold_or_token_cap": "not_primary_cause"
+  },
+  "retained_machine_readable_artifacts": [
+    {
+      "file": "benchmarks/public/results/lme-answer-eval30-v1-20260828.json",
+      "sha256": "c35ee248e26bc7f93e6c496fae48836fc659730422c240a7d3b4348c776754a0"
+    },
+    {
+      "file": "benchmarks/public/results/lme-context-token-cap-curve30-v4-20260828.json",
+      "sha256": "eb2d94c4b76228ae00641d75180752b9f402f59bc81e5fa1dc77d115651fbba8"
+    },
+    {
+      "file": "benchmarks/public/results/lme-episodic-role-generalization30-v2-reevaluated-20260828.json",
+      "sha256": "ee4220ec7e13ef2ac3b0b2acbdf5a83fe9c187005a3b37a6f33371e94ccce706"
+    },
+    {
+      "file": "benchmarks/public/results/lme-episodic-planned-hybrid-generalization30-v2-20260828.json",
+      "sha256": "1cbbaa9af70b47cb101608d7e00bbd612edb821f41548bde3b2e4cd193a3097a"
+    }
+  ],
+  "report": "benchmarks/public/longmemeval/longmemeval-root-cause-audit.md"
+}
