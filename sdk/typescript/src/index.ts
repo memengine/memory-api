@@ -64,6 +64,26 @@ export interface AddResult {
   readonly wasStored: boolean;
 }
 
+export interface MemoryJobStatus {
+  jobId: string;
+  status: string;
+  memoriesCreated: number;
+  pendingCandidatesBuffered: number;
+  pendingCandidatesPromoted: number;
+  attempts: number;
+  createdAt: string | null;
+  processingStartedAt: string | null;
+  queueName: string | null;
+  error: string | null;
+  errorSummary: string | null;
+  queuedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  deadLetteredAt: string | null;
+  extractionMetadata: Record<string, unknown>;
+  readonly succeeded: boolean;
+}
+
 export interface MemoryItem {
   id: string;
   content: string;
@@ -93,6 +113,7 @@ export interface RetrieveResult {
   isPassthrough: boolean;
   isDegraded: boolean;
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
+  clarificationQuestion: string | null;
   readonly hasContext: boolean;
 }
 
@@ -158,6 +179,7 @@ export interface GetParams {
   timeFilterDays?: number;
   format?: "bullets" | "json" | "xml";
   contextMaxTokens?: number;
+  asOf?: string;
 }
 
 export interface UserProfile {
@@ -188,10 +210,19 @@ export interface Agent {
 }
 
 export interface MemoryExport {
-  user: UserProfile;
-  memories: MemoryRecord[];
-  apiKeys: ApiKey[];
-  agents: Agent[];
+  tenantId: string;
+  proxyUserId: string;
+  memories: Array<{
+    id: string;
+    content: string;
+    category: MemoryCategory;
+    importanceScore: number;
+    confidence: number;
+    isArchived: boolean;
+    createdAt: string | null;
+    updatedAt: string | null;
+    versions: Array<Record<string, unknown>>;
+  }>;
 }
 
 export interface EdTechMemoryProfile {
@@ -252,6 +283,27 @@ interface AddEnvelope {
   nothing_to_extract?: boolean;
 }
 
+interface MemoryJobStatusEnvelope {
+  data: {
+    job_id: string;
+    status: string;
+    memories_created?: number;
+    pending_candidates_buffered?: number;
+    pending_candidates_promoted?: number;
+    attempts?: number;
+    created_at?: string | null;
+    processing_started_at?: string | null;
+    queue_name?: string | null;
+    error?: string | null;
+    error_summary?: string | null;
+    queued_at?: string | null;
+    started_at?: string | null;
+    completed_at?: string | null;
+    dead_lettered_at?: string | null;
+    extraction_metadata?: Record<string, unknown>;
+  };
+}
+
 interface RetrieveEnvelope {
   retrieval_id?: string | null;
   data: Array<{
@@ -274,6 +326,7 @@ interface RetrieveEnvelope {
   context_token_count?: number;
   memories_from_hot_tier?: number;
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
+  clarification_question?: string | null;
 }
 
 interface RetrievalFeedbackEnvelope {
@@ -322,30 +375,18 @@ interface DeleteEnvelope {
 
 interface ExportEnvelope {
   data: {
-    user: {
+    tenant_id: string;
+    proxy_user_id: string;
+    memories: Array<{
       id: string;
-      external_id: string;
-      email: string;
-      settings: Record<string, unknown>;
-      memory_count: number;
-      storage_bytes: number;
-    };
-    memories: MemoryListEnvelope["data"];
-    api_keys: Array<{
-      id: string;
-      name: string;
-      permissions: string[];
-      rate_limit_per_minute: number;
+      content: string;
+      category: MemoryCategory;
+      importance_score: number;
+      confidence: number;
+      is_archived: boolean;
       created_at: string | null;
-      last_used_at: string | null;
-      is_active: boolean;
-    }>;
-    agents: Array<{
-      id: string;
-      name: string;
-      description: string | null;
-      memory_scope: "private" | "shared";
-      created_at: string | null;
+      updated_at: string | null;
+      versions: Array<Record<string, unknown>>;
     }>;
   };
 }
@@ -574,39 +615,6 @@ function toMemoryRecord(item: MemoryListEnvelope["data"][number]): MemoryRecord 
   };
 }
 
-function toUserProfile(user: ExportEnvelope["data"]["user"]): UserProfile {
-  return {
-    id: user.id,
-    externalId: user.external_id,
-    email: user.email,
-    settings: user.settings,
-    memoryCount: user.memory_count,
-    storageBytes: user.storage_bytes,
-  };
-}
-
-function toApiKey(item: ExportEnvelope["data"]["api_keys"][number]): ApiKey {
-  return {
-    id: item.id,
-    name: item.name,
-    permissions: item.permissions,
-    rateLimitPerMinute: item.rate_limit_per_minute,
-    createdAt: item.created_at,
-    lastUsedAt: item.last_used_at,
-    isActive: item.is_active,
-  };
-}
-
-function toAgent(item: ExportEnvelope["data"]["agents"][number]): Agent {
-  return {
-    id: item.id,
-    name: item.name,
-    description: item.description,
-    memoryScope: item.memory_scope,
-    createdAt: item.created_at,
-  };
-}
-
 function toEdTechProfile(item: NonNullable<EdTechProfileEnvelope["data"]>): EdTechMemoryProfile {
   return {
     id: item.id,
@@ -647,7 +655,7 @@ function toEdTechProfile(item: NonNullable<EdTechProfileEnvelope["data"]>): EdTe
 }
 
 export class MemoryOS {
-  static readonly DEFAULT_BASE_URL = "https://api.memoryos.io";
+  static readonly DEFAULT_BASE_URL = "https://api.memoryo.dev";
   static readonly DEFAULT_TIMEOUT = 30_000;
   static readonly MAX_RETRIES = 3;
 
@@ -681,6 +689,7 @@ export class MemoryOS {
     agentId?: string,
     metadata?: Record<string, unknown>,
     source?: MemorySource,
+    idempotencyKey?: string,
   ): Promise<AddResult> {
     const payload: AddRequest = {
       externalUserId,
@@ -690,6 +699,7 @@ export class MemoryOS {
       ...(source ? { source } : {}),
     };
     const response = await this.requestResponse("POST", "/v1/memories/add", {
+      ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
       body: JSON.stringify({
         external_user_id: payload.externalUserId,
         ...(payload.agentId ? { agent_id: payload.agentId } : {}),
@@ -762,6 +772,7 @@ export class MemoryOS {
             timeFilterDays,
             format,
             contextMaxTokens,
+            asOf: undefined,
           }
         : queryOrParams;
 
@@ -778,6 +789,13 @@ export class MemoryOS {
     }
     if (params.timeFilterDays !== undefined) {
       body.time_filter_days = params.timeFilterDays;
+    }
+    if (params.asOf !== undefined) {
+      const parsedAsOf = new Date(params.asOf);
+      if (Number.isNaN(parsedAsOf.getTime()) || !/(Z|[+-]\d{2}:\d{2})$/.test(params.asOf)) {
+        throw new Error("asOf must be a valid ISO 8601 timestamp with a timezone");
+      }
+      body.as_of = params.asOf;
     }
 
     const response = await this.requestResponse("POST", "/v1/memories/retrieve", {
@@ -796,10 +814,64 @@ export class MemoryOS {
       isPassthrough: quotaMode === "PASSTHROUGH",
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
+      clarificationQuestion: payload.clarification_question ?? null,
       get hasContext() {
         return Boolean(payload.system_prompt_addition) && quotaMode !== "PASSTHROUGH";
       },
     };
+  }
+
+  async getJobStatus(jobId: string): Promise<MemoryJobStatus> {
+    if (!jobId.trim()) {
+      throw new Error("jobId must not be empty.");
+    }
+    const response = await this.requestResponse("GET", `/v1/memories/jobs/${encodeURIComponent(jobId)}`);
+    const payload = (await this.parseJson(response)) as MemoryJobStatusEnvelope;
+    const data = payload.data;
+    return {
+      jobId: data.job_id,
+      status: data.status,
+      memoriesCreated: data.memories_created ?? 0,
+      pendingCandidatesBuffered: data.pending_candidates_buffered ?? 0,
+      pendingCandidatesPromoted: data.pending_candidates_promoted ?? 0,
+      attempts: data.attempts ?? 0,
+      createdAt: data.created_at ?? null,
+      processingStartedAt: data.processing_started_at ?? null,
+      queueName: data.queue_name ?? null,
+      error: data.error ?? null,
+      errorSummary: data.error_summary ?? null,
+      queuedAt: data.queued_at ?? null,
+      startedAt: data.started_at ?? null,
+      completedAt: data.completed_at ?? null,
+      deadLetteredAt: data.dead_lettered_at ?? null,
+      extractionMetadata: data.extraction_metadata ?? {},
+      get succeeded() {
+        return data.status === "completed";
+      },
+    };
+  }
+
+  async waitForJob(
+    jobId: string,
+    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<MemoryJobStatus> {
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+    if (timeoutMs <= 0 || pollIntervalMs <= 0) {
+      throw new Error("timeoutMs and pollIntervalMs must be positive.");
+    }
+    const deadline = Date.now() + timeoutMs;
+    const terminalStatuses = new Set(["completed", "failed", "dead_letter", "dead_lettered", "cancelled"]);
+    while (true) {
+      const job = await this.getJobStatus(jobId);
+      if (terminalStatuses.has(job.status)) {
+        return job;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for memory job ${jobId}.`);
+      }
+      await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    }
   }
 
   async feedback(params: RetrievalFeedbackParams): Promise<RetrievalFeedbackResult> {
@@ -825,8 +897,17 @@ export class MemoryOS {
     };
   }
 
-  async delete(memoryId: string, externalUserId: string, hardDelete: boolean = false): Promise<boolean> {
-    void externalUserId;
+  async delete(memoryId: string, hardDelete?: boolean): Promise<boolean>;
+  /** @deprecated externalUserId is not required; deletion is tenant-scoped by memoryId. */
+  async delete(memoryId: string, externalUserId: string, hardDelete?: boolean): Promise<boolean>;
+  async delete(
+    memoryId: string,
+    externalUserIdOrHardDelete: string | boolean = false,
+    legacyHardDelete: boolean = false,
+  ): Promise<boolean> {
+    const hardDelete = typeof externalUserIdOrHardDelete === "boolean"
+      ? externalUserIdOrHardDelete
+      : legacyHardDelete;
     const response = await this.request<DeleteEnvelope>(
       "DELETE",
       `/v1/memories/${encodeURIComponent(memoryId)}?hard_delete=${hardDelete ? "true" : "false"}`,
@@ -835,9 +916,8 @@ export class MemoryOS {
   }
 
   async list(externalUserId: string, options: ListOptions = {}): Promise<MemoryPage> {
-    void externalUserId;
     const limit = options.limit ?? 50;
-    const params = new URLSearchParams({ limit: String(limit) });
+    const params = new URLSearchParams({ external_user_id: externalUserId, limit: String(limit) });
     if (options.pageCursor) {
       params.set("cursor", options.pageCursor);
     }
@@ -851,13 +931,24 @@ export class MemoryOS {
   }
 
   async export(externalUserId: string): Promise<MemoryExport> {
-    void externalUserId;
-    const response = await this.request<ExportEnvelope>("GET", "/v1/users/me/export");
+    const response = await this.request<ExportEnvelope>(
+      "GET",
+      `/v1/users/${encodeURIComponent(externalUserId)}/export`,
+    );
     return {
-      user: toUserProfile(response.data.user),
-      memories: response.data.memories.map(toMemoryRecord),
-      apiKeys: response.data.api_keys.map(toApiKey),
-      agents: response.data.agents.map(toAgent),
+      tenantId: response.data.tenant_id,
+      proxyUserId: response.data.proxy_user_id,
+      memories: response.data.memories.map((memory) => ({
+        id: memory.id,
+        content: memory.content,
+        category: memory.category,
+        importanceScore: memory.importance_score,
+        confidence: memory.confidence,
+        isArchived: memory.is_archived,
+        createdAt: memory.created_at,
+        updatedAt: memory.updated_at,
+        versions: memory.versions,
+      })),
     };
   }
 
@@ -874,12 +965,12 @@ export class MemoryOS {
     return this.getEdTechProfile(externalUserId);
   }
 
-  private async request<T>(method: string, path: string, init: { body?: string } = {}): Promise<T> {
+  private async request<T>(method: string, path: string, init: { body?: string; headers?: Record<string, string> } = {}): Promise<T> {
     const response = await this.requestResponse(method, path, init);
     return (await this.parseJson(response)) as T;
   }
 
-  private async requestResponse(method: string, path: string, init: { body?: string } = {}): Promise<Response> {
+  private async requestResponse(method: string, path: string, init: { body?: string; headers?: Record<string, string> } = {}): Promise<Response> {
     let lastError: MemoryOSError | null = null;
 
     for (let attempt = 0; attempt <= MemoryOS.MAX_RETRIES; attempt += 1) {
@@ -893,6 +984,7 @@ export class MemoryOS {
             Authorization: `ApiKey ${this.apiKey}`,
             Accept: "application/json",
             "Content-Type": "application/json",
+            ...init.headers,
           },
           ...(init.body !== undefined ? { body: init.body } : {}),
           signal: controller.signal,
