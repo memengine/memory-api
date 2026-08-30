@@ -26,7 +26,7 @@ def test_consent_url_encodes_redirect_uri_and_state() -> None:
     params = parse_qs(parsed.query)
 
     assert parsed.scheme == "https"
-    assert parsed.netloc == "consent.memoryos.io"
+    assert parsed.netloc == "consent.memoryo.dev"
     assert parsed.path == "/consent"
     assert params["agent_id"] == ["agent-123"]
     assert params["redirect_uri"] == ["https://example.com/callback?next=/home"]
@@ -43,7 +43,7 @@ def test_consent_url_can_use_hosted_completion_page_without_redirect_uri() -> No
     params = parse_qs(parsed.query)
 
     assert parsed.scheme == "https"
-    assert parsed.netloc == "consent.memoryos.io"
+    assert parsed.netloc == "consent.memoryo.dev"
     assert parsed.path == "/consent"
     assert params["agent_id"] == ["agent-123"]
     assert "redirect_uri" not in params
@@ -126,7 +126,10 @@ def test_add_uses_universal_auth_headers_and_returns_add_result() -> None:
 
 
 def test_get_returns_categories_and_permission_status() -> None:
+    captured_body: dict[str, object] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(__import__("json").loads(request.read()))
         assert request.url.path == "/v1/universal/memories/retrieve"
         return httpx.Response(
             200,
@@ -140,6 +143,8 @@ def test_get_returns_categories_and_permission_status() -> None:
                 "data": [],
                 "cached": False,
                 "system_prompt_addition": "",
+                "retrieval_id": "retrieval-456",
+                "context_token_count": 42,
                 "permission_error": "no_grant_for_user",
                 "categories_available": ["preference", "expertise"],
                 "is_passthrough": False,
@@ -153,7 +158,44 @@ def test_get_returns_categories_and_permission_status() -> None:
     )
     client._client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.example.com")
 
-    result = client.get("What do you know about this user?")
+    result = client.get(
+        "What do you know about this user?",
+        format="json",
+        context_max_tokens=900,
+    )
 
     assert result.permission_status == "no_grant_for_user"
     assert result.categories_available == ["preference", "expertise"]
+    assert result.retrieval_id == "retrieval-456"
+    assert result.context_token_count == 42
+    assert captured_body["format"] == "json"
+    assert captured_body["context_max_tokens"] == 900
+
+
+def test_universal_add_forwards_body_idempotency_key() -> None:
+    captured_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(__import__("json").loads(request.read()))
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "req_789",
+                "timestamp": "2026-04-23T00:00:00Z",
+                "job_id": "job_789",
+                "status": "queued",
+            },
+        )
+
+    client = UniversalMemory(
+        agent_api_key="agent_sk_test_123",
+        uui_token="uui_test_123",
+        base_url="https://api.example.com",
+    )
+    client._client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.example.com")
+    client.add(
+        [{"role": "user", "content": "Remember this."}],
+        idempotency_key="universal-event-123",
+    )
+
+    assert captured_body["idempotency_key"] == "universal-event-123"

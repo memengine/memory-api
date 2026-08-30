@@ -26,6 +26,8 @@ class UniversalRetrieveEnvelope(BaseModel):
     data: list[SDKMemoryResult]
     cached: bool
     system_prompt_addition: str
+    retrieval_id: str | None = None
+    context_token_count: int = 0
     permission_error: str | None = None
     categories_available: list[str] = Field(default_factory=list)
     is_passthrough: bool = False
@@ -37,8 +39,8 @@ class UniversalRetrieveResult(RetrieveResult):
 
 
 class UniversalMemory:
-    DEFAULT_BASE_URL = "https://api.memoryos.io"
-    DEFAULT_CONSENT_BASE_URL = "https://consent.memoryos.io"
+    DEFAULT_BASE_URL = "https://api.memoryo.dev"
+    DEFAULT_CONSENT_BASE_URL = "https://consent.memoryo.dev"
     DEFAULT_TIMEOUT = 30.0
     MAX_RETRIES = 3
 
@@ -82,6 +84,7 @@ class UniversalMemory:
         self,
         messages: list[dict[str, str]] | list[ConversationMessage],
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> AddResult:
         response = self._request_response(
             "POST",
@@ -94,6 +97,7 @@ class UniversalMemory:
                     for item in messages
                 ],
                 "metadata": metadata or {},
+                "idempotency_key": idempotency_key,
             },
         )
         parsed = AddEnvelope.model_validate(self._parse_json(response))
@@ -109,22 +113,31 @@ class UniversalMemory:
             circuit_status=self._circuit_status_from_response(response),
         )
 
-    def get(self, query: str, limit: int = 10) -> UniversalRetrieveResult:
+    def get(
+        self,
+        query: str,
+        limit: int = 10,
+        format: str = "bullets",
+        context_max_tokens: int = 500,
+    ) -> UniversalRetrieveResult:
         response = self._request_response(
             "POST",
             "/v1/universal/memories/retrieve",
             json={
                 "query": query,
                 "limit": limit,
-                "format": "bullets",
+                "format": format,
+                "context_max_tokens": context_max_tokens,
             },
         )
         parsed = UniversalRetrieveEnvelope.model_validate(self._parse_json(response))
         quota_mode = self._quota_mode_from_response(response)
         return UniversalRetrieveResult(
+            retrieval_id=parsed.retrieval_id,
             items=parsed.data,
             cached=parsed.cached,
             system_prompt_addition=parsed.system_prompt_addition,
+            context_token_count=parsed.context_token_count,
             quota_mode=quota_mode,
             is_passthrough=parsed.is_passthrough or quota_mode == "PASSTHROUGH",
             is_degraded=quota_mode == "DEGRADED_RETRIEVE",

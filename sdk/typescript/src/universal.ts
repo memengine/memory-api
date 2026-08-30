@@ -7,6 +7,7 @@ export interface UniversalRetrieveResult extends RetrieveResult {
 }
 
 interface UniversalRetrieveEnvelope {
+  retrieval_id?: string | null;
   data: Array<{
     id: string;
     content: string;
@@ -15,9 +16,12 @@ interface UniversalRetrieveEnvelope {
     last_accessed: string | null;
     relevance_score: number;
     context_snippet: string;
+    source_event_id?: string | null;
+    provenance?: Record<string, unknown> | null;
   }>;
   cached: boolean;
   system_prompt_addition: string;
+  context_token_count?: number;
   permission_error?: string | null;
   categories_available?: string[];
   is_passthrough?: boolean;
@@ -63,8 +67,8 @@ function toMemoryItem(item: UniversalRetrieveEnvelope["data"][number]): MemoryIt
     originalImportanceScore,
     isHot: false,
     systemArchived: false,
-    sourceEventId: null,
-    provenance: null,
+    sourceEventId: item.source_event_id ?? null,
+    provenance: item.provenance ?? null,
     get importanceDelta() {
       return Number((this.importanceScore - this.originalImportanceScore).toFixed(2));
     },
@@ -106,8 +110,8 @@ function processingStatusFromHeaders(headers: Headers): AddResult["processingSta
 }
 
 export class UniversalMemoryOS {
-  static readonly DEFAULT_BASE_URL = "https://api.memoryos.io";
-  static readonly DEFAULT_CONSENT_BASE_URL = "https://consent.memoryos.io";
+  static readonly DEFAULT_BASE_URL = "https://api.memoryo.dev";
+  static readonly DEFAULT_CONSENT_BASE_URL = "https://consent.memoryo.dev";
   static readonly DEFAULT_TIMEOUT = 30_000;
   static readonly MAX_RETRIES = 3;
 
@@ -137,11 +141,16 @@ export class UniversalMemoryOS {
     this.fetchImpl = fetchImpl;
   }
 
-  async add(messages: ConversationMessage[], metadata?: Record<string, unknown>): Promise<AddResult> {
+  async add(
+    messages: ConversationMessage[],
+    metadata?: Record<string, unknown>,
+    idempotencyKey?: string,
+  ): Promise<AddResult> {
     const response = await this.requestResponse("POST", "/v1/universal/memories/add", {
       body: JSON.stringify({
         messages,
         metadata: metadata ?? {},
+        ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
       }),
     });
     const payload = (await this.parseJson(response)) as {
@@ -170,18 +179,23 @@ export class UniversalMemoryOS {
     };
   }
 
-  async get(query: string, limit = 10): Promise<UniversalRetrieveResult> {
+  async get(
+    query: string,
+    limit = 10,
+    options: { format?: "bullets" | "json" | "xml"; contextMaxTokens?: number } = {},
+  ): Promise<UniversalRetrieveResult> {
     const response = await this.requestResponse("POST", "/v1/universal/memories/retrieve", {
       body: JSON.stringify({
         query,
         limit,
-        format: "bullets",
+        format: options.format ?? "bullets",
+        context_max_tokens: options.contextMaxTokens ?? 500,
       }),
     });
     const payload = (await this.parseJson(response)) as UniversalRetrieveEnvelope;
     const quotaMode = quotaModeFromHeaders(response.headers);
     return {
-      retrievalId: null,
+      retrievalId: payload.retrieval_id ?? null,
       items: payload.data.map(toMemoryItem),
       cached: payload.cached,
       systemPromptAddition: payload.system_prompt_addition,
@@ -189,7 +203,8 @@ export class UniversalMemoryOS {
       isPassthrough: Boolean(payload.is_passthrough) || quotaMode === "PASSTHROUGH",
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
-      contextTokenCount: 0,
+      clarificationQuestion: null,
+      contextTokenCount: payload.context_token_count ?? 0,
       memoriesFromHotTier: 0,
       get hasContext() {
         return Boolean(payload.system_prompt_addition) && !(Boolean(payload.is_passthrough) || quotaMode === "PASSTHROUGH");
