@@ -1,17 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC
-from datetime import date
-from datetime import datetime
-from typing import Any
-from typing import Literal
+from datetime import UTC, date, datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel
-from pydantic import AliasChoices
-from pydantic import Field
-from pydantic import field_validator
-
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 MemoryCategory = Literal[
     "preference",
@@ -71,7 +64,7 @@ class MemorySource(BaseModel):
         observed_at: datetime | None = None,
         scope: dict[str, Any] | None = None,
         evidence: list[EvidenceReference | dict[str, Any]] | None = None,
-    ) -> "MemorySource":
+    ) -> MemorySource:
         """Build source metadata without making teams manage IDs on day one.
 
         Use this when more than one backend service writes memory. Solo apps can
@@ -94,7 +87,6 @@ class AddRequest(BaseModel):
     agent_id: str | None = None
     messages: list[ConversationMessage] = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    idempotency_key: str | None = None
     source: MemorySource | None = None
 
 
@@ -113,6 +105,29 @@ class AddResult(BaseModel):
     @property
     def was_stored(self) -> bool:
         return self.status == "queued" and not self.nothing_to_extract
+
+
+class MemoryJobStatus(BaseModel):
+    job_id: str
+    status: str
+    memories_created: int = 0
+    pending_candidates_buffered: int = 0
+    pending_candidates_promoted: int = 0
+    attempts: int = 0
+    created_at: datetime | None = None
+    processing_started_at: datetime | None = None
+    queue_name: str | None = None
+    error: str | None = None
+    error_summary: str | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    dead_lettered_at: datetime | None = None
+    extraction_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "completed"
 
 
 class MemoryResult(BaseModel):
@@ -155,6 +170,7 @@ class RetrieveResult(BaseModel):
     is_passthrough: bool = False
     is_degraded: bool = False
     circuit_status: CircuitStatus = "HEALTHY"
+    clarification_question: str | None = None
 
     @property
     def has_context(self) -> bool:
@@ -268,11 +284,22 @@ class Agent(BaseModel):
     created_at: datetime | None = None
 
 
+class ExportedMemory(BaseModel):
+    id: str
+    content: str
+    category: MemoryCategory
+    importance_score: float
+    confidence: float
+    is_archived: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    versions: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class MemoryExport(BaseModel):
-    user: UserProfile
-    memories: list[MemoryRecord]
-    api_keys: list[ApiKey]
-    agents: list[Agent]
+    tenant_id: str
+    proxy_user_id: str
+    memories: list[ExportedMemory]
 
 
 class EdTechMemoryProfile(BaseModel):
@@ -341,6 +368,10 @@ class AddEnvelope(EnvelopeBase):
     nothing_to_extract: bool = False
 
 
+class MemoryJobStatusEnvelope(EnvelopeBase):
+    data: MemoryJobStatus
+
+
 class RetrieveEnvelope(EnvelopeBase):
     retrieval_id: str | None = None
     data: list[MemoryResult]
@@ -349,6 +380,7 @@ class RetrieveEnvelope(EnvelopeBase):
     context_token_count: int = 0
     memories_from_hot_tier: int = 0
     quota_mode: QuotaMode = "FULL"
+    clarification_question: str | None = None
 
 
 class RetrievalFeedbackEnvelope(EnvelopeBase):

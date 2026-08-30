@@ -1,39 +1,45 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import warnings
-from typing import Any
+from datetime import datetime
+from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
 
-from memoryos.errors import MemoryOSError
-from memoryos.errors import map_sdk_error
-from memoryos.types import AddEnvelope
-from memoryos.types import AddRequest
-from memoryos.types import AddResult
-from memoryos.types import ConversationMessage
-from memoryos.types import DeleteEnvelope
-from memoryos.types import EdTechMemoryProfile
-from memoryos.types import EdTechProfileEnvelope
-from memoryos.types import ExportEnvelope
-from memoryos.types import MemoryExport
-from memoryos.types import MemoryListEnvelope
-from memoryos.types import MemoryPage
-from memoryos.types import MemorySource
-from memoryos.types import QuotaMode
-from memoryos.types import RetrieveResult
-from memoryos.types import RetrieveEnvelope
-from memoryos.types import RetrievalFeedbackResult
-from memoryos.types import RetrievalFeedbackRequest
-from memoryos.types import RetrievalFeedbackEnvelope
+from memoryos.errors import MemoryOSError, map_sdk_error
+from memoryos.types import (
+    AddEnvelope,
+    AddRequest,
+    AddResult,
+    ConversationMessage,
+    DeleteEnvelope,
+    EdTechMemoryProfile,
+    EdTechProfileEnvelope,
+    ExportEnvelope,
+    MemoryExport,
+    MemoryJobStatus,
+    MemoryJobStatusEnvelope,
+    MemoryListEnvelope,
+    MemoryPage,
+    MemorySource,
+    QuotaMode,
+    RetrievalFeedbackEnvelope,
+    RetrievalFeedbackRequest,
+    RetrievalFeedbackResult,
+    RetrieveEnvelope,
+    RetrieveResult,
+)
 
 
 class AsyncMemory:
-    DEFAULT_BASE_URL = "https://api.memoryos.io"
+    DEFAULT_BASE_URL = "https://api.memoryo.dev"
     DEFAULT_TIMEOUT = 30.0
     MAX_RETRIES = 3
 
-    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL, timeout: int | float = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL, timeout: float = DEFAULT_TIMEOUT) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be empty.")
         self.api_key = api_key
@@ -50,7 +56,7 @@ class AsyncMemory:
             },
         )
 
-    async def __aenter__(self) -> AsyncMemory:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, _exc_type, _exc, _tb) -> None:
@@ -116,7 +122,6 @@ class AsyncMemory:
             agent_id=agent_id,
             messages=[item if isinstance(item, ConversationMessage) else ConversationMessage.model_validate(item) for item in messages],
             metadata=metadata or {},
-            idempotency_key=idempotency_key,
             source=(
                 source
                 if isinstance(source, MemorySource)
@@ -129,6 +134,7 @@ class AsyncMemory:
             "POST",
             "/v1/memories/add",
             json=payload.model_dump(mode="json", exclude_none=True),
+            headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
         )
         parsed = AddEnvelope.model_validate(self._parse_json(response))
         return AddResult(
@@ -154,6 +160,7 @@ class AsyncMemory:
         time_filter_days: int | None = None,
         format: str = "bullets",
         context_max_tokens: int = 500,
+        as_of: datetime | None = None,
     ) -> RetrieveResult:
         body: dict[str, Any] = {
             "query": query,
@@ -167,6 +174,10 @@ class AsyncMemory:
             body["agent_id"] = agent_id
         if time_filter_days is not None:
             body["time_filter_days"] = time_filter_days
+        if as_of is not None:
+            if as_of.tzinfo is None:
+                raise ValueError("as_of must include a timezone")
+            body["as_of"] = as_of.isoformat()
         response = await self._request_response(
             "POST",
             "/v1/memories/retrieve",
@@ -185,7 +196,36 @@ class AsyncMemory:
             is_passthrough=quota_mode == "PASSTHROUGH",
             is_degraded=quota_mode == "DEGRADED_RETRIEVE",
             circuit_status=self._circuit_status_from_response(response),
+            clarification_question=parsed.clarification_question,
         )
+
+    async def get_job_status(self, job_id: str) -> MemoryJobStatus:
+        """Return the current state of an asynchronous extraction job."""
+        if not str(job_id or "").strip():
+            raise ValueError("job_id must not be empty")
+        response = await self._request("GET", f"/v1/memories/jobs/{quote(job_id, safe='')}")
+        return MemoryJobStatusEnvelope.model_validate(response).data
+
+    async def wait_for_job(
+        self,
+        job_id: str,
+        *,
+        timeout: float = 120.0,
+        poll_interval: float = 1.0,
+    ) -> MemoryJobStatus:
+        """Poll until extraction completes or fails, raising on timeout."""
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be greater than zero")
+        deadline = time.monotonic() + timeout
+        while True:
+            job = await self.get_job_status(job_id)
+            if job.status in {"completed", "failed", "dead_letter", "dead_lettered", "cancelled"}:
+                return job
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"MemoryOS job {job_id} did not finish within {timeout:g} seconds")
+            await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
     async def feedback(
         self,
@@ -219,7 +259,12 @@ class AsyncMemory:
         hard_delete: bool = False,
         **kwargs: Any,
     ) -> bool:
-        _ = self._resolve_external_user_id(external_user_id, kwargs)
+        # Deletion is tenant-scoped by memory_id. external_user_id/user_id is
+        # retained only for compatibility with older SDK call sites.
+        _ = external_user_id
+        _ = kwargs.pop("user_id", None)
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments: {', '.join(sorted(kwargs))}")
         response = await self._request(
             "DELETE",
             f"/v1/memories/{memory_id}",
@@ -234,8 +279,11 @@ class AsyncMemory:
         limit: int = 50,
         **kwargs: Any,
     ) -> MemoryPage:
-        _ = self._resolve_external_user_id(external_user_id, kwargs)
-        params: dict[str, Any] = {"limit": limit}
+        resolved_external_user_id = self._resolve_external_user_id(external_user_id, kwargs)
+        params: dict[str, Any] = {
+            "external_user_id": resolved_external_user_id,
+            "limit": limit,
+        }
         if page_cursor:
             params["cursor"] = page_cursor
         response = await self._request("GET", "/v1/memories", params=params)
@@ -248,8 +296,11 @@ class AsyncMemory:
         )
 
     async def export(self, external_user_id: str | None = None, **kwargs: Any) -> MemoryExport:
-        _ = self._resolve_external_user_id(external_user_id, kwargs)
-        response = await self._request("GET", "/v1/users/me/export")
+        resolved_external_user_id = self._resolve_external_user_id(external_user_id, kwargs)
+        response = await self._request(
+            "GET",
+            f"/v1/users/{quote(resolved_external_user_id, safe='')}/export",
+        )
         return ExportEnvelope.model_validate(response).data
 
     async def get_edtech_profile(self, external_user_id: str) -> EdTechMemoryProfile | None:
@@ -269,8 +320,9 @@ class AsyncMemory:
         *,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        response = await self._request_response(method, path, json=json, params=params)
+        response = await self._request_response(method, path, json=json, params=params, headers=headers)
         return self._parse_json(response)
 
     async def _request_response(
@@ -280,12 +332,13 @@ class AsyncMemory:
         *,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         last_error: MemoryOSError | None = None
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                response = await self._client.request(method, path, json=json, params=params)
+                response = await self._client.request(method, path, json=json, params=params, headers=headers)
             except httpx.HTTPError as exc:
                 raise MemoryOSError(f"MemoryOS request failed: {exc}") from exc
 
