@@ -1,5 +1,5 @@
 {
-  "name": "@memoryos/sdk",
+  "name": "memoryo-sdk",
   "version": "0.1.0",
   "description": "Zero-dependency TypeScript SDK for the MemoryOS API.",
   "type": "module",
@@ -23,6 +23,7 @@
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test:contract": "npm run build && node --test tests/contract.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {

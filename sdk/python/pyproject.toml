@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memoryos"
+name = "memoryo-sdk"
 version = "0.1.0"
 description = "Production Python SDK for the MemoryOS API."
 requires-python = ">=3.11"

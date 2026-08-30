@@ -1,7 +1,7 @@
 # MemoryOS TypeScript SDK
 
 ```bash
-npm install @memoryos/sdk
+npm install memoryo-sdk
 ```
 
 ## Start simple: solo builders and small teams
@@ -10,17 +10,21 @@ npm install @memoryos/sdk
 > You do **not** need `eventId`, `runId`, service writers, or authority rules to start. MemoryOS creates safe internal source metadata automatically.
 
 ```ts
-import { MemoryOS } from "@memoryos/sdk";
+import { MemoryOS } from "memoryo-sdk";
 
 const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!);
 
-await mem.add(
+const write = await mem.add(
   [
     { role: "user", content: "I prefer short answers when debugging." },
     { role: "assistant", content: "Got it. I will keep debugging replies concise." },
   ],
   "user_123",
 );
+
+if (!write.jobId) throw new Error(`Memory write was not queued: ${write.status}`);
+const job = await mem.waitForJob(write.jobId);
+if (!job.succeeded) throw new Error(`Memory write failed: ${job.errorSummary ?? job.status}`);
 
 const context = await mem.get(
   "How should I answer this user?",
@@ -39,10 +43,10 @@ This is the recommended first integration. Add source metadata only when more th
 > **For whom:** teams where multiple services can write facts about the same user.
 > Use this when you need auditability, deduplication, conflict handling, or source-of-truth routing.
 
-Early teams can use one tenant API key and pass `source.service`:
+After registering the service writers in the Tenant Dashboard, teams can pass their registered `source.service` keys:
 
 ```ts
-import { MemoryOS } from "@memoryos/sdk";
+import { MemoryOS } from "memoryo-sdk";
 
 const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!);
 
@@ -67,7 +71,7 @@ await mem.add(
 );
 ```
 
-Production teams should register service writers in the dashboard and bind dedicated API keys. Then Billing, Support, CRM, and other services can have different authority rules without changing the basic SDK flow.
+Production teams should also bind dedicated API keys to those writers. Then Billing, Support, CRM, and other services can have different authority rules without changing the basic SDK flow.
 
 ## Webhook Signature Verification
 
@@ -97,9 +101,9 @@ if (!signature || !verifyMemoryOSWebhook(rawBody, signature, WEBHOOK_SECRET)) {
 ```
 
 ```ts
-import { MemoryOS } from "@memoryos/sdk";
+import { MemoryOS } from "memoryo-sdk";
 
-const client = new MemoryOS("mem_live_xxx", "https://api.memoryos.io");
+const client = new MemoryOS("mem_live_xxx", "https://api.memoryo.dev");
 
 const result = await client.add(
   [{ role: "user", content: "I prefer Python and FastAPI" }],
@@ -117,7 +121,7 @@ console.log(memories.quotaMode);
 console.log(memories.items[0]?.content ?? "No memories found");
 ```
 
-`@memoryos/sdk` is a strict, zero-runtime-dependency client for the MemoryOS API.
+`memoryo-sdk` is a strict, zero-runtime-dependency client for the MemoryOS API.
 
 - Native `fetch` only
 - Works in Node.js 18+ and modern browsers
@@ -128,7 +132,7 @@ console.log(memories.items[0]?.content ?? "No memories found");
 ## Quickstart
 
 1. Create an API key in MemoryOS.
-2. Install with `npm install @memoryos/sdk`.
+2. Install with `npm install memoryo-sdk`.
 3. Import `MemoryOS`.
 4. Construct the client with your API key.
 5. Override `baseUrl` only for local or self-hosted environments.

@@ -1,7 +1,7 @@
 ﻿# MemoryOS Python SDK
 
 ```bash
-pip install memoryos
+pip install memoryo-sdk
 ```
 
 ## Start simple: solo builders and small teams
@@ -15,13 +15,19 @@ from memoryos import Memory
 
 mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"])
 
-mem.add(
+write = mem.add(
     external_user_id="user_123",
     messages=[
         {"role": "user", "content": "I prefer short answers when debugging."},
         {"role": "assistant", "content": "Got it. I will keep debugging replies concise."},
     ],
 )
+
+if not write.job_id:
+    raise RuntimeError(f"Memory write was not queued: {write.status}")
+job = mem.wait_for_job(write.job_id)
+if not job.succeeded:
+    raise RuntimeError(f"Memory write failed: {job.error_summary or job.status}")
 
 context = mem.get(
     external_user_id="user_123",
@@ -39,7 +45,7 @@ This is the recommended first integration. Add source metadata only when more th
 > **For whom:** teams where multiple services can write facts about the same user.
 > Use this when you need auditability, deduplication, conflict handling, or source-of-truth routing.
 
-Early teams can use one tenant API key and pass `source.service`:
+After registering the service writers in the Tenant Dashboard, teams can pass their registered `source.service` keys:
 
 ```python
 from memoryos import Memory
@@ -64,7 +70,7 @@ mem.add(
 )
 ```
 
-Production teams should register service writers in the dashboard and bind dedicated API keys. Then Billing, Support, CRM, and other services can have different authority rules without changing the basic SDK flow.
+Production teams should also bind dedicated API keys to those writers. Then Billing, Support, CRM, and other services can have different authority rules without changing the basic SDK flow.
 
 ## New in this release
 
@@ -167,7 +173,7 @@ import os
 
 from memoryos import Memory
 
-client = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url="https://api.memoryos.io")
+client = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url="https://api.memoryo.dev")
 
 result = client.add(
     external_user_id="student_44821",
@@ -291,7 +297,7 @@ if result.retrieval_id:
 ## Quickstart
 
 1. Create an API key in the MemoryOS dashboard.
-2. Install the package with `pip install memoryos`.
+2. Install the package with `pip install memoryo-sdk`.
 3. Import `Memory` for sync code or `AsyncMemory` for async apps.
 4. Pass your API key as `api_key="mem_live_..."`.
 5. Override `base_url` only for local or self-hosted environments.
