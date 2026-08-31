@@ -1,16 +1,38 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "memoryo-sdk"
 version = "0.1.0"
-description = "Production Python SDK for the MemoryOS API."
+description = "Python SDK for governed, traceable AI memory with MemoryOS."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "MemoryO", email = "support@memoryo.dev" },
+]
 requires-python = ">=3.11"
+keywords = ["ai", "agents", "memory", "governance", "provenance", "sdk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "httpx>=0.27,<1.0",
     "pydantic>=2.7,<3.0",
 ]
+
+[project.urls]
+Homepage = "https://memoryo.dev"
+Documentation = "https://docs.memoryo.dev/sdk/python"
+Repository = "https://github.com/memengine/memory-api"
+Issues = "https://github.com/memengine/memory-api/issues"
 
 [tool.setuptools.packages.find]
 include = ["memoryos*"]
