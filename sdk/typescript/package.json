@@ -1,7 +1,30 @@
 {
   "name": "memoryo-sdk",
   "version": "0.1.0",
-  "description": "Zero-dependency TypeScript SDK for the MemoryOS API.",
+  "description": "Zero-runtime-dependency TypeScript SDK for governed, traceable AI memory with MemoryOS.",
+  "license": "MIT",
+  "author": {
+    "name": "MemoryO",
+    "email": "support@memoryo.dev",
+    "url": "https://memoryo.dev"
+  },
+  "homepage": "https://docs.memoryo.dev/sdk/typescript",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/memengine/memory-api.git",
+    "directory": "sdk/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/memengine/memory-api/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "memory",
+    "governance",
+    "provenance",
+    "sdk"
+  ],
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -15,8 +38,12 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "engines": {
     "node": ">=18"
