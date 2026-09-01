@@ -102,15 +102,6 @@ class QualityGateService:
             gemini_client=client,
         )
 
-    def _mark_redis_unavailable(self) -> None:
-        breaker = getattr(self.cache_service, "breaker", None)
-        force_open = getattr(breaker, "force_open", None)
-        if callable(force_open):
-            try:
-                force_open()
-            except Exception:
-                return None
-
     async def check(
         self,
         messages: list[dict[str, Any]],
@@ -239,7 +230,6 @@ class QualityGateService:
                 fallback=lambda: on_redis_open([]),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         query_text = self._conversation_text(messages)
@@ -306,7 +296,6 @@ class QualityGateService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return
 
     async def _get_redis_count(self, rate_key: str) -> int:
@@ -317,7 +306,6 @@ class QualityGateService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return 0
         return int(raw_value) if raw_value is not None else 0
 
@@ -403,7 +391,6 @@ class QualityGateService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return
 
     async def _redis_call(self, fn, *args, fallback=None, **kwargs):

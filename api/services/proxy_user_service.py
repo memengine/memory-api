@@ -65,15 +65,6 @@ class ProxyUserService:
         self.qdrant_service = qdrant_service
         self.region_id = region_id
 
-    def _mark_redis_unavailable(self) -> None:
-        breaker = getattr(self.cache_service, "breaker", None)
-        force_open = getattr(breaker, "force_open", None)
-        if callable(force_open):
-            try:
-                force_open()
-            except Exception:
-                return None
-
     async def resolve(
         self,
         tenant_id: str,
@@ -262,7 +253,6 @@ class ProxyUserService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         if cached_value is None:
@@ -306,7 +296,6 @@ class ProxyUserService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _invalidate_cache(self, tenant_id: str, external_user_id_hash: str) -> None:
@@ -317,7 +306,6 @@ class ProxyUserService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     @staticmethod

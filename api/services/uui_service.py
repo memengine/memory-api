@@ -448,7 +448,6 @@ class UUIService:
         try:
             return await self._redis_call(self.cache_service.client.get, key, fallback=lambda: on_redis_open(None))
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _redis_set(self, key: str, value: str, *, ex: int) -> None:
@@ -463,7 +462,6 @@ class UUIService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _redis_delete(self, key: str) -> None:
@@ -476,7 +474,6 @@ class UUIService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _redis_incr(self, key: str) -> int:
@@ -490,7 +487,6 @@ class UUIService:
             )
             return int(value or 0)
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return 0
 
     async def _redis_expire(self, key: str, ttl_seconds: int) -> None:
@@ -504,7 +500,6 @@ class UUIService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _redis_call(self, fn, *args, fallback=None, **kwargs):
@@ -512,17 +507,6 @@ class UUIService:
         if breaker is None or breaker.__class__.__module__.startswith("unittest.mock"):
             return await fn(*args, **kwargs)
         return await breaker.call(fn, *args, fallback=fallback, **kwargs)
-
-    def _mark_redis_unavailable(self) -> None:
-        if self.cache_service is None:
-            return None
-        breaker = getattr(self.cache_service, "breaker", None)
-        force_open = getattr(breaker, "force_open", None)
-        if callable(force_open):
-            try:
-                force_open()
-            except Exception:
-                return None
 
     async def _safe_rollback(self) -> None:
         rollback = getattr(self.session, "rollback", None)

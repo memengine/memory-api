@@ -46,15 +46,6 @@ class QuotaManager:
             dispatch_task=dispatch_task,
         )
 
-    def _mark_redis_unavailable(self) -> None:
-        breaker = getattr(self.cache_service, "breaker", None)
-        force_open = getattr(breaker, "force_open", None)
-        if callable(force_open):
-            try:
-                force_open()
-            except Exception:
-                return None
-
     async def get_mode(self, tenant_id: str) -> QuotaMode:
         envelope = await self.get_quota_envelope(tenant_id)
         return envelope.mode
@@ -78,7 +69,6 @@ class QuotaManager:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _get_tenant_budget(self, tenant_id: str) -> TenantBudget | None:
@@ -221,7 +211,6 @@ class QuotaManager:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         if cached_value is None:
@@ -257,7 +246,6 @@ class QuotaManager:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     @staticmethod
