@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoryos-internal-benchmark-result-v1",
+  "type": "object",
+  "required": ["schema_version", "run_id", "dataset_hash", "summary", "cases"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string"},
+    "dataset_hash": {"type": "string"},
+    "summary": {"type": "object"},
+    "cases": {"type": "array"}
+  }
+}
