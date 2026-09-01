@@ -280,9 +280,9 @@ class SupportExtractor:
         *,
         fields_updated: set[str],
         job_id: str,
-    ) -> None:
+    ) -> list[Any]:
         try:
-            ClaimLedgerService(self.session).record_domain_fields(
+            return ClaimLedgerService(self.session).record_domain_fields(
                 domain_record=memory,
                 domain="support",
                 fields_updated=fields_updated,
