@@ -4,6 +4,7 @@ import os
 import uuid
 
 from celery import shared_task
+from celery.signals import worker_process_shutdown
 from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,13 +12,50 @@ from sqlalchemy.orm import sessionmaker
 
 from api.db.database import get_sync_database_url
 from api.db.models import TenantBudget
+from api.infra.postgres_benchmark import instrument_engine
+from api.infra.postgres_benchmark import session_factory_owner
 from api.services.webhook_event_service import WebhookEventService
+
+
+_QUALITY_GATE_SESSION_FACTORY: sessionmaker[Session] | None = None
+_QUALITY_GATE_SESSION_FACTORY_PID: int | None = None
+
+
+def build_quality_gate_session_factory() -> sessionmaker[Session]:
+    global _QUALITY_GATE_SESSION_FACTORY
+    global _QUALITY_GATE_SESSION_FACTORY_PID
+
+    process_id = os.getpid()
+    if (
+        _QUALITY_GATE_SESSION_FACTORY is None
+        or _QUALITY_GATE_SESSION_FACTORY_PID != process_id
+    ):
+        dispose_quality_gate_session_factory()
+        engine = create_engine(get_sync_database_url(), pool_pre_ping=True)
+        instrument_engine(engine, kind="sync", owner=session_factory_owner())
+        _QUALITY_GATE_SESSION_FACTORY = sessionmaker(bind=engine, expire_on_commit=False)
+        _QUALITY_GATE_SESSION_FACTORY_PID = process_id
+    return _QUALITY_GATE_SESSION_FACTORY
+
+
+@worker_process_shutdown.connect
+def dispose_quality_gate_session_factory(**_extra: object) -> None:
+    global _QUALITY_GATE_SESSION_FACTORY
+    global _QUALITY_GATE_SESSION_FACTORY_PID
+
+    factory = _QUALITY_GATE_SESSION_FACTORY
+    _QUALITY_GATE_SESSION_FACTORY = None
+    _QUALITY_GATE_SESSION_FACTORY_PID = None
+    if factory is None:
+        return
+    engine = factory.kw.get("bind")
+    if engine is not None:
+        engine.dispose()
 
 
 @shared_task(name="api.tasks.quality_gate_tasks.increment_tenant_budget_usage")
 def increment_tenant_budget_usage(tenant_id: str, estimated_tokens: int) -> bool:
-    engine = create_engine(get_sync_database_url(), pool_pre_ping=True)
-    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    session_factory = build_quality_gate_session_factory()
 
     with session_factory() as session:
         tenant_budget = _get_tenant_budget(session, tenant_id)
@@ -37,8 +75,7 @@ def increment_tenant_budget_usage(tenant_id: str, estimated_tokens: int) -> bool
     default_retry_delay=2,
 )
 def send_budget_alert(self, tenant_id: str, usage_pct: float, estimated_tokens: int) -> bool:
-    engine = create_engine(get_sync_database_url(), pool_pre_ping=True)
-    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    session_factory = build_quality_gate_session_factory()
 
     with session_factory() as session:
         tenant_budget = _get_tenant_budget(session, tenant_id)

@@ -22,6 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 from api.db.database import build_sync_session_factory
 from api.db.models import TenantBudget
+from api.infra.postgres_benchmark import postgres_benchmark_enabled
 from api.utils.webhook_validator import validate_webhook_url
 
 
@@ -56,7 +57,14 @@ class WebhookEventService:
         client_factory=None,
     ) -> None:
         self.session = session
+        factory_started = time.perf_counter()
         self.session_factory = session_factory or build_sync_session_factory()
+        if session_factory is None and postgres_benchmark_enabled():
+            LOGGER.warning(json.dumps({
+                "event": "request_phase_benchmark",
+                "phase": "webhook_session_factory_creation",
+                "duration_ms": round((time.perf_counter() - factory_started) * 1000, 2),
+            }, sort_keys=True))
         self.dispatch_task = dispatch_task
         self.client_factory = client_factory or (lambda: httpx.Client(timeout=5.0))
 
