@@ -80,6 +80,29 @@ class FakeSessionFactory:
         return self.session
 
 
+def test_auth_outer_deadline_records_one_threshold_governed_failure() -> None:
+    class TrackingBreaker:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def record_external_failure(self, **kwargs) -> None:
+            self.calls.append(kwargs)
+
+    middleware = object.__new__(AuthMiddleware)
+    middleware.redis_breaker = TrackingBreaker()
+
+    middleware._record_redis_deadline_failure("api_key_cache_lookup")
+
+    assert middleware.redis_breaker.calls == [
+        {
+            "source": "auth_outer_deadline",
+            "client_role": "auth",
+            "reason": "outer_deadline",
+            "operation": "api_key_cache_lookup",
+        }
+    ]
+
+
 def build_rsa_jwks() -> tuple[str, dict]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_pem = private_key.private_bytes(

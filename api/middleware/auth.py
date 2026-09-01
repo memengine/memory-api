@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -35,6 +36,8 @@ from api.db.cache import get_redis_url
 from api.db.models import ApiKey
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_redis_open
+from api.infra.redis_benchmark import benchmark_async_redis_from_url
+from api.infra.postgres_benchmark import postgres_benchmark_enabled
 from api.utils.crypto import api_key_prefix
 from api.utils.crypto import fingerprint_api_key
 from api.utils.crypto import verify_api_key
@@ -85,14 +88,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
     ) -> None:
         super().__init__(app)
         self.session_factory = session_factory or SessionLocal
-        self.redis_client = redis_client or redis.from_url(
+        self.redis_client = redis_client or benchmark_async_redis_from_url(
             get_redis_url(redis_url),
             encoding="utf-8",
             decode_responses=True,
-            socket_connect_timeout=0.1,
-            socket_timeout=0.1,
-            retry=Retry(NoBackoff(), 0),
-            retry_on_timeout=False,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            client_role="auth",
         )
         self.redis_breaker = (
             _DirectRedisBreaker()
@@ -108,13 +110,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._jwks_cache: dict[str, Any] | None = None
         self._jwks_cached_at = 0.0
 
-    def _mark_redis_unavailable(self) -> None:
-        force_open = getattr(self.redis_breaker, "force_open", None)
-        if callable(force_open):
-            try:
-                force_open()
-            except Exception:
-                return None
+    def _record_redis_deadline_failure(self, operation: str) -> None:
+        record_failure = getattr(self.redis_breaker, "record_external_failure", None)
+        if callable(record_failure):
+            record_failure(
+                source="auth_outer_deadline",
+                client_role="auth",
+                reason="outer_deadline",
+                operation=operation,
+            )
 
     async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
         # /v1/internal/* is protected by AdminAuthMiddleware — skip tenant auth
@@ -171,7 +175,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if scheme_normalized == "apikey":
+            auth_started = time.perf_counter()
             auth_result = await self._authenticate_api_key(credentials.strip())
+            if postgres_benchmark_enabled():
+                LOGGER.warning(json.dumps({
+                    "event": "request_phase_benchmark",
+                    "phase": "api_key_auth",
+                    "duration_ms": round((time.perf_counter() - auth_started) * 1000, 2),
+                    "path": request.url.path,
+                }, sort_keys=True))
             if auth_result is None:
                 return await self._unauthorized(
                     request=request,
@@ -308,7 +320,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             cached_value = None
 
         if cached_value:
@@ -344,7 +355,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
+            pass
 
         return tenant_id_str
 
@@ -400,17 +411,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def _authenticate_api_key(self, raw_api_key: str) -> ApiKeyAuthResult | None:
         cache_key = self._api_key_cache_key(raw_api_key)
+        cache_started = time.perf_counter()
+        cache_outcome = "miss"
         try:
             cached_auth = await asyncio.wait_for(
                 self._get_cached_api_key_auth(cache_key, raw_api_key),
                 timeout=0.2,
             )
         except TimeoutError:
-            self._mark_redis_unavailable()
+            self._record_redis_deadline_failure("api_key_cache_lookup")
             cached_auth = None
+            cache_outcome = "timeout"
+        if cached_auth is not None:
+            cache_outcome = "hit"
+        if postgres_benchmark_enabled():
+            LOGGER.warning(json.dumps({
+                "event": "api_key_auth_benchmark",
+                "phase": "cache_lookup",
+                "outcome": cache_outcome,
+                "duration_ms": round((time.perf_counter() - cache_started) * 1000, 2),
+            }, sort_keys=True))
         if cached_auth is not None:
             return cached_auth
 
+        database_started = time.perf_counter()
         async with self.session_factory() as session:
             result = await session.execute(
                 select(ApiKey).where(
@@ -425,7 +449,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
                 api_keys = list(result.scalars().all())
             for api_key in api_keys:
-                if verify_api_key(raw_api_key, api_key.key_hash):
+                bcrypt_started = time.perf_counter()
+                verified = verify_api_key(raw_api_key, api_key.key_hash)
+                if postgres_benchmark_enabled():
+                    LOGGER.warning(json.dumps({
+                        "event": "api_key_auth_benchmark",
+                        "phase": "bcrypt_verification",
+                        "outcome": "matched" if verified else "rejected",
+                        "duration_ms": round((time.perf_counter() - bcrypt_started) * 1000, 2),
+                    }, sort_keys=True))
+                if verified:
                     api_key.last_used_at = datetime.now(UTC)
                     if hasattr(session, "commit"):
                         await session.commit()
@@ -438,13 +471,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     )
                     try:
                         await asyncio.wait_for(
-                            self._cache_api_key_auth(cache_key, auth_result),
+                            self._cache_api_key_auth(cache_key, raw_api_key, auth_result),
                             timeout=0.2,
                         )
                     except TimeoutError:
-                        self._mark_redis_unavailable()
+                        self._record_redis_deadline_failure("api_key_cache_write")
                         pass
+                    if postgres_benchmark_enabled():
+                        LOGGER.warning(json.dumps({
+                            "event": "api_key_auth_benchmark",
+                            "phase": "database_fallback",
+                            "outcome": "authenticated",
+                            "duration_ms": round((time.perf_counter() - database_started) * 1000, 2),
+                        }, sort_keys=True))
                     return auth_result
+        if postgres_benchmark_enabled():
+            LOGGER.warning(json.dumps({
+                "event": "api_key_auth_benchmark",
+                "phase": "database_fallback",
+                "outcome": "rejected",
+                "duration_ms": round((time.perf_counter() - database_started) * 1000, 2),
+            }, sort_keys=True))
         return None
 
     async def _get_jwks(self) -> dict[str, Any]:
@@ -470,7 +517,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         if cached_value is None:
@@ -482,7 +528,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return None
 
         key_hash = str(payload.get("key_hash", ""))
-        if not key_hash or not verify_api_key(raw_api_key, key_hash):
+        cached_fingerprint = str(payload.get("api_key_fingerprint", ""))
+        if (
+            not key_hash
+            or not cached_fingerprint
+            or not hmac.compare_digest(
+                fingerprint_api_key(raw_api_key),
+                cached_fingerprint,
+            )
+        ):
             return None
 
         tenant_id = payload.get("tenant_id")
@@ -497,7 +551,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             key_hash=key_hash,
         )
 
-    async def _cache_api_key_auth(self, cache_key: str, auth_result: ApiKeyAuthResult) -> None:
+    async def _cache_api_key_auth(
+        self,
+        cache_key: str,
+        raw_api_key: str,
+        auth_result: ApiKeyAuthResult,
+    ) -> None:
         try:
             await self.redis_breaker.call(
                 self.redis_client.set,
@@ -508,13 +567,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         "user_id": auth_result.user_id,
                         "api_key_id": auth_result.api_key_id,
                         "key_hash": auth_result.key_hash,
+                        "api_key_fingerprint": fingerprint_api_key(raw_api_key),
                     }
                 ),
                 ex=AUTH_CACHE_TTL_SECONDS,
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def _unauthorized(
@@ -609,7 +668,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
             return attempt_count
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return 1
 
     @staticmethod

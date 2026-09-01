@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -19,6 +20,7 @@ from jose.utils import base64url_encode
 
 from api.db.models import ApiKey
 from api.middleware.auth import AuthMiddleware
+from api.utils.crypto import fingerprint_api_key
 from api.utils.crypto import hash_api_key
 
 
@@ -368,9 +370,20 @@ def test_tampered_jwt_with_wrong_signature_is_rejected() -> None:
     assert response.json()["code"] == "AUTH_001"
 
 
-def test_api_key_authentication_uses_cache_after_first_lookup() -> None:
+def test_api_key_authentication_uses_cache_after_first_lookup(monkeypatch) -> None:
     raw_api_key = "sdk_secret_key"
     api_key = make_api_key(raw_key=raw_api_key, user_id=uuid.uuid4())
+    from api.middleware import auth as auth_module
+
+    bcrypt_verifications = 0
+    real_verify_api_key = auth_module.verify_api_key
+
+    def counting_verify_api_key(candidate: str, key_hash: str) -> bool:
+        nonlocal bcrypt_verifications
+        bcrypt_verifications += 1
+        return real_verify_api_key(candidate, key_hash)
+
+    monkeypatch.setattr(auth_module, "verify_api_key", counting_verify_api_key)
     session_factory = FakeSessionFactory(api_keys=[api_key])
     redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
     app = build_test_app(
@@ -386,6 +399,38 @@ def test_api_key_authentication_uses_cache_after_first_lookup() -> None:
     assert second_response.status_code == 200
     assert first_response.json()["user_id"] == str(api_key.user_id)
     assert second_response.json()["auth_scheme"] == "apikey"
+    assert session_factory.session.execute_calls == 1
+    assert bcrypt_verifications == 1
+
+
+def test_legacy_api_key_cache_entry_is_revalidated_against_database() -> None:
+    raw_api_key = "sdk_legacy_cache_key"
+    api_key = make_api_key(raw_key=raw_api_key, user_id=uuid.uuid4())
+    session_factory = FakeSessionFactory(api_keys=[api_key])
+    redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cache_key = f"apikey:{fingerprint_api_key(raw_api_key)[:16]}:tenant_auth"
+    asyncio.run(
+        redis_client.set(
+            cache_key,
+            json.dumps(
+                {
+                    "user_id": str(api_key.user_id),
+                    "api_key_id": str(api_key.id),
+                    "key_hash": api_key.key_hash,
+                }
+            ),
+            ex=300,
+        )
+    )
+    app = build_test_app(
+        session_factory=session_factory,
+        redis_client=redis_client,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/private", headers={"Authorization": f"ApiKey {raw_api_key}"})
+
+    assert response.status_code == 200
     assert session_factory.session.execute_calls == 1
 
 
