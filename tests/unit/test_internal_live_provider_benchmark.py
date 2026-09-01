@@ -13,7 +13,7 @@ from benchmarks.internal.live_provider import (
 def test_live_provider_loader_is_development_only() -> None:
     cases = load_development_cases()
 
-    assert len(cases) == 46
+    assert len(cases) == 49
     assert all(case.split == "development" for case in cases)
 
 
