@@ -1,0 +1,15 @@
+{
+  "baseline": "historical-retrieval-postgres-ranking-development-v1",
+  "artifact": "artifacts/internal-benchmarks/historical-retrieval-postgres-baseline-v1.json",
+  "scenario_count": 8,
+  "historical_precision_at_k": 0.3958333333333333,
+  "historical_recall_at_k": 1.0,
+  "historical_mrr": 0.375,
+  "historical_ndcg": 0.5415626532622794,
+  "incorrect_historical_filler_results": 14,
+  "current_state_leakage_into_historical": 0,
+  "historical_state_leakage_into_current": 0,
+  "provenance_preservation": 1.0,
+  "holdout_used": false,
+  "production_behavior_changed": false
+}
