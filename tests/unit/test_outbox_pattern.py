@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from api.db.models import Memory
 from api.db.models import MemoryCategory
@@ -61,6 +62,33 @@ class FakeVectorSession:
 
     def add(self, item) -> None:
         self.added.append(item)
+
+
+def test_vector_sync_session_factory_is_reused_per_worker_process(monkeypatch) -> None:
+    first_factory = SimpleNamespace(kw={"bind": MagicMock()})
+    second_factory = SimpleNamespace(kw={"bind": MagicMock()})
+    factories = iter([first_factory, second_factory])
+    build_calls: list[int] = []
+
+    vector_sync_tasks.dispose_vector_sync_session_factory()
+    monkeypatch.setattr(vector_sync_tasks.os, "getpid", lambda: 101)
+    monkeypatch.setattr(
+        vector_sync_tasks,
+        "build_sync_session_factory",
+        lambda: build_calls.append(1) or next(factories),
+    )
+
+    assert vector_sync_tasks.build_vector_sync_session_factory() is first_factory
+    assert vector_sync_tasks.build_vector_sync_session_factory() is first_factory
+    assert len(build_calls) == 1
+
+    monkeypatch.setattr(vector_sync_tasks.os, "getpid", lambda: 202)
+    assert vector_sync_tasks.build_vector_sync_session_factory() is second_factory
+    assert len(build_calls) == 2
+    first_factory.kw["bind"].dispose.assert_called_once_with()
+
+    vector_sync_tasks.dispose_vector_sync_session_factory()
+    second_factory.kw["bind"].dispose.assert_called_once_with()
 
 
 def make_memory(*, tenant_id: uuid.UUID, proxy_user_id: uuid.UUID, content: str = "User prefers Python") -> Memory:
@@ -145,7 +173,7 @@ def test_conflict_resolver_enqueues_outbox_rows_instead_of_direct_qdrant_writes(
 
     outbox_rows = [item for item in session.added if isinstance(item, VectorSyncOutbox)]
     assert len(stored) == 1
-    assert [row.operation for row in outbox_rows] == [VectorSyncOperation.delete, VectorSyncOperation.upsert]
+    assert [row.operation for row in outbox_rows] == [VectorSyncOperation.archive, VectorSyncOperation.upsert]
 
 
 def test_run_outbox_cycle_batches_upserts_and_marks_done(monkeypatch) -> None:

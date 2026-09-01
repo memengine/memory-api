@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from typing import Any
 
 from celery import shared_task
+from celery.signals import worker_process_shutdown
 from qdrant_client.http import models as qmodels
 import sentry_sdk
 from sqlalchemy import Select
@@ -31,10 +33,39 @@ VECTOR_SYNC_TASK_BEAT_SCHEDULE = {
         "schedule": 5.0,
     }
 }
+_VECTOR_SYNC_SESSION_FACTORY: sessionmaker[Session] | None = None
+_VECTOR_SYNC_SESSION_FACTORY_PID: int | None = None
 
 
 def build_vector_sync_session_factory() -> sessionmaker[Session]:
-    return build_sync_session_factory()
+    global _VECTOR_SYNC_SESSION_FACTORY
+    global _VECTOR_SYNC_SESSION_FACTORY_PID
+
+    process_id = os.getpid()
+    if (
+        _VECTOR_SYNC_SESSION_FACTORY is None
+        or _VECTOR_SYNC_SESSION_FACTORY_PID != process_id
+    ):
+        dispose_vector_sync_session_factory()
+        _VECTOR_SYNC_SESSION_FACTORY = build_sync_session_factory()
+        _VECTOR_SYNC_SESSION_FACTORY_PID = process_id
+    return _VECTOR_SYNC_SESSION_FACTORY
+
+
+@worker_process_shutdown.connect
+def dispose_vector_sync_session_factory(**_extra: Any) -> None:
+    """Dispose the process-local vector-outbox engine when a Celery child exits."""
+    global _VECTOR_SYNC_SESSION_FACTORY
+    global _VECTOR_SYNC_SESSION_FACTORY_PID
+
+    factory = _VECTOR_SYNC_SESSION_FACTORY
+    _VECTOR_SYNC_SESSION_FACTORY = None
+    _VECTOR_SYNC_SESSION_FACTORY_PID = None
+    if factory is None:
+        return
+    engine = factory.kw.get("bind")
+    if engine is not None:
+        engine.dispose()
 
 
 def run_outbox_cycle(
@@ -68,6 +99,7 @@ def run_outbox_cycle(
 
         upsert_rows = [row for row in claimed_rows if row.operation == VectorSyncOperation.upsert]
         delete_rows = [row for row in claimed_rows if row.operation == VectorSyncOperation.delete]
+        archive_rows = [row for row in claimed_rows if row.operation == VectorSyncOperation.archive]
         done = 0
         failed = 0
 
