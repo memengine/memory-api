@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.db.cache import CacheService
+from api.infra.redis_benchmark import benchmark_async_redis_from_url
 from api.db.database import build_async_session_factory
 from api.db.database import build_sync_session_factory
 from api.db.database import get_database_url
@@ -125,10 +126,11 @@ class RegionConnectionPool:
         redis_url = str(self._extract_connection_value(redis_value, kind="redis"))
         qdrant_api_key = self._extract_api_key(qdrant_value, region_id=region_id)
 
-        redis_client = redis.from_url(
+        redis_client = benchmark_async_redis_from_url(
             redis_url,
             encoding="utf-8",
             decode_responses=True,
+            client_role="cache",
         )
         cache_service = CacheService(client=redis_client, use_direct_breaker=False)
 
