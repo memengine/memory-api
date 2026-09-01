@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "baseline": "fault-injection-reliability-v3-post-crash-barrier",
+  "classification": "development",
+  "dataset": "benchmarks/internal/datasets/fault_injection/development/extension_v3.jsonl",
+  "summary": {
+    "scenario_count": 19,
+    "evaluable_product_scenarios": 19,
+    "passed": 19,
+    "product_failures": 0,
+    "harness_errors": 0,
+    "reliability_success_rate": 1.0
+  },
+  "holdout_used": false
+}
