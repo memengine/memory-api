@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import UTC
 from datetime import datetime
@@ -11,6 +13,7 @@ from typing import Callable
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,8 @@ from api.db.models import EmbeddingModel
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
+from api.db.models import MemoryClaim
+from api.db.models import MemoryClaimRevision
 from api.db.models import MemorySourceEvent
 from api.db.models import ProxyUser
 from api.db.vector_store import QdrantService
@@ -43,6 +48,7 @@ from api.settings import get_settings
 EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
 DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
 DispatchTask = Callable[[str, list[Any]], Awaitable[Any] | Any]
+LOGGER = logging.getLogger("memoryos.memory_service")
 
 
 class MemoryService:
@@ -404,7 +410,7 @@ class MemoryService:
                 )
         await self.session.commit()
         await self.session.refresh(memory)
-        await self.cache_service.invalidate_user_cache(self._cache_identity(memory))
+        await self._invalidate_retrieval_caches(self._cache_identity(memory))
         return memory
 
     async def delete_memory(
@@ -437,7 +443,7 @@ class MemoryService:
                     "qdrant_collection": qdrant_collection,
                 },
             )
-            await self.session.delete(memory)
+            await self._hard_delete_memory_and_reconcile_claims(memory)
         else:
             memory.is_archived = True
             await VersionService(self.session).asafe_record_version(
@@ -457,8 +463,80 @@ class MemoryService:
                 },
             )
         await self.session.commit()
-        await self.cache_service.invalidate_user_cache(self._cache_identity(memory))
+        await self._invalidate_retrieval_caches(self._cache_identity(memory))
         return True
+
+    async def _invalidate_retrieval_caches(self, cache_identity: str) -> None:
+        await self.cache_service.invalidate_user_cache(cache_identity)
+        # Local import avoids coupling RetrieverService construction to write paths.
+        from api.services.retriever import RetrieverService
+
+        RetrieverService.invalidate_local_user_cache(cache_identity)
+
+    async def _hard_delete_memory_and_reconcile_claims(self, memory: Memory) -> None:
+        """Remove a memory and transactionally eliminate stale claim truth.
+
+        This does not choose a new winner. A still-activated revision remains the winner;
+        otherwise the claim is archived and cleared. Claims with no revisions are deleted.
+        """
+        claim_ids = list(
+            (
+                await self.session.execute(
+                    select(MemoryClaimRevision.claim_id)
+                    .where(MemoryClaimRevision.memory_id == memory.id)
+                    .distinct()
+                )
+            ).scalars().all()
+        )
+        claims = []
+        if claim_ids:
+            claims = list(
+                (
+                    await self.session.execute(
+                        select(MemoryClaim)
+                        .where(MemoryClaim.id.in_(claim_ids))
+                        .order_by(MemoryClaim.id)
+                        .with_for_update()
+                    )
+                ).scalars().all()
+            )
+
+        await self.session.delete(memory)
+        await self.session.flush()
+
+        for claim in claims:
+            revisions = list(
+                (
+                    await self.session.execute(
+                        select(MemoryClaimRevision)
+                        .where(MemoryClaimRevision.claim_id == claim.id)
+                        .order_by(MemoryClaimRevision.created_at.desc())
+                        .with_for_update()
+                    )
+                ).scalars().all()
+            )
+            if not revisions:
+                await self.session.delete(claim)
+                continue
+
+            activated = [revision for revision in revisions if revision.status == "activated"]
+            if len(activated) == 1:
+                winner = activated[0]
+                claim.status = "active"
+                claim.active_value = winner.asserted_value
+                claim.active_memory_id = winner.memory_id
+                claim.winning_revision_id = winner.id
+                claim.authority_priority = winner.authority_priority
+                claim.confidence_score = winner.confidence_score
+                claim.observed_at = winner.observed_at or claim.observed_at
+            else:
+                # Do not promote a superseded/disputed revision during privacy deletion.
+                claim.status = "archived"
+                claim.active_value = None
+                claim.active_memory_id = None
+                claim.winning_revision_id = None
+            claim.updated_at = datetime.now(UTC)
+            self.session.add(claim)
 
     async def get_job_status(self, *, job_id: str) -> dict[str, Any]:
         job_row = await self.session.get(ExtractionJob, uuid.UUID(job_id))
@@ -706,13 +784,34 @@ class MemoryService:
             return None
         try:
             queue_name = job.get("queue_name")
-            dispatched = self.dispatch_task(
+            dispatched = await asyncio.to_thread(
+                self.dispatch_task,
                 EXTRACTION_TASK_NAME,
                 args=[job],
                 queue=queue_name,
             )
             if dispatched is not None and hasattr(dispatched, "__await__"):
-                await dispatched
+                dispatched = await dispatched
+            task_id = str(getattr(dispatched, "id", "") or "").strip()
+            if task_id:
+                try:
+                    await self.session.execute(
+                        update(ExtractionJob)
+                        .where(
+                            ExtractionJob.id == uuid.UUID(str(job["job_id"])),
+                            ExtractionJob.status == ExtractionJobStatus.queued,
+                            ExtractionJob.celery_task_id.is_(None),
+                        )
+                        .values(celery_task_id=task_id, updated_at=datetime.now(UTC))
+                    )
+                    await self.session.commit()
+                except Exception:
+                    await self.session.rollback()
+                    LOGGER.exception(
+                        "extraction_dispatch_task_id_persistence_failed job_id=%s task_id=%s",
+                        job.get("job_id"),
+                        task_id,
+                    )
             return None
         except Exception:
             return "dispatch_failed"

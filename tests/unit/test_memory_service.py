@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -10,6 +12,8 @@ import pytest
 
 from api.db.models import Memory
 from api.db.models import MemoryCategory
+from api.db.models import MemoryClaim
+from api.db.models import MemoryClaimRevision
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import QuotaMode
@@ -167,6 +171,38 @@ async def test_queue_memory_add_dispatches_extraction_task_when_queued() -> None
     assert dispatch_task.calls[0][0] == "api.tasks.extraction_tasks.process_extraction_job"
     assert dispatch_task.calls[0][2]["args"][0]["job_id"] == result["job_id"]
     assert dispatch_task.calls[0][2]["queue"] is None
+
+
+@pytest.mark.asyncio
+async def test_extraction_task_dispatch_does_not_block_event_loop() -> None:
+    dispatch_entered = threading.Event()
+    release_dispatch = threading.Event()
+
+    def blocking_dispatch(*args, **kwargs):
+        dispatch_entered.set()
+        if not release_dispatch.wait(timeout=1.0):
+            raise TimeoutError("test dispatch was not released")
+        return None
+
+    service = MemoryService(
+        session=MagicMock(),
+        cache_service=MagicMock(),
+        qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+        dispatch_task=blocking_dispatch,
+    )
+    dispatch = asyncio.create_task(
+        service._dispatch_extraction_job({"job_id": "job-1", "queue_name": "memory.extract"})
+    )
+
+    try:
+        await asyncio.sleep(0.02)
+        assert dispatch_entered.is_set()
+        assert not dispatch.done()
+    finally:
+        release_dispatch.set()
+
+    assert await dispatch is None
 
 
 @pytest.mark.asyncio
@@ -431,3 +467,78 @@ async def test_delete_memory_uses_tenant_scope_when_tenant_id_present() -> None:
     assert memory.is_archived is True
     session.commit.assert_awaited_once()
     cache_service.invalidate_user_cache.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_removes_claim_when_no_revisions_remain() -> None:
+    memory = Memory(
+        id=uuid4(), user_id=uuid4(), proxy_user_id=uuid4(), content="Deleted fact",
+        category=MemoryCategory.fact, importance_score=7, confidence_score=.9,
+        embedding_id="delete-claim", embedding_model_id="openai-text-embedding-3-small-v1",
+        source_conversation_id=uuid4(), metadata_json={}, is_archived=False,
+    )
+    claim = MemoryClaim(
+        id=uuid4(), tenant_id=uuid4(), proxy_user_id=memory.proxy_user_id,
+        category=MemoryCategory.fact, claim_fingerprint="f" * 64,
+        subject_key="user", predicate_key="city", active_value="Jaipur",
+        status="active", active_memory_id=memory.id, authority_priority=50,
+        confidence_score=.9,
+    )
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[
+        FakeExecuteResult([claim.id]), FakeExecuteResult([claim]), FakeExecuteResult([]),
+    ])
+    session.delete = AsyncMock()
+    session.flush = AsyncMock()
+    service = MemoryService(
+        session=session, cache_service=MagicMock(), qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+    )
+
+    await service._hard_delete_memory_and_reconcile_claims(memory)
+
+    assert session.delete.await_args_list[0].args == (memory,)
+    assert session.delete.await_args_list[1].args == (claim,)
+    session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_preserves_only_existing_activated_winner() -> None:
+    memory = Memory(
+        id=uuid4(), user_id=uuid4(), proxy_user_id=uuid4(), content="Deleted observation",
+        category=MemoryCategory.fact, importance_score=7, confidence_score=.9,
+        embedding_id="delete-one-revision", embedding_model_id="openai-text-embedding-3-small-v1",
+        source_conversation_id=uuid4(), metadata_json={}, is_archived=True,
+    )
+    surviving_memory_id = uuid4()
+    claim = MemoryClaim(
+        id=uuid4(), tenant_id=uuid4(), proxy_user_id=memory.proxy_user_id,
+        category=MemoryCategory.fact, claim_fingerprint="a" * 64,
+        subject_key="user", predicate_key="city", active_value="Deleted",
+        status="active", active_memory_id=memory.id, authority_priority=10,
+        confidence_score=.2,
+    )
+    winner = MemoryClaimRevision(
+        id=uuid4(), claim_id=claim.id, memory_id=surviving_memory_id,
+        asserted_value="Bengaluru", status="activated", authority_priority=80,
+        confidence_score=.95, evidence_refs=[], decision_evidence={},
+        schema_version=1, processor_version="test",
+    )
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[
+        FakeExecuteResult([claim.id]), FakeExecuteResult([claim]), FakeExecuteResult([winner]),
+    ])
+    session.delete = AsyncMock()
+    session.flush = AsyncMock()
+    service = MemoryService(
+        session=session, cache_service=MagicMock(), qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+    )
+
+    await service._hard_delete_memory_and_reconcile_claims(memory)
+
+    assert claim.status == "active"
+    assert claim.active_value == "Bengaluru"
+    assert claim.active_memory_id == surviving_memory_id
+    assert claim.winning_revision_id == winner.id
+    assert claim.authority_priority == 80
