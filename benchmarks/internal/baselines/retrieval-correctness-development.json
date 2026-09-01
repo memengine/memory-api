@@ -1,0 +1,17 @@
+{
+  "baseline": "retrieval-correctness-development-v1",
+  "artifact": "artifacts/internal-benchmarks/retrieval-correctness-baseline-v1.json",
+  "evaluation_layer": "production_hybrid_ranker_with_controlled_vector_scores",
+  "scenario_count": 12,
+  "precision_at_k": 0.9444444444444445,
+  "recall_at_k": 1.0,
+  "mrr": 1.0,
+  "ndcg_at_k": 1.0,
+  "empty_result_accuracy": 1.0,
+  "superseded_memory_leakage_rate": 0.0,
+  "filter_leakage_rate": 0.0,
+  "duplicate_result_rate": 0.0,
+  "provenance_preservation": 1.0,
+  "holdout_used": false,
+  "production_behavior_changed": false
+}
