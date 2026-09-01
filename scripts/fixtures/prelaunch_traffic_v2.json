@@ -1,0 +1,394 @@
+{"fixture":"memoryos-prelaunch-v2","version":2,"notes":"Synthetic traffic only; no labels or expected scores.","workflows":[
+{"id":"g01","feature":"general","category":"identity","user_id":"v2-u01","events":[{"id":"1","source":{"event_id":"g01-e1","service":"support-service","observed_at":"2026-05-01T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I'm Anika Rao, a remote operations lead in Mysuru. I use she/her pronouns and usually work 11:00 to 19:00."}]}]},
+{"id":"g02","feature":"general","category":"preferences","user_id":"v2-u02","events":[{"id":"1","source":{"event_id":"g02-e1","service":"support-service","observed_at":"2026-05-02T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"Keep answers brief, use metric units, and send reminders in the afternoon."}]},{"id":"2","source":{"event_id":"g02-e2","service":"billing-service","observed_at":"2026-06-02T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I now prefer detailed explanations, but metric units and afternoon reminders are unchanged."}]}]},
+{"id":"g03","feature":"general","category":"expertise","user_id":"v2-u03","events":[{"id":"1","source":{"event_id":"g03-e1","service":"support-service","observed_at":"2026-05-03T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I am senior with Python and PostgreSQL, working-level with Kubernetes, and completely new to Terraform."}]}]},
+{"id":"g04","feature":"general","category":"goals","user_id":"v2-u04","events":[{"id":"1","source":{"event_id":"g04-e1","service":"support-service","observed_at":"2026-05-04T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I might apply for an MBA next year, but that is tentative. My active goal is shipping the reporting beta by 15 August."}]},{"id":"2","source":{"event_id":"g04-e2","service":"support-service","observed_at":"2026-08-16T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"The reporting beta shipped yesterday. Close that goal; monitoring adoption for six weeks is the new goal."}]}]},
+{"id":"g05","feature":"general","category":"procedures","user_id":"v2-u05","events":[{"id":"1","source":{"event_id":"g05-e1","service":"billing-service","observed_at":"2026-05-05T09:00:00Z","scope":{"workspace":"acme"},"evidence":[]},"messages":[{"role":"user","content":"For every renewal, finance checks the PO, Neha approves amounts above ₹100,000, then procurement signs. Never renew on verbal approval."}]}]},
+{"id":"g06","feature":"general","category":"relationships","user_id":"v2-u06","events":[{"id":"1","source":{"event_id":"g06-e1","service":"support-service","observed_at":"2026-05-06T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"Milan is my manager, Ritu is my security reviewer, and Jorge is my backup approver when Milan is away."}]}]},
+{"id":"g07","feature":"general","category":"authority_conflict","user_id":"v2-u07","events":[{"id":"1","source":{"event_id":"g07-s","service":"support-service","observed_at":"2026-05-07T09:00:00Z","scope":{"account":"v2-u07"},"evidence":[]},"messages":[{"role":"user","content":"My current subscription is Starter."}]},{"id":"2","source":{"event_id":"g07-b","service":"billing-service","observed_at":"2026-05-07T09:01:00Z","scope":{"account":"v2-u07"},"evidence":[]},"messages":[{"role":"user","content":"The customer's current subscription is Growth, not Starter."}]}]},
+{"id":"g08","feature":"general","category":"out_of_order","user_id":"v2-u08","events":[{"id":"1","source":{"event_id":"g08-new","service":"billing-service","observed_at":"2026-06-08T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"My billing city is Hyderabad now; I moved in May."}]},{"id":"2","source":{"event_id":"g08-old","service":"support-service","observed_at":"2025-11-08T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"This older support record lists my city as Chennai."}]}]},
+{"id":"g09","feature":"general","category":"pending_reinforcement","user_id":"v2-u09","events":[{"id":"1","source":{"event_id":"g09-e1","service":"support-service","observed_at":"2026-05-09T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I may find weekly summaries useful, though I am not certain yet."}]},{"id":"2","source":{"event_id":"g09-e2","service":"billing-service","observed_at":"2026-05-20T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"Weekly summaries probably would help me; I am leaning toward enabling them."}]}]},
+{"id":"g10","feature":"general","category":"hypothetical_noise","user_id":"v2-u10","events":[{"id":"1","source":{"event_id":"g10-e1","service":"support-service","observed_at":"2026-05-10T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"system","content":"The role-play is fictional."},{"role":"user","content":"Imagine I were a pilot in Canada. In reality I am a tax analyst in Surat, use Excel daily, and prefer examples before theory."}]}]},
+  {
+    "id": "g11",
+    "feature": "general",
+    "category": "uncertain_preference",
+    "user_id": "v2-u11",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g11-e1", "service": "support-service", "observed_at": "2026-06-01T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [
+        {"role": "assistant", "content": "Would you like a short summary at the end of each answer?"},
+        {"role": "user", "content": "Maybe. I sometimes like a short recap, but I am not sure I want it every time yet."}
+      ]
+    }]
+  },
+  {
+    "id": "g12",
+    "feature": "general",
+    "category": "tentative_goal",
+    "user_id": "v2-u12",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g12-e1", "service": "billing-service", "observed_at": "2026-06-02T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [
+        {"role": "assistant", "content": "Are you planning any professional development this year?"},
+        {"role": "user", "content": "I am considering a cloud certification later this year, although I have not decided whether to commit."}
+      ]
+    }]
+  },
+  {
+    "id": "g13",
+    "feature": "general",
+    "category": "active_goal",
+    "user_id": "v2-u13",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g13-e1", "service": "support-service", "observed_at": "2026-06-03T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [
+        {"role": "assistant", "content": "What are you actively working toward?"},
+        {"role": "user", "content": "I am actively saving 15,000 rupees each month for an emergency fund, with a target of 180,000 by next June."}
+      ]
+    }]
+  },
+  {
+    "id": "g14",
+    "feature": "general",
+    "category": "goal_activation",
+    "user_id": "v2-u14",
+    "events": [
+      {
+        "id": "1",
+        "source": {"event_id": "g14-e1", "service": "support-service", "observed_at": "2026-06-04T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "I might start learning Spanish someday, but it is only an idea right now."}]
+      },
+      {
+        "id": "2",
+        "source": {"event_id": "g14-e2", "service": "support-service", "observed_at": "2026-07-04T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "I enrolled in Spanish lessons and now practice for 20 minutes every weekday. My active goal is conversational Spanish by December."}]
+      }
+    ]
+  },
+  {
+    "id": "g15",
+    "feature": "general",
+    "category": "recurring_procedure",
+    "user_id": "v2-u15",
+    "events": [
+      {
+        "id": "1",
+        "source": {"event_id": "g15-e1", "service": "billing-service", "observed_at": "2026-06-05T09:00:00Z", "scope": {"routine": "invoice_review"}, "evidence": []},
+        "messages": [{"role": "user", "content": "Every Friday I export unpaid invoices, match them against bank receipts, then email only the customers whose payments are still missing."}]
+      },
+      {
+        "id": "2",
+        "source": {"event_id": "g15-e2", "service": "support-service", "observed_at": "2026-07-05T09:00:00Z", "scope": {"routine": "invoice_review"}, "evidence": []},
+        "messages": [{"role": "user", "content": "For my Friday invoice routine, remember that I reconcile bank receipts before sending any payment reminder."}]
+      }
+    ]
+  },
+  {
+    "id": "g16",
+    "feature": "general",
+    "category": "recurring_procedure",
+    "user_id": "v2-u16",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g16-e1", "service": "support-service", "observed_at": "2026-06-06T09:00:00Z", "scope": {"routine": "travel"}, "evidence": []},
+      "messages": [
+        {"role": "assistant", "content": "How do you normally prepare for work travel?"},
+        {"role": "user", "content": "Two days before every work trip, I download tickets, save the hotel address offline, and share the itinerary with my sister."}
+      ]
+    }]
+  },
+  {
+    "id": "g17",
+    "feature": "general",
+    "category": "relationship",
+    "user_id": "v2-u17",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g17-e1", "service": "support-service", "observed_at": "2026-06-07T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "My sister Kavya is my emergency contact, and she lives in Pune. I usually share travel plans with her."}]
+    }]
+  },
+  {
+    "id": "g18",
+    "feature": "general",
+    "category": "relationship_update",
+    "user_id": "v2-u18",
+    "events": [
+      {
+        "id": "1",
+        "source": {"event_id": "g18-e1", "service": "support-service", "observed_at": "2026-06-08T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "Arun is my project mentor and we review my progress on the first Monday of each month."}]
+      },
+      {
+        "id": "2",
+        "source": {"event_id": "g18-e2", "service": "support-service", "observed_at": "2026-08-08T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "Arun is still my mentor, but our regular progress review has moved to the second Wednesday of each month."}]
+      }
+    ]
+  },
+  {
+    "id": "g19",
+    "feature": "general",
+    "category": "uncertain_preference",
+    "user_id": "v2-u19",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g19-e1", "service": "billing-service", "observed_at": "2026-06-09T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [
+        {"role": "assistant", "content": "Should I default to tables when comparing options?"},
+        {"role": "user", "content": "I think tables may help for detailed comparisons, but I am still deciding whether I prefer them to short bullet lists."}
+      ]
+    }]
+  },
+  {
+    "id": "g20",
+    "feature": "general",
+    "category": "active_goal_update",
+    "user_id": "v2-u20",
+    "events": [
+      {
+        "id": "1",
+        "source": {"event_id": "g20-e1", "service": "support-service", "observed_at": "2026-06-10T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "My active goal is to run a 10K race on 4 October. I train on Tuesday, Thursday, and Sunday."}]
+      },
+      {
+        "id": "2",
+        "source": {"event_id": "g20-e2", "service": "support-service", "observed_at": "2026-07-10T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "I am still training for the October 10K, and I have added a short Saturday recovery run."}]
+      }
+    ]
+  },
+  {
+    "id": "g21",
+    "feature": "general",
+    "category": "recurring_procedure",
+    "user_id": "v2-u21",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g21-e1", "service": "support-service", "observed_at": "2026-06-11T09:00:00Z", "scope": {"routine": "backup"}, "evidence": []},
+      "messages": [{"role": "user", "content": "On the last working day of each month, I back up the client folder, verify three random files, and record the result in the operations sheet."}]
+    }]
+  },
+  {
+    "id": "g22",
+    "feature": "general",
+    "category": "relationship",
+    "user_id": "v2-u22",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g22-e1", "service": "support-service", "observed_at": "2026-06-12T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [
+        {"role": "assistant", "content": "Who should be included when we plan household appointments?"},
+        {"role": "user", "content": "My partner Neel handles weekday appointments, while I handle weekend appointments for our daughter Mira."}
+      ]
+    }]
+  },
+  {
+    "id": "g23",
+    "feature": "general",
+    "category": "tentative_goal",
+    "user_id": "v2-u23",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g23-e1", "service": "billing-service", "observed_at": "2026-06-13T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I may move closer to the office next year, but it depends on rent and whether our hybrid schedule changes."}]
+    }]
+  },
+  {
+    "id": "g24",
+    "feature": "general",
+    "category": "recurring_procedure",
+    "user_id": "v2-u24",
+    "events": [
+      {
+        "id": "1",
+        "source": {"event_id": "g24-e1", "service": "support-service", "observed_at": "2026-06-14T09:00:00Z", "scope": {"routine": "meeting_prep"}, "evidence": []},
+        "messages": [{"role": "user", "content": "Before every client review, I read the previous notes, list unresolved decisions, and send the agenda the evening before."}]
+      },
+      {
+        "id": "2",
+        "source": {"event_id": "g24-e2", "service": "billing-service", "observed_at": "2026-07-14T09:00:00Z", "scope": {"routine": "meeting_prep"}, "evidence": []},
+        "messages": [{"role": "user", "content": "My client-review checklist always starts with unresolved decisions from the prior meeting, followed by the new agenda."}]
+      }
+    ]
+  },
+  {
+    "id": "g25",
+    "feature": "general",
+    "category": "mixed_goal_status",
+    "user_id": "v2-u25",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g25-e1", "service": "support-service", "observed_at": "2026-06-15T09:00:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I am actively completing my portfolio by 31 August. I am also thinking about starting a newsletter afterward, but that second idea is not a commitment."}]
+    }]
+  },
+  {
+    "id": "g26",
+    "feature": "general",
+    "category": "uncertain_preference_reinforcement",
+    "user_id": "v2-u26",
+    "events": [
+      {
+        "id": "1",
+        "source": {"event_id": "g26-e1", "service": "support-service", "observed_at": "2026-06-16T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "I might prefer reminders in the afternoon, though I have not used them long enough to be sure."}]
+      },
+      {
+        "id": "2",
+        "source": {"event_id": "g26-e2", "service": "support-service", "observed_at": "2026-07-16T09:00:00Z", "scope": {}, "evidence": []},
+        "messages": [{"role": "user", "content": "Afternoon reminders still seem better than morning ones, but I would like to test that preference for another week."}]
+      }
+    ]
+  },
+  {
+    "id": "g27",
+    "feature": "general",
+    "category": "pending_tentative_goal",
+    "user_id": "v2-u27",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g27-e1", "service": "support-service", "observed_at": "2026-08-10T10:00:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I am only considering learning Spanish someday. I have not decided to pursue it or made any plan yet."}]
+    }]
+  },
+  {
+    "id": "g28",
+    "feature": "general",
+    "category": "pending_uncertain_preference",
+    "user_id": "v2-u28",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g28-e1", "service": "support-service", "observed_at": "2026-08-10T10:01:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I might prefer voice notes to typed summaries, but I have barely tried them and genuinely do not know yet."}]
+    }]
+  },
+  {
+    "id": "g29",
+    "feature": "general",
+    "category": "pending_tentative_goal",
+    "user_id": "v2-u29",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g29-e1", "service": "billing-service", "observed_at": "2026-08-10T10:02:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "There is a chance I will start a small online course, although it is just an idea and I may abandon it."}]
+    }]
+  },
+  {
+    "id": "g30",
+    "feature": "general",
+    "category": "pending_uncertain_preference",
+    "user_id": "v2-u30",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g30-e1", "service": "support-service", "observed_at": "2026-08-10T10:03:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "Dark mode may be easier on my eyes, but I am still testing it and would not call it my preference."}]
+    }]
+  },
+  {
+    "id": "g31",
+    "feature": "general",
+    "category": "pending_tentative_goal",
+    "user_id": "v2-u31",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g31-e1", "service": "billing-service", "observed_at": "2026-08-10T10:04:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I am debating whether to look for a new role next year; I am not committed to changing jobs."}]
+    }]
+  },
+  {
+    "id": "g32",
+    "feature": "general",
+    "category": "pending_uncertain_preference",
+    "user_id": "v2-u32",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g32-e1", "service": "support-service", "observed_at": "2026-08-10T10:05:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "Perhaps I would like meetings later in the day, though I have not formed a reliable preference."}]
+    }]
+  },
+  {
+    "id": "g33",
+    "feature": "general",
+    "category": "pending_tentative_goal",
+    "user_id": "v2-u33",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g33-e1", "service": "billing-service", "observed_at": "2026-08-10T10:06:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I have loosely thought about writing a book, but it is not an active goal and may never happen."}]
+    }]
+  },
+  {
+    "id": "g34",
+    "feature": "general",
+    "category": "pending_uncertain_preference",
+    "user_id": "v2-u34",
+    "events": [{
+      "id": "1",
+      "source": {"event_id": "g34-e1", "service": "support-service", "observed_at": "2026-08-10T10:07:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I may enjoy shorter work sessions, but that is only a guess and I am not ready to adopt that routine."}]
+    }]
+  },
+
+  {
+    "id": "g35", "feature": "general", "category": "pending_uncertain_preference", "user_id": "v2-u35",
+    "events": [{"id": "1", "source": {"event_id": "g35-e1", "service": "support-service", "observed_at": "2026-08-10T10:08:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I am leaning toward audio summaries because the first few felt convenient, but I want to test them longer before making that my preference."}]}]
+  },
+  {
+    "id": "g36", "feature": "general", "category": "pending_tentative_goal", "user_id": "v2-u36",
+    "events": [{"id": "1", "source": {"event_id": "g36-e1", "service": "billing-service", "observed_at": "2026-08-10T10:09:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I am leaning toward taking a data-visualization course this winter, but I am still comparing options and have not committed."}]}]
+  },
+  {
+    "id": "g37", "feature": "general", "category": "pending_uncertain_preference", "user_id": "v2-u37",
+    "events": [{"id": "1", "source": {"event_id": "g37-e1", "service": "support-service", "observed_at": "2026-08-10T10:10:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I currently lean toward weekly planning on Sunday evening, though I am trying it temporarily before deciding if it suits me."}]}]
+  },
+  {
+    "id": "g38", "feature": "general", "category": "pending_tentative_goal", "user_id": "v2-u38",
+    "events": [{"id": "1", "source": {"event_id": "g38-e1", "service": "billing-service", "observed_at": "2026-08-10T10:11:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "I am seriously considering joining a public-speaking group, but I want to attend a trial session before treating it as a goal."}]}]
+  },
+  {
+    "id": "g39", "feature": "general", "category": "pending_uncertain_preference", "user_id": "v2-u39",
+    "events": [{"id": "1", "source": {"event_id": "g39-e1", "service": "support-service", "observed_at": "2026-08-10T10:12:00Z", "scope": {}, "evidence": []},
+      "messages": [{"role": "user", "content": "After two attempts I am leaning toward twenty-minute focus sessions, but I need more experience before calling that a stable routine."}]}]
+  },
+{"id":"e01","feature":"edtech","category":"learner_profile","user_id":"v2-e01","events":[{"id":"1","source":{"event_id":"e01","service":"support-service","observed_at":"2026-05-11T09:00:00Z","scope":{"course":"neet"},"evidence":[]},"messages":[{"role":"user","content":"I am in class 12 CBSE preparing for NEET on 19 July. Biology is strongest, physics is weakest, and my target is 650."}]}]},
+{"id":"e02","feature":"edtech","category":"learning_preference","user_id":"v2-e02","events":[{"id":"1","source":{"event_id":"e02","service":"support-service","observed_at":"2026-05-12T09:00:00Z","scope":{"course":"calculus"},"evidence":[]},"messages":[{"role":"user","content":"For calculus, show a graph first, then the formula. Give one hint at a time and let me attempt the problem before explaining."}]}]},
+{"id":"e03","feature":"edtech","category":"skill_progression","user_id":"v2-e03","events":[{"id":"1","source":{"event_id":"e03-a","service":"support-service","observed_at":"2026-05-13T09:00:00Z","scope":{"subject":"sql"},"evidence":[]},"messages":[{"role":"user","content":"I understand SELECT but joins and GROUP BY are confusing."}]},{"id":"2","source":{"event_id":"e03-b","service":"billing-service","observed_at":"2026-07-13T09:00:00Z","scope":{"subject":"sql"},"evidence":[]},"messages":[{"role":"user","content":"I can now write joins and grouped reports independently; window functions are still new."}]}]},
+{"id":"e04","feature":"edtech","category":"misconception","user_id":"v2-e04","events":[{"id":"1","source":{"event_id":"e04","service":"support-service","observed_at":"2026-05-14T09:00:00Z","scope":{"subject":"physics"},"evidence":[]},"messages":[{"role":"user","content":"I keep assuming a heavier object falls faster in a vacuum. I need help correcting that misconception with experiments."}]}]},
+{"id":"e05","feature":"edtech","category":"study_goal","user_id":"v2-e05","events":[{"id":"1","source":{"event_id":"e05-a","service":"support-service","observed_at":"2026-05-15T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"My active goal is finishing organic chemistry by 30 June, studying 40 minutes each weekday."}]},{"id":"2","source":{"event_id":"e05-b","service":"support-service","observed_at":"2026-07-01T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I completed organic chemistry yesterday. Next I am revising weak physics chapters until 20 July."}]}]},
+{"id":"e06","feature":"edtech","category":"stale_expertise","user_id":"v2-e06","events":[{"id":"1","source":{"event_id":"e06","service":"support-service","observed_at":"2026-05-16T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I studied Java deeply in 2018 but am rusty now. I currently code comfortably in Python and only remember basic Java syntax."}]}]},
+{"id":"e07","feature":"edtech","category":"language_profile","user_id":"v2-e07","events":[{"id":"1","source":{"event_id":"e07","service":"support-service","observed_at":"2026-05-17T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I speak Marathi at home and study in English. Explain difficult biology terms bilingually, but keep exam answers in English."}]}]},
+{"id":"e08","feature":"edtech","category":"numeric_update","user_id":"v2-e08","events":[{"id":"1","source":{"event_id":"e08-a","service":"support-service","observed_at":"2026-05-18T09:00:00Z","scope":{"exam":"mock"},"evidence":[]},"messages":[{"role":"user","content":"I scored 58 percent on the first mock; algebra was the weakest section."}]},{"id":"2","source":{"event_id":"e08-b","service":"billing-service","observed_at":"2026-06-18T09:00:00Z","scope":{"exam":"mock"},"evidence":[]},"messages":[{"role":"user","content":"My latest mock score is 71 percent. Algebra improved, but geometry is now weakest."}]}]},
+{"id":"e09","feature":"edtech","category":"temporary_session","user_id":"v2-e09","events":[{"id":"1","source":{"event_id":"e09","service":"support-service","observed_at":"2026-05-19T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I am tired today, so use a short quiz. My normal routine is a 30-minute lesson followed by five practice questions."}]}]},
+{"id":"e10","feature":"edtech","category":"ambiguity","user_id":"v2-e10","events":[{"id":"1","source":{"event_id":"e10-a","service":"support-service","observed_at":"2026-05-20T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"I have an exam in August, but I do not know the exact date yet."}]},{"id":"2","source":{"event_id":"e10-b","service":"support-service","observed_at":"2026-05-25T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"The August exam is the AWS Developer Associate exam on 22 August; serverless is my weakest area."}]}]},
+
+{"id":"s01","feature":"support","category":"customer_profile","user_id":"v2-s01","events":[{"id":"1","source":{"event_id":"s01","service":"support-service","observed_at":"2026-05-21T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"We are on Enterprise, use SSO, and require security replies by email. Priya is our account administrator."}]}]},
+{"id":"s02","feature":"support","category":"open_issue","user_id":"v2-s02","events":[{"id":"1","source":{"event_id":"s02-a","service":"support-service","observed_at":"2026-05-22T09:00:00Z","scope":{"ticket":"S02"},"evidence":[]},"messages":[{"role":"user","content":"CSV exports fail after midnight with timeout 504. Daytime exports work, and this blocks our morning report."}]},{"id":"2","source":{"event_id":"s02-b","service":"support-service","observed_at":"2026-05-24T09:00:00Z","scope":{"ticket":"S02"},"evidence":[]},"messages":[{"role":"user","content":"The midnight export issue is resolved after increasing the worker timeout. The ticket can be closed."}]}]},
+{"id":"s03","feature":"support","category":"communication","user_id":"v2-s03","events":[{"id":"1","source":{"event_id":"s03","service":"support-service","observed_at":"2026-05-23T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"For urgent incidents contact me in-app, never by phone. Routine case updates should go to email once daily."}]}]},
+{"id":"s04","feature":"support","category":"sentiment_risk","user_id":"v2-s04","events":[{"id":"1","source":{"event_id":"s04","service":"support-service","observed_at":"2026-05-24T09:00:00Z","scope":{"ticket":"S04"},"evidence":[]},"messages":[{"role":"user","content":"This is the third billing error this quarter. I am frustrated and will escalate to procurement if the duplicate charge is not reversed today."}]}]},
+{"id":"s05","feature":"support","category":"authority_conflict","user_id":"v2-s05","events":[{"id":"1","source":{"event_id":"s05-s","service":"support-service","observed_at":"2026-05-25T09:00:00Z","scope":{"account":"v2-s05"},"evidence":[]},"messages":[{"role":"user","content":"Support shows this account on the Pro plan."}]},{"id":"2","source":{"event_id":"s05-b","service":"billing-service","observed_at":"2026-05-25T09:01:00Z","scope":{"account":"v2-s05"},"evidence":[]},"messages":[{"role":"user","content":"Billing confirms the account is on Enterprise, not Pro."}]}]},
+{"id":"s06","feature":"support","category":"resolution_preference","user_id":"v2-s06","events":[{"id":"1","source":{"event_id":"s06","service":"support-service","observed_at":"2026-05-26T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"When troubleshooting, give me a reversible workaround first, then the root cause. I can test in staging but not production."}]}]},
+{"id":"s07","feature":"support","category":"temporary_incident","user_id":"v2-s07","events":[{"id":"1","source":{"event_id":"s07","service":"support-service","observed_at":"2026-05-27T09:00:00Z","scope":{"incident":"INC-7"},"evidence":[]},"messages":[{"role":"user","content":"Only during today's outage, send updates every 20 minutes. Our normal incident update cadence is two hours."}]}]},
+{"id":"s08","feature":"support","category":"correction","user_id":"v2-s08","events":[{"id":"1","source":{"event_id":"s08-a","service":"support-service","observed_at":"2026-05-28T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"The app crashes on every upload."}]},{"id":"2","source":{"event_id":"s08-b","service":"support-service","observed_at":"2026-05-28T09:10:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"Correction: it crashes only for PDF uploads above 20 MB; image uploads are fine."}]}]},
+{"id":"s09","feature":"support","category":"relationship","user_id":"v2-s09","events":[{"id":"1","source":{"event_id":"s09","service":"support-service","observed_at":"2026-05-29T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"Meera owns technical support, Sanjay approves billing changes, and I can approve user access but not invoices."}]}]},
+{"id":"s10","feature":"support","category":"noise","user_id":"v2-s10","events":[{"id":"1","source":{"event_id":"s10","service":"support-service","observed_at":"2026-05-30T09:00:00Z","scope":{},"evidence":[]},"messages":[{"role":"user","content":"After many logs and browser restarts, the durable facts are that we use Firefox ESR, SAML is mandatory, and our admin is Elena. Today's DNS delay is temporary."}]}]},
+
+{"id":"u01","feature":"universal","category":"identity","user_id":"v2-p01","events":[{"id":"1","messages":[{"role":"user","content":"I go by Kabir, live in Ahmedabad, speak Gujarati and English, and work as a data analyst."}]}]},
+{"id":"u02","feature":"universal","category":"preference","user_id":"v2-p02","events":[{"id":"1","messages":[{"role":"user","content":"Across assistants, prefer concise summaries, metric units, and dates in day-month-year format."}]}]},
+{"id":"u03","feature":"universal","category":"expertise","user_id":"v2-p03","events":[{"id":"1","messages":[{"role":"user","content":"I am advanced in financial modelling, working-level in SQL, and a beginner in machine learning."}]}]},
+{"id":"u04","feature":"universal","category":"goal","user_id":"v2-p04","events":[{"id":"1","messages":[{"role":"user","content":"My active cross-app goal is completing the CFA Level 1 exam in November; I study six hours each week."}]},{"id":"2","messages":[{"role":"user","content":"I postponed CFA until next year and have paused the study plan."}]}]},
+{"id":"u05","feature":"universal","category":"procedure","user_id":"v2-p05","events":[{"id":"1","messages":[{"role":"user","content":"For any travel booking, show refundable options first, confirm dates with me, then ask before charging the saved card."}]}]},
+{"id":"u06","feature":"universal","category":"relationship","user_id":"v2-p06","events":[{"id":"1","messages":[{"role":"user","content":"Noor is my partner and emergency contact; Asha is my travel coordinator but should not receive health information."}]}]},
+{"id":"u07","feature":"universal","category":"reinforcement","user_id":"v2-p07","events":[{"id":"1","messages":[{"role":"user","content":"I prefer vegetarian meals and avoid peanuts."}]},{"id":"2","messages":[{"role":"user","content":"Please remember across services that I am vegetarian and must avoid peanuts."}]}]},
+{"id":"u08","feature":"universal","category":"update","user_id":"v2-p08","events":[{"id":"1","messages":[{"role":"user","content":"My primary office is Bengaluru and I work from home Fridays."}]},{"id":"2","messages":[{"role":"user","content":"I transferred to the Mumbai office this month; Friday remains my work-from-home day."}]}]},
+{"id":"u09","feature":"universal","category":"hypothetical","user_id":"v2-p09","events":[{"id":"1","messages":[{"role":"system","content":"This is a hypothetical planning exercise."},{"role":"user","content":"If I moved to Berlin I might learn German. I have no move planned; my real current goal is improving business English."}]}]},
+{"id":"u10","feature":"universal","category":"multi_memory","user_id":"v2-p10","events":[{"id":"1","messages":[{"role":"user","content":"I am a product manager in Jaipur, prefer morning meetings, mentor Rohan, and aim to launch our mobile beta by September."}]}]}
+]}
