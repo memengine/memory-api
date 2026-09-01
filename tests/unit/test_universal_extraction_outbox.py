@@ -27,13 +27,16 @@ class FakeSession:
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
+        self.grant_checks = 0
 
     def get(self, model, identifier):
         if model is UniversalUser and identifier == self.user.id:
             return self.user
         return None
 
-    def execute(self, _statement):
+    def execute(self, statement):
+        if "permission_grants" in str(statement):
+            self.grant_checks += 1
         return FakeResult(self.grant)
 
     def add(self, item) -> None:
@@ -135,3 +138,46 @@ def test_universal_extraction_enqueues_vector_outbox(monkeypatch) -> None:
     assert session.commits == 1
     assert session.rollbacks == 0
     assert session.closed is True
+    assert session.grant_checks == 2
+
+def test_midflight_revocation_rolls_back_all_staged_writes(monkeypatch) -> None:
+    user = UniversalUser(
+        id=uuid.uuid4(), uui_token="uui_revoked_midflight",
+        memory_count=0, is_active=True,
+    )
+    agent_id = uuid.uuid4()
+    grant = PermissionGrant(
+        id=uuid.uuid4(), user_uui_id=user.id, agent_id=agent_id,
+        categories_allowed=["preference"], access_type="read_write", is_active=True,
+    )
+    session = FakeSession(user, grant)
+
+    def grant_then_revoked(statement):
+        if "permission_grants" in str(statement):
+            session.grant_checks += 1
+            return FakeResult(grant if session.grant_checks == 1 else None)
+        return FakeResult(None)
+
+    session.execute = grant_then_revoked
+    monkeypatch.setattr(
+        universal_extraction_tasks, "EmbeddingService",
+        lambda sync_session: FakeEmbedder(),
+    )
+    monkeypatch.setattr(
+        universal_extraction_tasks.VersionService, "record_universal_version_sync",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    result = universal_extraction_tasks.run_universal_extraction_pipeline(
+        {
+            "job_id": str(uuid.uuid4()), "user_uui_id": str(user.id),
+            "agent_id": str(agent_id),
+            "messages": [{"role": "user", "content": "Keep answers concise"}],
+        },
+        session_factory=lambda: session, extractor=FakeExtractor(), scorer=FakeScorer(),
+    )
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "write_not_permitted"
+    assert result["memories_created"] == 0
+    assert session.rollbacks == 1
+    assert session.commits == 0
+    assert session.grant_checks == 2

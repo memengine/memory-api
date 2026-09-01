@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import traceback
 import uuid
 from datetime import UTC
@@ -9,6 +10,7 @@ from typing import Any
 from celery import shared_task
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -55,6 +57,45 @@ def _active_write_grant(session: Session, *, user_uui_id: str, agent_id: str) ->
     return result.scalar_one_or_none()
 
 
+def _event_identity(job_payload: dict[str, Any]) -> str:
+    return str(
+        job_payload.get("source_event_id")
+        or job_payload.get("event_id")
+        or job_payload.get("idempotency_key")
+        or job_payload.get("job_id")
+        or ""
+    ).strip()
+
+
+def _lock_event_delivery(session: Session, *, user_uui_id: str, agent_id: str, event_id: str) -> None:
+    if not event_id:
+        return
+    get_bind = getattr(session, "get_bind", None)
+    bind = get_bind() if callable(get_bind) else None
+    if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+        return
+    digest = hashlib.sha256(f"{user_uui_id}:{agent_id}:{event_id}".encode("utf-8")).digest()
+    lock_key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+    session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+
+
+def _existing_event_memory_count(
+    session: Session, *, user_uui_id: str, agent_id: str, event_id: str
+) -> int:
+    if not event_id:
+        return 0
+    result = session.execute(
+        select(func.count())
+        .select_from(UniversalMemory)
+        .where(
+            UniversalMemory.user_uui_id == uuid.UUID(user_uui_id),
+            UniversalMemory.source_agent_id == uuid.UUID(agent_id),
+            UniversalMemory.metadata_json["source_event_id"].astext == event_id,
+        )
+    )
+    scalar_one = getattr(result, "scalar_one", None)
+    return int(scalar_one() or 0) if callable(scalar_one) else 0
+
 def run_universal_extraction_pipeline(
     job_payload: dict[str, Any],
     *,
@@ -92,6 +133,26 @@ def run_universal_extraction_pipeline(
                 "memories_created": 0,
             }
 
+        event_id = _event_identity(job_payload)
+        _lock_event_delivery(
+            session,
+            user_uui_id=user_uui_id,
+            agent_id=agent_id,
+            event_id=event_id,
+        )
+        existing_count = _existing_event_memory_count(
+            session,
+            user_uui_id=user_uui_id,
+            agent_id=agent_id,
+            event_id=event_id,
+        )
+        if existing_count:
+            return {
+                **job_payload,
+                "status": "processed",
+                "memories_created": existing_count,
+                "idempotent_replay": True,
+            }
         extracted_memories = extractor.extract(messages=messages, user_id=user_uui_id)
         allowed_categories = {
             category for category in (grant.categories_allowed or []) if category in ALLOWED_MEMORY_CATEGORIES
@@ -128,6 +189,8 @@ def run_universal_extraction_pipeline(
                     "reasoning": extracted_memory.reasoning,
                     "expiry": extracted_memory.expiry,
                     "source_metadata": dict(job_payload.get("metadata") or {}),
+                    "source_event_id": event_id,
+                    "source_agent_id": str(agent_id),
                 },
             )
             session.add(universal_memory)
@@ -163,6 +226,7 @@ def run_universal_extraction_pipeline(
                         "memory_id": str(memory_id),
                         "user_uui_id": str(universal_user.id),
                         "source_agent_id": str(agent_id),
+                        "source_event_id": event_id,
                         "category": extracted_memory.category,
                         "importance_score": float(extracted_memory.importance_score),
                         "claim_status": claim_decision.status,
@@ -173,6 +237,21 @@ def run_universal_extraction_pipeline(
                 )
                 stored_count += 1
 
+        # Close the authorization-to-commit race. All writes are still staged,
+        # so revocation or expiry during extraction can roll them back atomically.
+        final_grant = _active_write_grant(
+            session,
+            user_uui_id=user_uui_id,
+            agent_id=agent_id,
+        )
+        if final_grant is None:
+            session.rollback()
+            return {
+                **job_payload,
+                "status": "blocked",
+                "blocked_reason": "write_not_permitted",
+                "memories_created": 0,
+            }
         universal_user.memory_count = int(universal_user.memory_count or 0) + stored_count
         session.add(universal_user)
         session.commit()
