@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+import time
 from typing import Any
 from typing import Callable
 
@@ -13,6 +16,10 @@ from api.infra.region_pool import DEFAULT_REGION_ID
 from api.db.models import QuotaMode
 from api.services.quota_manager import QuotaManager
 from api.services.quota_manager import QuotaEnvelope
+from api.infra.postgres_benchmark import postgres_benchmark_enabled
+
+
+LOGGER = logging.getLogger("memoryos.quota_envelope")
 
 
 class QuotaEnvelopeMiddleware(BaseHTTPMiddleware):
@@ -26,6 +33,7 @@ class QuotaEnvelopeMiddleware(BaseHTTPMiddleware):
 
         tenant_id = getattr(request.state, "tenant_id", None)
         request_envelope = getattr(request.state, "quota_envelope", None)
+        quota_started = time.perf_counter()
         if isinstance(request_envelope, QuotaEnvelope):
             envelope = request_envelope
         elif tenant_id:
@@ -56,6 +64,14 @@ class QuotaEnvelopeMiddleware(BaseHTTPMiddleware):
                         budget_remaining_pct=1.0,
                         reset_at=None,
                     )
+
+        if postgres_benchmark_enabled():
+            LOGGER.warning(json.dumps({
+                "event": "request_phase_benchmark",
+                "phase": "quota_response_envelope",
+                "duration_ms": round((time.perf_counter() - quota_started) * 1000, 2),
+                "path": request.url.path,
+            }, sort_keys=True))
 
         response.headers["X-MemoryOS-Quota-Mode"] = envelope.mode.value
         response.headers["X-MemoryOS-Budget-Remaining"] = f"{envelope.budget_remaining_pct:.4f}"

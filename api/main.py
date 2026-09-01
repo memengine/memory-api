@@ -16,6 +16,8 @@ import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from api.benchmark_runtime_telemetry import BenchmarkRuntimeTelemetry
+from api.benchmark_runtime_telemetry import runtime_telemetry_enabled
 from api.db.cache import CacheService
 from api.db.vector_store import QdrantService
 from api.errors import APIError
@@ -105,6 +107,10 @@ def _error_response(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    runtime_telemetry = None
+    if runtime_telemetry_enabled(app_env=settings.app_env):
+        runtime_telemetry = BenchmarkRuntimeTelemetry()
+        await runtime_telemetry.start()
     app.state.circuit_breakers = CircuitBreakerRegistry.reset()
     universal_app = getattr(app.state, "universal_app", None)
     existing_cache_service = getattr(app.state, "cache_service", None)
@@ -138,7 +144,11 @@ async def lifespan(app: FastAPI):
             universal_app.state.region_pool = app.state.region_pool
             universal_app.state.cache_service = app.state.cache_service
             universal_app.state.qdrant_service = app.state.qdrant_service
-    yield
+    try:
+        yield
+    finally:
+        if runtime_telemetry is not None:
+            await runtime_telemetry.stop()
 
 
 def _register_exception_handlers(app: FastAPI) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import time
 from typing import Any
 from typing import Callable
 
@@ -12,6 +14,7 @@ from starlette.responses import Response
 
 from api.infra.fallbacks import on_redis_open
 from api.infra.region_pool import DEFAULT_REGION_ID
+from api.infra.postgres_benchmark import postgres_benchmark_enabled
 
 
 LOGGER = logging.getLogger("memoryos.region")
@@ -24,10 +27,18 @@ class RegionMiddleware(BaseHTTPMiddleware):
         request.state.region_id = DEFAULT_REGION_ID
         tenant_id = getattr(request.state, "tenant_id", None)
         if tenant_id:
+            region_started = time.perf_counter()
             request.state.region_id = await self._resolve_region_id(
                 request=request,
                 tenant_id=str(tenant_id),
             )
+            if postgres_benchmark_enabled():
+                LOGGER.warning(json.dumps({
+                    "event": "request_phase_benchmark",
+                    "phase": "region_resolution",
+                    "duration_ms": round((time.perf_counter() - region_started) * 1000, 2),
+                    "path": request.url.path,
+                }, sort_keys=True))
         return await call_next(request)
 
     async def _resolve_region_id(self, *, request: Request, tenant_id: str) -> str:

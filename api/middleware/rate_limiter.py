@@ -74,12 +74,6 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
                         TENANT_RATE_LIMIT_TTL_SECONDS,
                     )
         except REDIS_FAILURES:
-            force_open = getattr(breaker, "force_open", None)
-            if callable(force_open):
-                try:
-                    force_open()
-                except Exception:
-                    pass
             return await call_next(request)
 
         if current_count > rate_limit:
