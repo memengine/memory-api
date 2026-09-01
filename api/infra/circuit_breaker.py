@@ -13,6 +13,11 @@ from typing import Any
 from typing import Callable
 from urllib.parse import urlsplit
 
+from api.infra.redis_benchmark import benchmark_timeout_seconds
+from api.infra.redis_benchmark import benchmark_redis_tcp_preflight_bypassed
+from api.infra.redis_benchmark import emit_benchmark_timing
+from api.infra.redis_benchmark import redis_benchmark_enabled
+
 
 class CircuitOpenError(Exception):
     def __init__(self, name: str) -> None:
@@ -49,7 +54,11 @@ class CircuitBreaker:
         self._state_store_disabled_until = 0.0
         self._next_refresh_at = 0.0
         self._refresh_interval_seconds = 0.1
-        self._execution_timeout_seconds = 0.2 if name == "redis" else None
+        self._execution_timeout_seconds = (
+            benchmark_timeout_seconds("BENCHMARK_REDIS_CIRCUIT_DEADLINE_MS", 0.75)
+            if name == "redis"
+            else None
+        )
         self._redis_probe_executor = (
             concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="memoryos-redis-probe")
             if name == "redis"
@@ -67,18 +76,34 @@ class CircuitBreaker:
         fallback: Callable[[], Any | Awaitable[Any]] | None = None,
         **kwargs: Any,
     ) -> Any:
+        client_role = self._benchmark_client_role(fn)
+        operation = str(getattr(fn, "__name__", type(fn).__name__))
         try:
             self._before_call()
         except CircuitOpenError:
+            if self.name == "redis" and redis_benchmark_enabled():
+                emit_benchmark_timing(
+                    "circuit_gate",
+                    time.perf_counter(),
+                    client_role=client_role,
+                    outcome="open",
+                )
             return await self._run_async_fallback(fallback)
         if self.name == "redis":
-            preflight_ok = await self._redis_connectivity_preflight()
+            preflight_ok, fresh_probe = await self._redis_connectivity_preflight()
             if not preflight_ok:
-                try:
-                    self.force_open()
-                except Exception:
-                    pass
+                if fresh_probe:
+                    try:
+                        self._record_failure(
+                            source="tcp_preflight",
+                            client_role=client_role,
+                            reason="unreachable_or_deadline",
+                            operation=operation,
+                        )
+                    except Exception:
+                        pass
                 return await self._run_async_fallback(fallback)
+        command_started_at = time.perf_counter()
         try:
             result = fn(*args, **kwargs)
             if inspect.isawaitable(result):
@@ -89,11 +114,40 @@ class CircuitBreaker:
                     )
                 else:
                     result = await result
-        except Exception:
-            self._record_failure()
+        except Exception as exc:
+            if self.name == "redis" and redis_benchmark_enabled():
+                emit_benchmark_timing(
+                    "circuit_execution",
+                    command_started_at,
+                    outcome="error",
+                    client_role=client_role,
+                    reason=(
+                        "circuit_deadline"
+                        if isinstance(exc, asyncio.TimeoutError)
+                        else type(exc).__name__
+                    ),
+                )
+            self._record_failure(
+                source="circuit_execution",
+                client_role=client_role,
+                reason=(
+                    "circuit_deadline"
+                    if isinstance(exc, asyncio.TimeoutError)
+                    else type(exc).__name__
+                ),
+                operation=operation,
+            )
             raise
+        if self.name == "redis" and redis_benchmark_enabled():
+            emit_benchmark_timing("circuit_execution", command_started_at, client_role=client_role, outcome="ok")
         self._record_success()
         return result
+
+    @staticmethod
+    def _benchmark_client_role(fn: Callable[..., Any]) -> str:
+        owner = getattr(fn, "__self__", None)
+        pool = getattr(owner, "connection_pool", None)
+        return str(getattr(pool, "benchmark_client_role", "unknown"))
 
     def call_sync(
         self,
@@ -134,6 +188,7 @@ class CircuitBreaker:
 
     def force_open(self) -> None:
         now = time.time()
+        previous = self._load_state()
         self._save_state(
             CircuitState(
                 state="OPEN",
@@ -142,6 +197,40 @@ class CircuitBreaker:
                 opened_at=now,
             )
         )
+        if self.name == "redis" and redis_benchmark_enabled():
+            caller = inspect.stack(context=0)[1]
+            emit_benchmark_timing(
+                "circuit_transition",
+                time.perf_counter(),
+                outcome="error",
+                transition="force_open",
+                previous_state=previous.state,
+                new_state="OPEN",
+                failure_count=self.failure_threshold,
+                source=f"{caller.frame.f_globals.get('__name__', 'unknown')}.{caller.function}:{caller.lineno}",
+                reason="caller_requested",
+                operation="force_open",
+                client_role="unknown",
+            )
+
+    def record_external_failure(
+        self,
+        *,
+        source: str,
+        client_role: str = "unknown",
+        reason: str = "external_failure",
+        operation: str = "unknown",
+    ) -> None:
+        """Count a failure not already observed by ``call`` without forcing OPEN."""
+        with self._lock:
+            if self._local_state.state == "OPEN":
+                return
+            self._record_failure(
+                source=source,
+                client_role=client_role,
+                reason=reason,
+                operation=operation,
+            )
 
     def local_state(self) -> str:
         with self._lock:
@@ -182,9 +271,17 @@ class CircuitBreaker:
                 return
         self._save_state(CircuitState(state="CLOSED", failure_count=0, window_started_at=0.0, opened_at=0.0))
 
-    def _record_failure(self) -> None:
+    def _record_failure(
+        self,
+        *,
+        source: str = "unknown",
+        client_role: str = "unknown",
+        reason: str = "unknown",
+        operation: str = "unknown",
+    ) -> None:
         now = time.time()
         state = self._load_state()
+        previous_state = state.state
 
         if state.state == "HALF_OPEN":
             self._save_state(
@@ -195,6 +292,20 @@ class CircuitBreaker:
                     opened_at=now,
                 )
             )
+            if self.name == "redis" and redis_benchmark_enabled():
+                emit_benchmark_timing(
+                    "circuit_transition",
+                    time.perf_counter(),
+                    outcome="error",
+                    transition="half_open_failure",
+                    previous_state=previous_state,
+                    new_state="OPEN",
+                    failure_count=self.failure_threshold,
+                    source=source,
+                    reason=reason,
+                    operation=operation,
+                    client_role=client_role,
+                )
             return
 
         if state.window_started_at == 0.0 or now - state.window_started_at > self.window_seconds:
@@ -210,6 +321,20 @@ class CircuitBreaker:
             state.state = "CLOSED"
 
         self._save_state(state)
+        if self.name == "redis" and redis_benchmark_enabled():
+            emit_benchmark_timing(
+                "circuit_transition",
+                time.perf_counter(),
+                outcome="error",
+                transition="failure_recorded",
+                previous_state=previous_state,
+                new_state=state.state,
+                failure_count=state.failure_count,
+                source=source,
+                reason=reason,
+                operation=operation,
+                client_role=client_role,
+            )
 
     def _load_state(self, *, force_refresh: bool = False) -> CircuitState:
         with self._lock:
@@ -284,16 +409,19 @@ class CircuitBreaker:
             raise CircuitOpenError(self.name)
         return fallback()
 
-    async def _redis_connectivity_preflight(self) -> bool:
+    async def _redis_connectivity_preflight(self) -> tuple[bool, bool]:
+        if benchmark_redis_tcp_preflight_bypassed():
+            return True, False
         endpoint = self._redis_endpoint
         if endpoint is None:
-            return True
+            return True, False
 
         with self._lock:
             now = time.time()
             if now - self._last_probe_checked_at <= self._probe_cache_seconds:
-                return self._last_probe_ok
+                return self._last_probe_ok, False
 
+        started_at = time.perf_counter()
         loop = asyncio.get_running_loop()
         try:
             is_reachable = await asyncio.wait_for(
@@ -311,7 +439,13 @@ class CircuitBreaker:
         with self._lock:
             self._last_probe_checked_at = time.time()
             self._last_probe_ok = bool(is_reachable)
-        return bool(is_reachable)
+        if redis_benchmark_enabled():
+            emit_benchmark_timing(
+                "tcp_preflight",
+                started_at,
+                outcome="ok" if is_reachable else "error",
+            )
+        return bool(is_reachable), True
 
     @staticmethod
     def _probe_redis_endpoint_sync(host: str, port: int) -> bool:
