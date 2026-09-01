@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "baseline": "conflict-reconciliation-development-v1",
+  "source_artifact": "artifacts/internal-benchmarks/conflict-integration-baseline-v3-reconciled-claims.json",
+  "scenario_count": 18,
+  "holdout_loaded": false,
+  "metrics": {
+    "conflict_detection_precision": 1.0,
+    "conflict_detection_recall": 1.0,
+    "resolution_action_accuracy": 1.0,
+    "winner_accuracy": 1.0,
+    "false_supersession_rate": 0.0,
+    "duplicate_active_memory_rate": 0.0,
+    "claim_creation_rate": 1.0,
+    "claim_provenance_preservation": 1.0,
+    "claim_winner_active_alignment": 1.0,
+    "single_winning_revision_correctness": 1.0,
+    "end_to_end_integration_success_rate": 1.0
+  }
+}
