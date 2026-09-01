@@ -1,0 +1,13 @@
+{
+    "baseline":  "temporal-memory-correctness-development-v1",
+    "artifact":  "artifacts/internal-benchmarks/temporal-memory-baseline-v3-as-of.json",
+    "scenario_count":  18,
+    "passed":  17,
+    "product_failures":  0,
+    "harness_errors":  1,
+    "end_to_end_lifecycle_success":  1,
+    "holdout_used":  false,
+    "production_behavior_changed":  true,
+    "fixtures_created":  false,
+    "evaluable_product_scenarios":  17
+}
