@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+import api.services.llm_service as llm_service_module
+
 from api.services.llm_service import AllProvidersFailedError
 from api.services.llm_service import LLMProvider
 from api.services.llm_service import LLMResponse
@@ -136,10 +138,15 @@ def test_auth_like_provider_errors_are_mapped_to_auth_errors(message):
 
 
 def test_provider_health_marks_missing_keys_as_not_configured(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     get_settings.cache_clear()
+    settings = get_settings().model_copy(
+        update={
+            "gemini_api_key": "gemini-key",
+            "openai_api_key": "",
+            "anthropic_api_key": "",
+        }
+    )
+    monkeypatch.setattr(llm_service_module, "get_settings", lambda: settings)
 
     health = {provider["name"]: provider for provider in get_llm_provider_health()}
 

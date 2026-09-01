@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC
@@ -15,6 +16,8 @@ import redis
 
 from api.infra.circuit_breaker import CircuitBreaker
 from api.settings import get_settings
+from api.infra.benchmark_provider import benchmark_provider_enabled
+from api.infra.benchmark_provider import deterministic_completion
 
 
 LOGGER = logging.getLogger(__name__)
@@ -110,7 +113,7 @@ class LLMService:
             for provider in LLMProvider
         }
 
-        if require_provider and not self._available_providers:
+        if require_provider and not self._available_providers and not benchmark_provider_enabled():
             raise RuntimeError("No LLM providers configured. Set at least one provider API key.")
 
     async def complete(
@@ -121,6 +124,21 @@ class LLMService:
         max_tokens: int = 2000,
         response_format: str = "json",
     ) -> LLMResponse:
+        if benchmark_provider_enabled():
+            started = time.perf_counter()
+            latency_ms = max(0, int(os.getenv("BENCHMARK_EXTRACT_LATENCY_MS", "75")))
+            if latency_ms:
+                await asyncio.sleep(latency_ms / 1000)
+            payload = deterministic_completion(system_prompt, user_message)
+            return LLMResponse(
+                content=str(payload["content"]),
+                provider_used=str(payload["provider_used"]),
+                model_used=str(payload["model_used"]),
+                input_tokens=int(payload["input_tokens"]),
+                output_tokens=int(payload["output_tokens"]),
+                total_tokens=int(payload["total_tokens"]),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
         tried: list[str] = []
         errors: list[str] = []
 

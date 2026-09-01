@@ -21,6 +21,8 @@ from api.db.models import EmbeddingProvider
 from api.infra.llm_router import EmbeddingUnavailableError
 from api.infra.llm_router import LLMRouter
 from api.settings import get_settings
+from api.infra.benchmark_provider import benchmark_provider_enabled
+from api.infra.benchmark_provider import deterministic_embedding
 
 
 DEFAULT_ACTIVE_MODEL_ID = "openai-text-embedding-3-small-v1"
@@ -314,6 +316,8 @@ class EmbeddingService:
         model: EmbeddingModelRecord,
         tenant_id: str | None,
     ) -> list[float]:
+        if benchmark_provider_enabled():
+            return deterministic_embedding(text, model.dimensions)
         provider_name = EmbeddingProvider(model.provider).value
         provider_kwargs: dict[str, object]
         if provider_name in {"gemini", "cohere", "openai"}:
