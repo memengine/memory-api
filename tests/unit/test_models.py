@@ -142,6 +142,7 @@ def test_user_counter_and_audit_log_metadata_defaults_match_contract() -> None:
 
 def test_tenant_budget_and_quality_log_defaults_match_contract() -> None:
     rate_limit_column = TenantBudget.__table__.c.rate_limit_per_user_per_minute
+    quality_log_layer_column = CallQualityLog.__table__.c.layer_blocked_at
     quality_log_similarity_column = CallQualityLog.__table__.c.semantic_similarity
     write_calls_column = TenantBudget.__table__.c.write_calls
     write_call_limit_column = TenantBudget.__table__.c.write_call_limit
@@ -152,6 +153,7 @@ def test_tenant_budget_and_quality_log_defaults_match_contract() -> None:
     assert write_call_limit_column.nullable is True
     assert str(read_calls_column.server_default.arg) == "0"
     assert quality_log_similarity_column.nullable is True
+    assert quality_log_layer_column.type.enums == ["L1", "L2", "L3", "L4", "NONE"]
 
 
 def test_tenant_defaults_match_contract() -> None:

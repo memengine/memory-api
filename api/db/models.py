@@ -142,6 +142,7 @@ class QuotaMode(str, enum.Enum):
 class VectorSyncOperation(str, enum.Enum):
     upsert = "upsert"
     delete = "delete"
+    archive = "archive"
 
 
 class VectorSyncStatus(str, enum.Enum):
@@ -2621,7 +2622,11 @@ class CallQualityLog(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     external_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     layer_blocked_at: Mapped[CallQualityBlockedLayer] = mapped_column(
-        Enum(CallQualityBlockedLayer, name="call_quality_blocked_layer_enum"),
+        Enum(
+            CallQualityBlockedLayer,
+            name="call_quality_blocked_layer_enum",
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+        ),
         nullable=False,
         server_default=text("'NONE'"),
     )
