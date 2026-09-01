@@ -1,0 +1,16 @@
+{
+  "baseline": "multi-agent-isolation-live-development-v1",
+  "artifact": "artifacts/internal-benchmarks/multi-agent-isolation-live-development-v2.json",
+  "scenario_count": 12,
+  "passed": 12,
+  "end_to_end_success_rate": 1.0,
+  "cross_tenant_leakage": 0,
+  "cross_user_leakage": 0,
+  "agent_filter_accuracy": 1.0,
+  "expected_shared_visibility": 1.0,
+  "grant_and_revocation_accuracy": 1.0,
+  "source_agent_storage_preservation": 1.0,
+  "source_agent_api_readback": 1.0,
+  "holdout_used": false,
+  "production_behavior_changed": true
+}

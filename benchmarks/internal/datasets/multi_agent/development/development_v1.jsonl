@@ -1,0 +1,12 @@
+{"id":"tenant_agent_a_filter","plane":"tenant","expect":"only_agent_a","metric":"agent_filter"}
+{"id":"tenant_agent_b_filter","plane":"tenant","expect":"only_agent_b","metric":"agent_filter"}
+{"id":"tenant_unfiltered_shared_pool","plane":"tenant","expect":"both_agents","metric":"expected_shared_visibility"}
+{"id":"tenant_other_user_isolation","plane":"tenant","expect":"no_other_user","metric":"cross_user_leakage"}
+{"id":"tenant_other_tenant_isolation","plane":"tenant","expect":"no_other_tenant","metric":"cross_tenant_leakage"}
+{"id":"passport_agent_a_category_grant","plane":"passport","expect":"fact_only","metric":"category_grant"}
+{"id":"passport_agent_b_category_grant","plane":"passport","expect":"relationship_only","metric":"category_grant"}
+{"id":"passport_authorized_cross_source_share","plane":"passport","expect":"agent_b_fact_visible_to_agent_a","metric":"expected_shared_visibility"}
+{"id":"passport_other_user_isolation","plane":"passport","expect":"no_other_user","metric":"cross_user_leakage"}
+{"id":"passport_revoked_grant","plane":"passport","expect":"no_access","metric":"revocation"}
+{"id":"passport_read_only_write","plane":"passport","expect":"write_forbidden","metric":"write_authorization"}
+{"id":"passport_source_agent_provenance","plane":"passport","expect":"source_agent_preserved_and_readable","metric":"provenance"}
