@@ -166,6 +166,7 @@ def test_retrieve_respects_category_filter(monkeypatch) -> None:
                 )
             ],
             "What you know about this user:\n- User knows graph theory well.",
+            10,
         )
 
     monkeypatch.setattr(UUIService, "get_grants", fake_get_grants)
@@ -243,6 +244,7 @@ def test_user_a_cannot_see_user_b_memories(monkeypatch) -> None:
                 )
             ],
             "What you know about this user:\n- Scoped memory",
+            10,
         )
 
     monkeypatch.setattr(UUIService, "get_grants", fake_get_grants)
@@ -307,6 +309,7 @@ def test_agent_a_cannot_see_agent_b_memories_for_same_user(monkeypatch) -> None:
                 )
             ],
             "What you know about this user:\n- User lives in Pune.",
+            10,
         )
 
     monkeypatch.setattr(UUIService, "get_grants", fake_get_grants)
@@ -332,9 +335,11 @@ def test_agent_a_cannot_see_agent_b_memories_for_same_user(monkeypatch) -> None:
 
 def test_universal_memories_not_in_tenant_endpoint() -> None:
     upsert_calls: list[dict[str, object]] = []
+    created_sessions: list[FakeSession] = []
 
     class FakeSession:
         def __init__(self) -> None:
+            self.added = []
             self.universal_user = SimpleNamespace(
                 id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
                 is_active=True,
@@ -357,7 +362,7 @@ def test_universal_memories_not_in_tenant_endpoint() -> None:
             )
 
         def add(self, instance) -> None:
-            return None
+            self.added.append(instance)
 
         def flush(self) -> None:
             return None
@@ -373,7 +378,9 @@ def test_universal_memories_not_in_tenant_endpoint() -> None:
 
     class FakeSessionFactory:
         def __call__(self):
-            return FakeSession()
+            session = FakeSession()
+            created_sessions.append(session)
+            return session
 
     class FakeExtractor:
         def extract(self, messages, user_id):
@@ -428,9 +435,8 @@ def test_universal_memories_not_in_tenant_endpoint() -> None:
 
     assert result["status"] == "processed"
     assert result["memories_created"] == 1
-    assert len(upsert_calls) == 1
-    assert upsert_calls[0]["collection_name"] == UNIVERSAL_COLLECTION_NAME
-    assert upsert_calls[0]["collection_name"] != "memories"
+    outbox_rows = [item for item in created_sessions[-1].added if getattr(item, "payload", {}).get("qdrant_collection") == UNIVERSAL_COLLECTION_NAME]
+    assert len(outbox_rows) == 1
 
 
 def test_tenant_memories_not_in_universal_endpoint(monkeypatch) -> None:
@@ -447,7 +453,7 @@ def test_tenant_memories_not_in_universal_endpoint(monkeypatch) -> None:
 
     async def fake_search(**kwargs):
         assert kwargs["allowed_categories"] == ["fact"]
-        return ([], "")
+        return ([], "", 0)
 
     monkeypatch.setattr(UUIService, "get_grants", fake_get_grants)
     monkeypatch.setattr("api.routers.universal._search_universal_memories", fake_search)

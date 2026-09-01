@@ -5,9 +5,13 @@ from unittest.mock import patch
 from qdrant_client.http import models as qmodels
 
 from api.db.vector_store import QdrantService
+from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 
 
 def setup_function() -> None:
+    state_client = MagicMock()
+    state_client.get.return_value = None
+    CircuitBreakerRegistry.reset(state_client=state_client)
     QdrantService._reset_shared_state()
 
 
@@ -96,6 +100,7 @@ def test_search_memories_builds_expected_filter() -> None:
         proxy_user_id="proxy-1",
         limit=7,
         category_filter="fact",
+        agent_id="agent-1",
         include_archived=False,
     )
 
@@ -105,8 +110,20 @@ def test_search_memories_builds_expected_filter() -> None:
     query_filter = query_kwargs["query_filter"]
 
     assert query_kwargs["limit"] == 7
-    assert [condition.key for condition in query_filter.must] == ["tenant_id", "proxy_user_id", "category", "is_archived"]
-    assert [condition.match.value for condition in query_filter.must] == ["tenant-1", "proxy-1", "fact", False]
+    assert [condition.key for condition in query_filter.must] == [
+        "tenant_id",
+        "proxy_user_id",
+        "category",
+        "agent_id",
+        "is_archived",
+    ]
+    assert [condition.match.value for condition in query_filter.must] == [
+        "tenant-1",
+        "proxy-1",
+        "fact",
+        "agent-1",
+        False,
+    ]
 
 
 def test_delete_memory_uses_point_id_selector() -> None:

@@ -233,6 +233,7 @@ async def _search_universal_memories(
                 previous_version_id=None,
                 last_accessed_at=memory.last_accessed_at.isoformat() if memory.last_accessed_at else None,
                 created_at=memory.created_at.isoformat() if memory.created_at else None,
+                provenance=(memory.metadata_json or {}).get("provenance"),
             )
         )
 
@@ -249,6 +250,7 @@ async def _search_universal_memories(
             last_accessed=datetime.fromisoformat(item.last_accessed_at) if item.last_accessed_at else None,
             relevance_score=item.final_score,
             context_snippet=context_builder.build_context([item], format=format, max_tokens=120),
+            provenance=item.provenance,
         )
         for item in final_results
     ]
@@ -325,6 +327,7 @@ async def add_universal_memories(
 
     job_payload = {
         "job_id": str(uuid.uuid4()),
+        "idempotency_key": payload.idempotency_key,
         "status": "queued",
         "user_uui_id": str(user.id),
         "agent_id": str(agent.id),

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from api.db.vector_store import QdrantService
+from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.services.proxy_user_service import ProxyUserService
 
 
@@ -18,6 +19,9 @@ def test_same_external_user_id_hashes_differ_across_tenants() -> None:
 
 
 def test_qdrant_search_filters_by_tenant_and_proxy_user() -> None:
+    state_client = MagicMock()
+    state_client.get.return_value = None
+    CircuitBreakerRegistry.reset(state_client=state_client)
     client = MagicMock()
     client.collection_exists.return_value = True
     client.query_points.return_value = SimpleNamespace(points=[])

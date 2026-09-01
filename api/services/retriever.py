@@ -1,34 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import os
 import uuid
-import inspect
-from dataclasses import asdict
-from dataclasses import dataclass
-from datetime import UTC
-from datetime import datetime
-from datetime import timedelta
-import logging
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from typing import Iterable
 
-from sqlalchemy import func
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.cache import CacheService
-from api.db.models import Memory
-from api.db.models import QuotaMode
+from api.db.models import Memory, QuotaMode
 from api.db.vector_store import QdrantService
+from api.errors import APIError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
-from api.services.embedding_service import EmbeddingResult
-from api.services.embedding_service import EmbeddingService
+from api.services.embedding_service import EmbeddingResult, EmbeddingService
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
 from api.tasks.retrieval_tasks import update_memory_accesses
-
 
 CACHE_TTL_SECONDS = 60
 L1_CACHE_TTL_SECONDS = float(os.getenv("RETRIEVAL_L1_CACHE_TTL_SECONDS", "1.0"))
@@ -38,6 +32,7 @@ HOT_TIER_CACHE_TTL_SECONDS = float(os.getenv("RETRIEVAL_HOT_TIER_CACHE_TTL_SECON
 REDIS_CACHE_READ_TIMEOUT_SECONDS = float(os.getenv("RETRIEVAL_CACHE_READ_TIMEOUT_SECONDS", "0.05"))
 REDIS_CACHE_READ_ENABLED = os.getenv("RETRIEVAL_REDIS_CACHE_READ_ENABLED", "true").lower() in {"1", "true", "yes"}
 OVERFETCH_MULTIPLIER = max(1, int(os.getenv("RETRIEVAL_OVERFETCH_MULTIPLIER", "3")))
+MIN_SEMANTIC_SCORE = min(1.0, max(0.0, float(os.getenv("RETRIEVAL_MIN_SEMANTIC_SCORE", "0.315"))))
 COLD_START_THRESHOLD = 5
 DEDUPLICATION_THRESHOLD = 0.95
 
@@ -73,6 +68,8 @@ class MemoryResult:
     created_at: str | None = None
     source_event_id: str | None = None
     provenance: dict[str, Any] | None = None
+    effective_from: str | None = None
+    effective_until: str | None = None
 
 
 class RetrieverService:
@@ -111,6 +108,16 @@ class RetrieverService:
             gemini_client=client,
         )
 
+    @classmethod
+    def invalidate_local_user_cache(cls, user_id: str) -> None:
+        """Invalidate only process-local entries owned by one user/proxy identity."""
+        prefix = f"{user_id}|"
+        for cache in (cls._l1_cache, cls._hot_tier_cache):
+            for key in [key for key in cache if key.startswith(prefix)]:
+                cache.pop(key, None)
+        cls._memory_count_cache.pop(f"proxy:{user_id}", None)
+        cls._memory_count_cache.pop(f"user:{user_id}", None)
+
     async def retrieve(
         self,
         query: str,
@@ -122,6 +129,7 @@ class RetrieverService:
         agent_id: str | None = None,
         tenant_id: str | None = None,
         time_filter_days: int | None = None,
+        as_of: datetime | None = None,
         quota_mode: str | QuotaMode | None = None,
     ) -> list[MemoryResult]:
         identity = external_user_id or user_id
@@ -129,7 +137,7 @@ class RetrieverService:
             raise ValueError("retrieve requires external_user_id or user_id.")
         normalized_categories = [category.lower() for category in categories or []]
         created_after = self._created_after(time_filter_days)
-        cache_context = self._cache_context(query, normalized_categories, agent_id, limit, time_filter_days)
+        cache_context = self._cache_context(query, normalized_categories, agent_id, limit, time_filter_days, as_of)
 
         self.last_is_degraded = False
 
@@ -151,6 +159,7 @@ class RetrieverService:
 
         cached_results = await self._get_cached_results(user_id=cache_identity, cache_context=cache_context)
         if cached_results is not None:
+            cached_results = self._filter_current_results(cached_results)
             self.last_cache_hit = True
             self.last_quota_mode = self._coerce_quota_mode(quota_mode).value if quota_mode is not None else QuotaMode.full.value
             self._queue_access_update([result.id for result in cached_results])
@@ -163,6 +172,22 @@ class RetrieverService:
         if resolved_quota_mode in {QuotaMode.blocked, QuotaMode.passthrough}:
             return []
 
+        if as_of is not None:
+            historical_results = await self._retrieve_as_of_semantic(
+                query=query,
+                tenant_id=tenant_id,
+                proxy_user_id=str(proxy_user.id) if proxy_user is not None else None,
+                user_id=identity if proxy_user is None else None,
+                as_of=as_of,
+                limit=limit,
+                categories=normalized_categories,
+                agent_id=agent_id,
+                created_after=created_after,
+            )
+            self._queue_access_update([result.id for result in historical_results])
+            return historical_results
+
+        # Current reads enforce effective_from/effective_until in every candidate source.
         hot_tier_results = await self._get_hot_tier_results(
             proxy_user_id=str(proxy_user.id) if proxy_user is not None else None,
             categories=normalized_categories,
@@ -241,13 +266,17 @@ class RetrieverService:
             ]
         except Exception as exc:
             logger.warning(
-                "Retriever embedding failed; returning empty results. tenant_id=%s proxy_user_id=%s error=%s",
+                "Retriever embedding failed; returning dependency error. tenant_id=%s proxy_user_id=%s error=%s",
                 tenant_id,
                 scoped_identity if proxy_user is not None else None,
                 exc,
             )
-            self._queue_access_update([result.id for result in hot_tier_results])
-            return hot_tier_results[:limit]
+            raise APIError(
+                status_code=503,
+                code="EMB_503",
+                error="embedding_unavailable",
+                details={"reason": str(exc)},
+            ) from exc
         if proxy_user is not None:
             scored_points = []
             for query_embedding in query_embeddings:
@@ -258,6 +287,7 @@ class RetrieverService:
                         proxy_user_id=scoped_identity,
                         limit=min(max(remaining_limit * OVERFETCH_MULTIPLIER, remaining_limit), 50),
                         categories=normalized_categories,
+                        agent_id=agent_id,
                         collection_name=query_embedding.qdrant_collection,
                         created_after=created_after,
                     )
@@ -271,6 +301,7 @@ class RetrieverService:
                         user_id=scoped_identity,
                         limit=min(max(remaining_limit * OVERFETCH_MULTIPLIER, remaining_limit), 50),
                         categories=normalized_categories,
+                        agent_id=agent_id,
                         collection_name=query_embedding.qdrant_collection,
                         created_after=created_after,
                     )
@@ -291,11 +322,18 @@ class RetrieverService:
             await self._cache_results(user_id=cache_identity, results=final_results, cache_context=cache_context)
             return final_results
 
+        scored_points = [
+            point
+            for point in scored_points
+            if self._passes_semantic_floor(point)
+            and self._payload_is_current(getattr(point, "payload", {}) or {})
+        ]
+
         if not scored_points:
             self._queue_access_update([result.id for result in hot_tier_results])
             return hot_tier_results[:limit]
 
-        payload_results = self._results_from_qdrant_payloads(scored_points)
+        payload_results = self._results_from_qdrant_payloads(scored_points, agent_id=agent_id)
         if payload_results:
             deduplicated_results = self._deduplicate_results(payload_results)
             ranked_results = sorted(
@@ -364,6 +402,8 @@ class RetrieverService:
                     created_at=memory.created_at.isoformat() if memory.created_at else None,
                     source_event_id=str(memory.source_event_id) if memory.source_event_id else None,
                     provenance=(memory.metadata_json or {}).get("provenance"),
+                    effective_from=memory.effective_from.isoformat() if memory.effective_from else None,
+                    effective_until=memory.effective_until.isoformat() if memory.effective_until else None,
                 )
             )
 
@@ -425,7 +465,9 @@ class RetrieverService:
         if not cached_memories:
             return None
 
-        results = [self._memory_result_from_cache(item) for item in cached_memories]
+        results = self._filter_current_results(
+            [self._memory_result_from_cache(item) for item in cached_memories]
+        )
         self._set_l1_cache(l1_key, results)
         return results
 
@@ -538,6 +580,8 @@ class RetrieverService:
 
         results: list[MemoryResult] = []
         for item in cached_memories:
+            if not self._payload_is_current(item):
+                continue
             category = str(item.get("category", ""))
             if categories and category not in categories:
                 continue
@@ -639,6 +683,169 @@ class RetrieverService:
             cls._memory_count_cache.clear()
         cls._memory_count_cache[key] = (datetime.now(UTC).timestamp() + MEMORY_COUNT_CACHE_TTL_SECONDS, count)
 
+    async def _retrieve_as_of_semantic(
+        self,
+        *,
+        query: str,
+        tenant_id: str | None,
+        proxy_user_id: str | None,
+        user_id: str | None,
+        as_of: datetime,
+        limit: int,
+        categories: list[str],
+        agent_id: str | None,
+        created_after: datetime | None,
+    ) -> list[MemoryResult]:
+        """Rank retained active/superseded vectors, with PostgreSQL as authority."""
+        if as_of.tzinfo is None:
+            raise ValueError("as_of must include a timezone")
+        try:
+            model_ids = await self._candidate_embedding_model_ids(
+                proxy_user_id=proxy_user_id, user_id=user_id
+            )
+            points: list[Any] = []
+            for model_id in model_ids:
+                embedding = await self._embed_query(query, model_id=model_id)
+                search_limit = min(max(limit * OVERFETCH_MULTIPLIER, limit), 50)
+                if proxy_user_id is not None:
+                    points.extend(await self._search_qdrant(
+                        query_embedding=embedding.vector, tenant_id=tenant_id,
+                        proxy_user_id=proxy_user_id, limit=search_limit,
+                        categories=categories, agent_id=agent_id,
+                        collection_name=embedding.qdrant_collection,
+                        created_after=created_after, include_archived=True,
+                    ))
+                elif user_id is not None:
+                    points.extend(await self._search_qdrant_legacy(
+                        query_embedding=embedding.vector, user_id=user_id,
+                        limit=search_limit, categories=categories, agent_id=agent_id,
+                        collection_name=embedding.qdrant_collection,
+                        created_after=created_after, include_archived=True,
+                    ))
+            points = [
+                point for point in points
+                if self._passes_semantic_floor(point)
+                and self._payload_is_valid_at(
+                    getattr(point, "payload", {}) or {}, as_of
+                )
+            ]
+            if points:
+                memories = await self._fetch_historical_memories_by_ids(
+                    memory_ids=[self._point_memory_id(point) for point in points],
+                    proxy_user_id=proxy_user_id, user_id=user_id, as_of=as_of,
+                    categories=categories, agent_id=agent_id, created_after=created_after,
+                )
+                results: list[MemoryResult] = []
+                for point in points:
+                    memory_id = self._point_memory_id(point)
+                    memory = memories.get(str(memory_id)) if memory_id else None
+                    if memory is None:
+                        continue
+                    results.append(self._memory_to_result(
+                        memory, semantic_score=float(getattr(point, "score", 0.0) or 0.0)
+                    ))
+                if results:
+                    return sorted(
+                        self._deduplicate_results(results),
+                        key=lambda item: item.final_score, reverse=True,
+                    )[:limit]
+        except Exception as exc:
+            logger.warning("historical semantic retrieval failed; using PostgreSQL: %s", exc)
+
+        return await self._retrieve_as_of_memories(
+            proxy_user_id=proxy_user_id, user_id=user_id, as_of=as_of, limit=limit,
+            categories=categories, agent_id=agent_id, created_after=created_after,
+        )
+
+    async def _fetch_historical_memories_by_ids(
+        self, *, memory_ids: Iterable[str | None], proxy_user_id: str | None,
+        user_id: str | None, as_of: datetime, categories: list[str],
+        agent_id: str | None, created_after: datetime | None,
+    ) -> dict[str, Memory]:
+        ids = [self._as_uuid(item) for item in memory_ids if item]
+        if not ids:
+            return {}
+        effective_at = as_of.astimezone(UTC)
+        query = select(Memory).where(Memory.id.in_(ids))
+        if proxy_user_id is not None:
+            query = query.where(Memory.proxy_user_id == self._as_uuid(proxy_user_id))
+        elif user_id is not None:
+            query = query.where(Memory.user_id == self._as_uuid(user_id))
+        else:
+            return {}
+        query = query.where(
+            or_(Memory.effective_from.is_(None), Memory.effective_from <= effective_at),
+            or_(Memory.effective_until.is_(None), Memory.effective_until > effective_at),
+            or_(Memory.is_archived.is_(False), Memory.effective_from.is_not(None), Memory.effective_until.is_not(None)),
+        )
+        if categories:
+            query = query.where(Memory.category.in_(categories))
+        if agent_id is not None:
+            query = query.where(Memory.agent_id == self._as_uuid(agent_id))
+        if created_after is not None:
+            query = query.where(Memory.created_at >= created_after)
+        rows = list((await self.session.execute(query)).scalars().all())
+        return {str(memory.id): memory for memory in rows}
+
+    async def _retrieve_as_of_memories(
+        self,
+        *,
+        proxy_user_id: str | None,
+        user_id: str | None,
+        as_of: datetime,
+        limit: int,
+        categories: list[str],
+        agent_id: str | None,
+        created_after: datetime | None,
+    ) -> list[MemoryResult]:
+        if as_of.tzinfo is None:
+            raise ValueError("as_of must include a timezone")
+        effective_at = as_of.astimezone(UTC)
+
+        if proxy_user_id is not None:
+            query = select(Memory).where(
+                Memory.proxy_user_id == self._as_uuid(proxy_user_id)
+            )
+        elif user_id is not None:
+            query = select(Memory).where(Memory.user_id == self._as_uuid(user_id))
+        else:
+            return []
+
+        query = query.where(
+            and_(
+                or_(
+                    Memory.effective_from.is_(None),
+                    Memory.effective_from <= effective_at,
+                ),
+                or_(
+                    Memory.effective_until.is_(None),
+                    Memory.effective_until > effective_at,
+                ),
+                or_(
+                    Memory.is_archived.is_(False),
+                    Memory.effective_from.is_not(None),
+                    Memory.effective_until.is_not(None),
+                ),
+            )
+        )
+        if categories:
+            query = query.where(Memory.category.in_(categories))
+        if agent_id is not None:
+            query = query.where(Memory.agent_id == self._as_uuid(agent_id))
+        if created_after is not None:
+            query = query.where(Memory.created_at >= created_after)
+
+        query = query.order_by(
+            Memory.importance_score.desc(),
+            Memory.effective_from.desc().nullslast(),
+            Memory.last_accessed_at.desc(),
+        ).limit(limit)
+        result = await self.session.execute(query)
+        return [
+            self._memory_to_result(memory, semantic_score=0.0)
+            for memory in result.scalars().all()
+        ]
+
     async def _retrieve_postgres_fallback(
         self,
         *,
@@ -672,7 +879,9 @@ class RetrieverService:
             Memory.last_accessed_at.desc(),
         ).limit(limit)
         result = await self.session.execute(query)
-        return [self._memory_to_result(memory, semantic_score=0.0) for memory in result.scalars().all()]
+        return self._filter_current_results(
+            [self._memory_to_result(memory, semantic_score=0.0) for memory in result.scalars().all()]
+        )
 
     async def _retrieve_cold_start_memories(
         self,
@@ -714,8 +923,11 @@ class RetrieverService:
                 created_at=memory.created_at.isoformat() if memory.created_at else None,
                 source_event_id=str(memory.source_event_id) if memory.source_event_id else None,
                 provenance=(memory.metadata_json or {}).get("provenance"),
+                effective_from=memory.effective_from.isoformat() if memory.effective_from else None,
+                effective_until=memory.effective_until.isoformat() if memory.effective_until else None,
             )
             for memory in memories
+            if self._memory_is_current(memory)
         ]
         deduplicated_results = self._deduplicate_results(results)
         return sorted(deduplicated_results, key=lambda item: item.final_score, reverse=True)[:limit]
@@ -756,8 +968,11 @@ class RetrieverService:
                 created_at=memory.created_at.isoformat() if memory.created_at else None,
                 source_event_id=str(memory.source_event_id) if memory.source_event_id else None,
                 provenance=(memory.metadata_json or {}).get("provenance"),
+                effective_from=memory.effective_from.isoformat() if memory.effective_from else None,
+                effective_until=memory.effective_until.isoformat() if memory.effective_until else None,
             )
             for memory in memories
+            if self._memory_is_current(memory)
         ]
         deduplicated_results = self._deduplicate_results(results)
         return sorted(deduplicated_results, key=lambda item: item.final_score, reverse=True)[:limit]
@@ -872,8 +1087,10 @@ class RetrieverService:
         proxy_user_id: str,
         limit: int,
         categories: list[str],
+        agent_id: str | None,
         collection_name: str,
         created_after: datetime | None,
+        include_archived: bool = False,
     ) -> list[Any]:
         if len(categories) <= 1:
             return await self._search_memories(
@@ -882,7 +1099,8 @@ class RetrieverService:
                 proxy_user_id=proxy_user_id,
                 limit=limit,
                 category_filter=categories[0] if categories else None,
-                include_archived=False,
+                agent_id=agent_id,
+                include_archived=include_archived,
                 collection_name=collection_name,
                 created_after=created_after,
             )
@@ -895,7 +1113,8 @@ class RetrieverService:
                 proxy_user_id=proxy_user_id,
                 limit=limit,
                 category_filter=category,
-                include_archived=False,
+                agent_id=agent_id,
+                include_archived=include_archived,
                 collection_name=collection_name,
                 created_after=created_after,
             ):
@@ -920,8 +1139,10 @@ class RetrieverService:
         user_id: str,
         limit: int,
         categories: list[str],
+        agent_id: str | None,
         collection_name: str,
         created_after: datetime | None,
+        include_archived: bool = False,
     ) -> list[Any]:
         if len(categories) <= 1:
             return await self._search_memories(
@@ -929,7 +1150,8 @@ class RetrieverService:
                 user_id=user_id,
                 limit=limit,
                 category_filter=categories[0] if categories else None,
-                include_archived=False,
+                agent_id=agent_id,
+                include_archived=include_archived,
                 collection_name=collection_name,
                 created_after=created_after,
             )
@@ -941,7 +1163,8 @@ class RetrieverService:
                 user_id=user_id,
                 limit=limit,
                 category_filter=category,
-                include_archived=False,
+                agent_id=agent_id,
+                include_archived=include_archived,
                 collection_name=collection_name,
                 created_after=created_after,
             ):
@@ -984,13 +1207,17 @@ class RetrieverService:
         agent_id: str | None,
         limit: int,
         time_filter_days: int | None = None,
+        as_of: datetime | None = None,
     ) -> str:
         categories_part = ",".join(sorted(categories))
         agent_part = agent_id or ""
         base = f"{query.strip().lower()}|{categories_part}|{agent_part}|{limit}"
-        if time_filter_days is None:
-            return base
-        return f"{base}|{int(time_filter_days)}"
+        if as_of is None:
+            if time_filter_days is None:
+                return base
+            return f"{base}|{int(time_filter_days)}"
+        time_part = "" if time_filter_days is None else str(int(time_filter_days))
+        return f"{base}|{time_part}|{as_of.astimezone(UTC).isoformat()}"
 
     @staticmethod
     def _memory_result_from_cache(item: dict[str, Any]) -> MemoryResult:
@@ -1013,6 +1240,8 @@ class RetrieverService:
             created_at=str(item["created_at"]) if item.get("created_at") else None,
             source_event_id=str(item["source_event_id"]) if item.get("source_event_id") else None,
             provenance=dict(item["provenance"]) if item.get("provenance") else None,
+            effective_from=str(item["effective_from"]) if item.get("effective_from") else None,
+            effective_until=str(item["effective_until"]) if item.get("effective_until") else None,
         )
 
     def _memory_to_result(self, memory: Memory, *, semantic_score: float) -> MemoryResult:
@@ -1037,12 +1266,18 @@ class RetrieverService:
             created_at=memory.created_at.isoformat() if memory.created_at else None,
             source_event_id=str(memory.source_event_id) if memory.source_event_id else None,
             provenance=(memory.metadata_json or {}).get("provenance"),
+            effective_from=memory.effective_from.isoformat() if memory.effective_from else None,
+            effective_until=memory.effective_until.isoformat() if memory.effective_until else None,
         )
 
-    def _results_from_qdrant_payloads(self, scored_points: list[Any]) -> list[MemoryResult]:
+    def _results_from_qdrant_payloads(
+        self, scored_points: list[Any], *, agent_id: str | None = None
+    ) -> list[MemoryResult]:
         results: list[MemoryResult] = []
         for point in scored_points:
             payload = getattr(point, "payload", {}) or {}
+            if agent_id is not None and str(payload.get("agent_id") or "") != str(agent_id):
+                continue
             memory_id = self._point_memory_id(point)
             content = payload.get("content")
             category = payload.get("category")
@@ -1081,6 +1316,8 @@ class RetrieverService:
                         str(payload["source_event_id"]) if payload.get("source_event_id") else None
                     ),
                     provenance=dict(payload["provenance"]) if payload.get("provenance") else None,
+                    effective_from=str(payload["effective_from"]) if payload.get("effective_from") else None,
+                    effective_until=str(payload["effective_until"]) if payload.get("effective_until") else None,
                 )
             )
         return results
@@ -1128,6 +1365,58 @@ class RetrieverService:
             return None
         return datetime.now(UTC) - timedelta(days=max(0, int(time_filter_days)))
 
+    @classmethod
+    def _filter_current_results(
+        cls, results: list[MemoryResult], *, now: datetime | None = None
+    ) -> list[MemoryResult]:
+        reference = now or datetime.now(UTC)
+        return [
+            result for result in results
+            if cls._is_valid_at(result.effective_from, result.effective_until, reference)
+        ]
+
+    @classmethod
+    def _payload_is_valid_at(
+        cls, payload: dict[str, Any], reference: datetime
+    ) -> bool:
+        return cls._is_valid_at(
+            payload.get("effective_from"), payload.get("effective_until"), reference
+        )
+
+    @classmethod
+    def _payload_is_current(
+        cls, payload: dict[str, Any], *, now: datetime | None = None
+    ) -> bool:
+        reference = now or datetime.now(UTC)
+        return cls._is_valid_at(
+            payload.get("effective_from"), payload.get("effective_until"), reference
+        )
+
+    @classmethod
+    def _memory_is_current(
+        cls, memory: Memory, *, now: datetime | None = None
+    ) -> bool:
+        reference = now or datetime.now(UTC)
+        return cls._is_valid_at(
+            getattr(memory, "effective_from", None),
+            getattr(memory, "effective_until", None),
+            reference,
+        )
+
+    @classmethod
+    def _is_valid_at(
+        cls, effective_from: Any, effective_until: Any, reference: datetime
+    ) -> bool:
+        starts_at = cls._parse_datetime(effective_from)
+        ends_at = cls._parse_datetime(effective_until)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        else:
+            reference = reference.astimezone(UTC)
+        return (starts_at is None or starts_at <= reference) and (
+            ends_at is None or ends_at > reference
+        )
+
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
         if value is None:
@@ -1142,6 +1431,10 @@ class RetrieverService:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed
+
+    @staticmethod
+    def _passes_semantic_floor(point: Any) -> bool:
+        return float(getattr(point, "score", 0.0) or 0.0) >= MIN_SEMANTIC_SCORE
 
     @staticmethod
     def _point_memory_id(point: Any) -> str | None:

@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC
-from datetime import datetime
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from api.db.models import Memory
-from api.db.models import MemoryCategory
-from api.db.models import QuotaMode
-from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
-from api.services.embedding_service import EmbeddingResult
-from api.services.retriever import MemoryResult
-from api.services.retriever import RetrieverService
+from api.db.models import Memory, MemoryCategory, QuotaMode
+from api.errors import APIError
+from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID, EmbeddingResult
+from api.services.retriever import MemoryResult, RetrieverService
 
 
 class FakeExecuteResult:
@@ -130,6 +124,17 @@ class FakeEmbeddingService:
         return SimpleNamespace(id=DEFAULT_ACTIVE_MODEL_ID)
 
 
+class FailingEmbeddingService(FakeEmbeddingService):
+    async def embed(self, text: str, model_id: str | None = None) -> EmbeddingResult:
+        raise TimeoutError("embedding connection timed out")
+
+
+def test_semantic_floor_preserves_boundary_and_rejects_lower_score() -> None:
+    service = object.__new__(RetrieverService)
+
+    assert service._passes_semantic_floor(SimpleNamespace(score=0.315)) is True
+    assert service._passes_semantic_floor(SimpleNamespace(score=0.314999)) is False
+
 def test_qdrant_payload_results_include_provenance() -> None:
     memory_id = uuid.uuid4()
     source_event_id = uuid.uuid4()
@@ -161,6 +166,36 @@ def test_qdrant_payload_results_include_provenance() -> None:
     assert len(results) == 1
     assert results[0].source_event_id == str(source_event_id)
     assert results[0].provenance == point.payload["provenance"]
+
+
+def test_qdrant_payload_results_enforce_requested_agent() -> None:
+    requested_agent_id = str(uuid.uuid4())
+    other_agent_id = str(uuid.uuid4())
+    service = object.__new__(RetrieverService)
+
+    def point(agent_id: str | None) -> SimpleNamespace:
+        memory_id = uuid.uuid4()
+        return SimpleNamespace(
+            id=str(memory_id),
+            score=0.9,
+            payload={
+                "memory_id": str(memory_id),
+                "content": "Agent-scoped memory",
+                "category": "fact",
+                "importance_score": 5.0,
+                "confidence_score": 0.9,
+                "agent_id": agent_id,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+    results = service._results_from_qdrant_payloads(
+        [point(requested_agent_id), point(other_agent_id), point(None)],
+        agent_id=requested_agent_id,
+    )
+
+    assert len(results) == 1
+    assert results[0].agent_id == requested_agent_id
 
 
 @pytest.mark.asyncio
@@ -305,6 +340,41 @@ async def test_retrieve_applies_hybrid_scoring_and_returns_best_match(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_retrieve_reports_embedding_dependency_failure_instead_of_empty_result(
+    monkeypatch,
+) -> None:
+    user_id = str(uuid.uuid4())
+    session = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=[
+            FakeExecuteResult(scalar_value=10),
+            FakeExecuteResult(scalar_value=make_embedding_model()),
+        ]
+    )
+    cache_service = MagicMock()
+    cache_service.get_hot_memories = AsyncMock(return_value=None)
+    qdrant_service = MagicMock()
+    qdrant_service.breaker.current_state.return_value = "CLOSED"
+    monkeypatch.setattr(
+        "api.services.retriever.update_memory_accesses", MagicMock()
+    )
+    service = RetrieverService(
+        session=session,
+        qdrant_service=qdrant_service,
+        cache_service=cache_service,
+        quota_manager=FakeQuotaManager(),
+        embedding_service=FailingEmbeddingService(),
+    )
+
+    with pytest.raises(APIError) as captured:
+        await service.retrieve(query="launch", user_id=user_id, limit=10)
+
+    assert captured.value.status_code == 503
+    assert captured.value.code == "EMB_503"
+    qdrant_service.search_memories.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_retrieve_deduplicates_near_identical_memories(monkeypatch) -> None:
     user_id = str(uuid.uuid4())
     memory_a = make_memory(content="User uses FastAPI", category=MemoryCategory.expertise, importance_score=7.0)
@@ -410,6 +480,34 @@ def test_memory_result_cache_round_trip() -> None:
     assert result.content == "User prefers prose"
 
 
+def test_local_cache_invalidation_is_scoped_to_one_proxy_user() -> None:
+    payload = {
+        "id": "memory-1", "content": "Scoped", "category": "fact",
+        "importance_score": 7.0, "confidence_score": .9,
+        "semantic_score": .9, "recency_score": 1.0, "final_score": .9,
+        "agent_id": None, "previous_version_id": None, "last_accessed_at": None,
+    }
+    result = RetrieverService._memory_result_from_cache(payload)
+    RetrieverService._l1_cache = {
+        "proxy-1|query": (float("inf"), [result]),
+        "proxy-2|query": (float("inf"), [result]),
+    }
+    RetrieverService._hot_tier_cache = {
+        "proxy-1|||": (float("inf"), [result]),
+        "proxy-2|||": (float("inf"), [result]),
+    }
+    RetrieverService._memory_count_cache = {
+        "proxy:proxy-1": (float("inf"), 1),
+        "proxy:proxy-2": (float("inf"), 1),
+    }
+
+    RetrieverService.invalidate_local_user_cache("proxy-1")
+
+    assert set(RetrieverService._l1_cache) == {"proxy-2|query"}
+    assert set(RetrieverService._hot_tier_cache) == {"proxy-2|||"}
+    assert set(RetrieverService._memory_count_cache) == {"proxy:proxy-2"}
+
+
 @pytest.mark.asyncio
 async def test_retrieve_returns_empty_in_passthrough_mode_without_qdrant(monkeypatch) -> None:
     session = MagicMock()
@@ -509,7 +607,7 @@ async def test_retrieve_defaults_to_full_mode_when_quota_manager_errors(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_retrieve_returns_empty_when_gemini_embedding_fails(monkeypatch) -> None:
+async def test_retrieve_reports_dependency_error_when_embedding_fails(monkeypatch) -> None:
     session = MagicMock()
     session.execute = AsyncMock(
         side_effect=[
@@ -524,22 +622,21 @@ async def test_retrieve_returns_empty_when_gemini_embedding_fails(monkeypatch) -
     task_mock = MagicMock()
     monkeypatch.setattr("api.services.retriever.update_memory_accesses", task_mock)
 
-    client = FakeGenAIClient([0.1, 0.2])
-    client.aio.models.embed_content = AsyncMock(side_effect=RuntimeError("gemini failure"))
-
     service = RetrieverService(
         session=session,
         qdrant_service=qdrant_service,
         cache_service=cache_service,
         quota_manager=FakeQuotaManager(),
-        client=client,
+        embedding_service=FailingEmbeddingService(),
     )
 
-    results = await service.retrieve(
-        query="python",
-        user_id=str(uuid.uuid4()),
-    )
+    with pytest.raises(APIError) as captured:
+        await service.retrieve(
+            query="python",
+            user_id=str(uuid.uuid4()),
+        )
 
-    assert results == []
+    assert captured.value.status_code == 503
+    assert captured.value.code == "EMB_503"
     qdrant_service.search_memories.assert_not_called()
     task_mock.delay.assert_not_called()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import json
+import time
 import uuid
 from datetime import datetime
 from typing import Annotated
@@ -64,10 +66,20 @@ from api.services.version_service import VersionService
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
 from api.tasks.queue_router import get_processing_eta
+from api.infra.postgres_benchmark import postgres_benchmark_enabled
 
 
 router = APIRouter(prefix="/v1/memories", tags=["memories"])
 logger = logging.getLogger(__name__)
+
+
+def _log_add_benchmark_phases(**phases_ms: float) -> None:
+    if not postgres_benchmark_enabled():
+        return
+    logger.warning(json.dumps({
+        "event": "memory_add_benchmark_phases",
+        **{name: round(value, 2) for name, value in phases_ms.items()},
+    }, sort_keys=True))
 
 
 def _memory_to_data(memory) -> MemoryData:
@@ -207,6 +219,7 @@ async def add_memories(
     Parameters: external_user_id, optional agent_id, conversation messages, optional metadata, optional Idempotency-Key header.
     Responses: queued job metadata or a blocked response with gate metadata for B2B callers.
     """
+    route_started = time.perf_counter()
     if idempotency_key:
         cached_job = await memory_service.get_idempotent_memory_add(
             tenant_id=tenant_id,
@@ -225,6 +238,7 @@ async def add_memories(
                 timestamp=utc_now(),
             )
 
+    gate_started = time.perf_counter()
     gate_messages = [message.model_dump() for message in payload.messages]
     if payload.source is not None:
         # Registered backend events use service + event_id + payload_hash as
@@ -242,6 +256,7 @@ async def add_memories(
             tenant_id,
             payload.external_user_id,
         )
+    gate_ms = (time.perf_counter() - gate_started) * 1000
     if not gate_result.passed:
         return JSONResponse(
             status_code=200,
@@ -256,13 +271,16 @@ async def add_memories(
             },
         )
 
+    proxy_started = time.perf_counter()
     proxy_user = await proxy_user_service.resolve(
         tenant_id=tenant_id,
         external_user_id=payload.external_user_id,
         metadata=payload.metadata,
     )
+    proxy_ms = (time.perf_counter() - proxy_started) * 1000
     request.state.proxy_user_id = str(proxy_user.id)
 
+    queue_started = time.perf_counter()
     job = await memory_service.queue_memory_add(
         requested_user_id=None,
         authenticated_user_id=None,
@@ -276,6 +294,7 @@ async def add_memories(
         api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
         source=payload.source.model_dump(mode="json") if payload.source else None,
     )
+    queue_ms = (time.perf_counter() - queue_started) * 1000
     if job.get("status") != "queued":
         return JSONResponse(
             status_code=200,
@@ -293,7 +312,16 @@ async def add_memories(
             },
         )
 
+    eta_started = time.perf_counter()
     processing_eta_seconds = await asyncio.to_thread(get_processing_eta, tenant_id)
+    eta_ms = (time.perf_counter() - eta_started) * 1000
+    _log_add_benchmark_phases(
+        gate_ms=gate_ms,
+        proxy_ms=proxy_ms,
+        queue_ms=queue_ms,
+        eta_ms=eta_ms,
+        route_ms=(time.perf_counter() - route_started) * 1000,
+    )
     processing_status = "delayed" if processing_eta_seconds is not None else "normal"
     response.headers["X-MemoryOS-Processing"] = processing_status
     return MemoryAddResponse(
@@ -328,11 +356,15 @@ async def retrieve_memories(
     Parameters: external_user_id, natural language query, optional limit, category filters, agent filter, and context format.
     Responses: ranked memory results, cache flag, and a prompt-ready memory context section.
     """
+    route_started = time.perf_counter()
+    proxy_started = time.perf_counter()
     proxy_user = await proxy_user_service.resolve(
         tenant_id=tenant_id,
         external_user_id=payload.external_user_id,
     )
+    proxy_ms = (time.perf_counter() - proxy_started) * 1000
     request.state.proxy_user_id = str(proxy_user.id)
+    retrieval_started = time.perf_counter()
     results = await retriever_service.retrieve(
         query=payload.query,
         external_user_id=payload.external_user_id,
@@ -346,6 +378,11 @@ async def retrieve_memories(
         quota_mode=getattr(getattr(request.state, "quota_envelope", None), "mode", None)
         or getattr(request.state, "quota_mode", None),
     )
+    retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
+    benchmark_cpu_timing = postgres_benchmark_enabled()
+    context_started = time.perf_counter()
+    context_process_cpu_started = time.process_time() if benchmark_cpu_timing else 0.0
+    context_thread_cpu_started = time.thread_time() if benchmark_cpu_timing else 0.0
     data = [
         MemorySearchResult(
             id=result.id,
@@ -367,6 +404,14 @@ async def retrieve_memories(
     )
     system_prompt_addition = context.system_prompt_addition
     context_token_count = context.token_count
+    context_ms = (time.perf_counter() - context_started) * 1000
+    context_process_cpu_ms = (
+        (time.process_time() - context_process_cpu_started) * 1000 if benchmark_cpu_timing else 0.0
+    )
+    context_thread_cpu_ms = (
+        (time.thread_time() - context_thread_cpu_started) * 1000 if benchmark_cpu_timing else 0.0
+    )
+    domain_started = time.perf_counter()
     domain_schema_name = await _tenant_domain_schema(session, tenant_id)
     domain_schema = get_domain_schema(domain_schema_name)
     if domain_schema is not None:
@@ -384,11 +429,15 @@ async def retrieve_memories(
                 + ("\n\n" + system_prompt_addition if system_prompt_addition else "")
             )
             context_token_count += domain_token_count
+    domain_ms = (time.perf_counter() - domain_started) * 1000
+    clarification_started = time.perf_counter()
     clarification_question = await _pop_next_clarification_question(
         session=session,
         proxy_user_id=str(proxy_user.id),
     )
+    clarification_ms = (time.perf_counter() - clarification_started) * 1000
     retrieval_id = None
+    feedback_started = time.perf_counter()
     try:
         retrieval_event = await RetrievalFeedbackService(session=session).log_retrieval(
             tenant_id=tenant_id,
@@ -409,6 +458,22 @@ async def retrieve_memories(
         retrieval_id = str(retrieval_event.id)
     except Exception as exc:
         logger.warning("retrieval feedback logging failed: %s", exc)
+    feedback_ms = (time.perf_counter() - feedback_started) * 1000
+
+    if postgres_benchmark_enabled():
+        logger.warning(json.dumps({
+            "event": "memory_retrieve_benchmark_phases",
+            "historical": payload.as_of is not None,
+            "proxy_ms": round(proxy_ms, 2),
+            "retrieval_ms": round(retrieval_ms, 2),
+            "context_ms": round(context_ms, 2),
+            "context_process_cpu_ms": round(context_process_cpu_ms, 2),
+            "context_thread_cpu_ms": round(context_thread_cpu_ms, 2),
+            "domain_ms": round(domain_ms, 2),
+            "clarification_ms": round(clarification_ms, 2),
+            "feedback_ms": round(feedback_ms, 2),
+            "route_ms": round((time.perf_counter() - route_started) * 1000, 2),
+        }, sort_keys=True))
 
     return MemoryRetrieveResponse(
         retrieval_id=retrieval_id,

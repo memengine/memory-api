@@ -66,7 +66,15 @@ class MemoryRetrieveRequest(BaseModel):
     categories: list[MemoryCategory] = Field(default_factory=list)
     agent_id: str | None = None
     time_filter_days: int | None = Field(default=None, ge=1, le=3650)
+    as_of: datetime | None = None
     format: MemoryFormat = "bullets"
+
+    @field_validator("as_of")
+    @classmethod
+    def require_as_of_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("as_of must include a timezone")
+        return value
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
 
 
