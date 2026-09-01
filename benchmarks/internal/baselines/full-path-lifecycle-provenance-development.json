@@ -1,0 +1,11 @@
+{
+  "baseline": "full-path-lifecycle-provenance-development-v1",
+  "artifact": "artifacts/internal-benchmarks/full-path-lifecycle-provenance-v1.json",
+  "scenario": "full_path_explicit_city_correction",
+  "passed": true,
+  "checks_passed": 19,
+  "checks_total": 19,
+  "failure_boundary": null,
+  "holdout_used": false,
+  "fixtures_cleaned": true
+}

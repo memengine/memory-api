@@ -1,0 +1,13 @@
+{
+  "id": "full_path_explicit_city_correction",
+  "external_user_prefix": "lifecycle-full-path",
+  "initial": {
+    "messages": [{"role": "user", "content": "My current home city is Pune. This is a durable profile fact."}],
+    "source_service": "billing-service",
+    "evidence_reference": "city-profile-initial"
+  },
+  "query": "What is my current home city?",
+  "correction": "Correction: I no longer live in Pune. My current home city is Jaipur.",
+  "expected_old_terms": ["pune"],
+  "expected_new_terms": ["jaipur"]
+}

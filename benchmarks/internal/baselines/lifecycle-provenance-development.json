@@ -1,0 +1,11 @@
+{
+  "baseline": "lifecycle-provenance-development-v1",
+  "artifact": "artifacts/internal-benchmarks/lifecycle-provenance-baseline-v1-postgres.json",
+  "scenario_count": 25,
+  "evaluable_product_scenarios": 24,
+  "end_to_end_lifecycle_success_rate": 1.0,
+  "product_failures": 0,
+  "harness_errors": 1,
+  "holdout_used": false,
+  "production_behavior_changed": false
+}
