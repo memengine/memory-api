@@ -1,0 +1,12 @@
+{
+    "baseline":  "lifecycle-activation-expiration-development-v1",
+    "artifact":  "artifacts/internal-benchmarks/lifecycle-activation-baseline-v2-current-filter.json",
+    "scenario_count":  14,
+    "evaluable_product_scenarios":  13,
+    "passed":  9,
+    "product_failures":  4,
+    "harness_errors":  1,
+    "lifecycle_success":  0.69230769230769229,
+    "holdout_used":  false,
+    "production_behavior_changed":  true
+}
