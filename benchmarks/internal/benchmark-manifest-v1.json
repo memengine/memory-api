@@ -1,0 +1,129 @@
+{
+  "schema_version": "1.0",
+  "manifest_version": "2026.08.13",
+  "scope": "internal-core-backend-only",
+  "holdout": {
+    "paths": ["benchmarks/internal/datasets/extraction/holdout/holdout_v1.jsonl"],
+    "excluded_tiers": ["fast", "integration", "provider"],
+    "manual_flag": "--allow-holdout",
+    "approval_environment": "MEMORYOS_HOLDOUT_APPROVAL",
+    "approval_token": "approved-manual-holdout-run"
+  },
+  "suites": [
+    {
+      "name": "extraction-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/extraction/development", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_extraction_benchmark.py", "tests/unit/test_extraction_golden_dataset.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/baseline-index.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active extraction plus benchmark-only evaluator"
+    },
+    {
+      "name": "importance-deterministic", "version": "final-v1", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/extraction/development/generalization_v1.jsonl", "runner": ["{python}", "-m", "pytest", "tests/unit/test_deterministic_importance.py", "tests/unit/test_importance_generalization_dataset.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/deterministic-importance-final-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "development shadow-only"
+    },
+    {
+      "name": "conflict-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/conflict/development/development_v1.jsonl", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_conflict_benchmark.py", "tests/unit/test_claim_reconciliation.py", "tests/unit/test_conflict_claim_reconciliation_boundary.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/conflict-reconciliation-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active"
+    },
+    {
+      "name": "retrieval-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/retrieval/development/development_v1.jsonl", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_retrieval_benchmark.py", "tests/unit/test_as_of_retrieval.py", "tests/unit/test_retained_supersession_vectors.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/retrieval-correctness-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active"
+    },
+    {
+      "name": "temporal-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/temporal/development/development_v1.jsonl", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_temporal_benchmark.py", "tests/unit/test_temporal_validity.py", "tests/unit/test_temporal_transition_tasks.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/temporal-memory-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active"
+    },
+    {
+      "name": "lifecycle-provenance-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/lifecycle_provenance/development", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_lifecycle_provenance_benchmark.py", "tests/unit/test_internal_lifecycle_activation_benchmark.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/lifecycle-provenance-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active"
+    },
+    {
+      "name": "multi-agent-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/multi_agent_coordination/development/development_v1.jsonl", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_multi_agent_benchmark.py", "tests/unit/test_internal_multi_agent_coordination_benchmark.py", "tests/unit/test_internal_agent_deletion_benchmark.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/multi-agent-coordination-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active"
+    },
+    {
+      "name": "reliability-contract", "version": "3.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/fault_injection/development/extension_v3.jsonl", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_fault_injection_benchmark.py", "tests/unit/test_integration_reliability_contract.py", "tests/unit/test_extraction_job_lifecycle.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/fault-injection-reliability-development.json",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active plus benchmark-only crash barrier"
+    },
+    {
+      "name": "fault-injection-reliability", "version": "3.0", "tier": "integration", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/fault_injection/development/extension_v3.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.fault_injection_runner", "--output", "{output}"],
+      "services": ["postgresql", "redis"], "provider_calls": false, "mode": "live", "baseline": "benchmarks/internal/baselines/fault-injection-reliability-development.json",
+      "result": "{output}", "acceptance": {"summary.product_failures": {"max": 0}, "summary.harness_errors": {"max": 0}, "summary.reliability_success_rate": {"min": 1.0}}, "component_status": "production-active"
+    },
+    {
+      "name": "integration-reliability", "version": "2.0", "tier": "integration", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/integration_reliability/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.integration_reliability_runner_v2", "--output", "{output}"],
+      "services": ["postgresql", "redis", "celery", "qdrant"], "provider_calls": false, "mode": "live", "baseline": "benchmarks/internal/baselines/integration-reliability-development.json",
+      "result": "{output}", "acceptance": {"summary.product_failures": {"max": 0}, "summary.harness_errors": {"max": 0}, "summary.integration_success_rate": {"min": 1.0}}, "component_status": "production-active"
+    },
+    {
+      "name": "governance-integrity", "version": "2.0", "tier": "integration", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/governance_integrity/development/extension_v2.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.governance_integrity_runner", "--output", "{output}"],
+      "services": ["postgresql", "redis", "qdrant"], "provider_calls": false, "mode": "live", "baseline": "benchmarks/internal/reports/governance-integrity-baseline-v2.md",
+      "result": "{output}", "acceptance": {"summary.product_failures": {"max": 0}, "summary.harness_errors": {"max": 0}, "summary.governance_success_rate": {"min": 1.0}}, "component_status": "production-active"
+    },
+    {
+      "name": "lifecycle-activation", "version": "1.0", "tier": "integration", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/lifecycle_activation/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.lifecycle_activation_runner", "--output", "{output}"],
+      "services": ["postgresql", "redis", "celery", "qdrant"], "provider_calls": false, "mode": "live", "baseline": "benchmarks/internal/baselines/lifecycle-activation-development.json",
+      "result": "{output}", "acceptance": {"summary.product_failures": {"max": 0}, "summary.harness_errors": {"max": 0}}, "component_status": "production-active"
+    },
+    {
+      "name": "temporal-memory", "version": "1.0", "tier": "integration", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/temporal/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.temporal_runner", "--output", "{output}"],
+      "services": ["postgresql", "redis", "celery", "qdrant"], "provider_calls": false, "mode": "live", "baseline": "benchmarks/internal/baselines/temporal-memory-development.json",
+      "result": "{output}", "acceptance": {"summary.product_failures": {"max": 0}, "summary.harness_errors": {"max": 0}}, "component_status": "production-active"
+    },
+    {
+      "name": "extraction-provider", "version": "cleaned-v1", "tier": "provider", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/extraction/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.live_provider", "--output", "{output}"],
+      "services": ["llm-provider"], "required_env_any": ["OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"], "provider_calls": true, "mode": "provider-backed", "baseline": "benchmarks/internal/baselines/post-extraction-evidence-development.json",
+      "result": "{output}", "acceptance": {"config.holdout_loaded": {"equals": false}, "aggregate.safety.forbidden_leak_count": {"max": 0}}, "component_status": "production-active extraction and attribution"
+    },
+    {
+      "name": "retrieval-live-vector", "version": "1.0", "tier": "provider", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/retrieval/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.live_retrieval_runner", "--output", "{output}"],
+      "services": ["postgresql", "qdrant", "embedding-provider"], "required_env_any": ["OPENAI_API_KEY"], "provider_calls": true, "mode": "provider-backed", "baseline": "benchmarks/internal/baselines/retrieval-live-vector-development.json",
+      "result": "{output}", "acceptance": {"summary.cross_tenant_result_leakage_rate": {"max": 0}, "summary.superseded_memory_leakage_rate": {"max": 0}, "summary.provenance_preservation": {"min": 1.0}}, "component_status": "production-active"
+    },
+    {
+      "name": "historical-retrieval-live", "version": "1.0", "tier": "provider", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/historical_retrieval/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.live_historical_retrieval_runner", "--output", "{output}"],
+      "services": ["postgresql", "qdrant", "embedding-provider"], "required_env_any": ["OPENAI_API_KEY"], "provider_calls": true, "mode": "provider-backed", "baseline": "benchmarks/internal/baselines/historical-retrieval-development.json",
+      "result": "{output}", "acceptance": {"summary.current_state_leakage_into_historical": {"max": 0}, "summary.historical_state_leakage_into_current": {"max": 0}, "summary.provenance_preservation": {"min": 1.0}}, "component_status": "production-active"
+    },
+    {
+      "name": "extraction-holdout", "version": "1.0", "tier": "holdout", "classification": "holdout",
+      "dataset": "benchmarks/internal/datasets/extraction/holdout/holdout_v1.jsonl", "runner": null,
+      "services": ["llm-provider"], "provider_calls": true, "mode": "provider-backed", "baseline": null,
+      "acceptance": {}, "component_status": "sealed-manual-only"
+    }
+  ],
+  "reference_baselines": [
+    "benchmarks/internal/baselines/deterministic-importance-development.json",
+    "benchmarks/internal/baselines/deterministic-importance-feature-derivation.json",
+    "benchmarks/internal/baselines/deterministic-importance-feature-redesign.json",
+    "benchmarks/internal/baselines/deterministic-importance-formula-calibration.json",
+    "benchmarks/internal/baselines/deterministic-importance-generalization.json",
+    "benchmarks/internal/baselines/full-path-lifecycle-provenance-development.json",
+    "benchmarks/internal/baselines/importance-shadow-observation-development.json",
+    "benchmarks/internal/baselines/lifecycle-provenance-development.json",
+    "benchmarks/internal/baselines/multi-agent-isolation-development.json",
+    "benchmarks/internal/baselines/originating-agent-deletion-development.json",
+    "benchmarks/internal/baselines/retrieval-correctness-development.json"
+  ]
+}

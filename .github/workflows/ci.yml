@@ -84,6 +84,11 @@ jobs:
           LLM_PROVIDER_ORDER: openai,gemini
         run: pytest tests/unit/ -v --tb=short
 
+      - name: Run blocking FAST benchmark regression gate
+        env:
+          MEMORYOS_HOLDOUT_APPROVAL: ""
+        run: python -m benchmarks.internal.orchestrator --tier fast
+
       - name: Type check
         run: python -m mypy api/ --ignore-missing-imports --cache-dir=/tmp/mypy-cache
 
@@ -103,6 +108,5 @@ jobs:
           cd sdk/typescript
           npm ci
           npm run typecheck
-
 
 

@@ -1,0 +1,62 @@
+name: Internal benchmark integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 2"
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: memoryos_test
+          POSTGRES_USER: memoryos
+          POSTGRES_PASSWORD: testpassword
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memoryos -d memoryos_test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports: ["6333:6333"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - name: Migrate test database
+        env: &benchmark-env
+          DATABASE_URL: postgresql+asyncpg://memoryos:testpassword@localhost:5432/memoryos_test
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/2
+          QDRANT_URL: http://localhost:6333
+          SECRET_KEY: integration-secret-key
+          ADMIN_SECRET: integration-admin-secret-32-chars
+          MEMORYOS_HOLDOUT_APPROVAL: ""
+        run: alembic upgrade head
+      - name: Start required Celery workers
+        env: *benchmark-env
+        run: |
+          celery -A api.celery_app.celery_app worker -Q starter-extraction,free-extraction -c 1 --loglevel=warning --pidfile=/tmp/benchmark-starter.pid --detach
+          celery -A api.celery_app.celery_app worker -Q celery,reembedding,dead-letter -c 1 --loglevel=warning --pidfile=/tmp/benchmark-background.pid --detach
+      - name: Run INTEGRATION benchmark tier
+        env: *benchmark-env
+        run: python -m benchmarks.internal.orchestrator --tier integration
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: internal-benchmark-integration
+          path: artifacts/internal-benchmarks/aggregate/

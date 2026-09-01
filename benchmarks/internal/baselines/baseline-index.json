@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "name": "deterministic-expected-output-contract",
+  "description": "Contract floor only; this is not a real-model quality claim.",
+  "minimums": {
+    "micro_precision": 1.0,
+    "micro_recall": 1.0,
+    "micro_f1": 1.0,
+    "category_accuracy": 1.0,
+    "disposition_accuracy": 1.0,
+    "importance_range_accuracy": 1.0,
+    "evidence_accuracy": 1.0
+  },
+  "maximums": {
+    "false_memory_rate": 0.0,
+    "forbidden_leak_count": 0
+  }
+}
