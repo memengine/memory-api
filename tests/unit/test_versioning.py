@@ -50,7 +50,7 @@ def test_deprecated_version_adds_standard_headers(monkeypatch) -> None:
         {
             1: DeprecatedVersionInfo(
                 sunset_at=datetime.now(UTC) + timedelta(days=200),
-                migration_guide_url="https://docs.memoryos.io/migration/v1-to-v2",
+                migration_guide_url="https://docs.memoryo.dev/migration/v1-to-v2",
                 successor_version="v2",
             )
         },
@@ -66,7 +66,7 @@ def test_deprecated_version_adds_standard_headers(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.headers["Deprecation"] == "true"
-    assert "https://docs.memoryos.io/migration/v1-to-v2" in response.headers["Link"]
+    assert "https://docs.memoryo.dev/migration/v1-to-v2" in response.headers["Link"]
     assert "Sunset" in response.headers
 
 

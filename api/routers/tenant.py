@@ -146,7 +146,7 @@ DEPRECATED_PROXY_USER_STATS_FIELD_PATH = (
     "GET /v1/tenant/users/{external_user_id}/stats response.data.user_id"
 )
 DEPRECATED_PROXY_USER_STATS_FIELD_GUIDE = (
-    "https://docs.memoryos.io/migration/user-id-to-external-user-id"
+    "https://docs.memoryo.dev/migration/user-id-to-external-user-id"
 )
 
 

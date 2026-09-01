@@ -9,7 +9,7 @@ import smtplib
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_FROM_ADDRESS = "noreply@memoryos.io"
+DEFAULT_FROM_ADDRESS = "noreply@memoryo.dev"
 
 CATEGORY_LABELS = {
     "preference": "Your preferences and settings",
