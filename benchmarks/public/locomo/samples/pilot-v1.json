@@ -1,0 +1,180 @@
+{
+  "schema_version": "memoryos-locomo-public-pilot-v1",
+  "created_at": "2026-08-29T06:04:51.126671+00:00",
+  "classification": "public-benchmark-pilot-not-official-score",
+  "seed": "memoryos-locomo-pilot-v1",
+  "upstream_repository": "https://github.com/snap-research/locomo",
+  "upstream_revision": "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376",
+  "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+  "selection_inputs": [
+    "sample_id",
+    "qa_index",
+    "category"
+  ],
+  "selection_excludes_answers_and_evidence": true,
+  "conversation_count": 2,
+  "sample_ids": [
+    "conv-43",
+    "conv-48"
+  ],
+  "question_count": 25,
+  "category_counts": {
+    "1": 5,
+    "2": 5,
+    "3": 5,
+    "4": 5,
+    "5": 5
+  },
+  "questions": [
+    {
+      "question_id": "conv-43:qa-21",
+      "sample_id": "conv-43",
+      "qa_index": 21,
+      "category": 1
+    },
+    {
+      "question_id": "conv-43:qa-36",
+      "sample_id": "conv-43",
+      "qa_index": 36,
+      "category": 1
+    },
+    {
+      "question_id": "conv-48:qa-84",
+      "sample_id": "conv-48",
+      "qa_index": 84,
+      "category": 1
+    },
+    {
+      "question_id": "conv-43:qa-50",
+      "sample_id": "conv-43",
+      "qa_index": 50,
+      "category": 1
+    },
+    {
+      "question_id": "conv-48:qa-77",
+      "sample_id": "conv-48",
+      "qa_index": 77,
+      "category": 1
+    },
+    {
+      "question_id": "conv-43:qa-63",
+      "sample_id": "conv-43",
+      "qa_index": 63,
+      "category": 2
+    },
+    {
+      "question_id": "conv-48:qa-0",
+      "sample_id": "conv-48",
+      "qa_index": 0,
+      "category": 2
+    },
+    {
+      "question_id": "conv-48:qa-9",
+      "sample_id": "conv-48",
+      "qa_index": 9,
+      "category": 2
+    },
+    {
+      "question_id": "conv-43:qa-56",
+      "sample_id": "conv-43",
+      "qa_index": 56,
+      "category": 2
+    },
+    {
+      "question_id": "conv-48:qa-29",
+      "sample_id": "conv-48",
+      "qa_index": 29,
+      "category": 2
+    },
+    {
+      "question_id": "conv-48:qa-28",
+      "sample_id": "conv-48",
+      "qa_index": 28,
+      "category": 3
+    },
+    {
+      "question_id": "conv-43:qa-28",
+      "sample_id": "conv-43",
+      "qa_index": 28,
+      "category": 3
+    },
+    {
+      "question_id": "conv-43:qa-32",
+      "sample_id": "conv-43",
+      "qa_index": 32,
+      "category": 3
+    },
+    {
+      "question_id": "conv-43:qa-8",
+      "sample_id": "conv-43",
+      "qa_index": 8,
+      "category": 3
+    },
+    {
+      "question_id": "conv-48:qa-75",
+      "sample_id": "conv-48",
+      "qa_index": 75,
+      "category": 3
+    },
+    {
+      "question_id": "conv-43:qa-148",
+      "sample_id": "conv-43",
+      "qa_index": 148,
+      "category": 4
+    },
+    {
+      "question_id": "conv-48:qa-61",
+      "sample_id": "conv-48",
+      "qa_index": 61,
+      "category": 4
+    },
+    {
+      "question_id": "conv-43:qa-91",
+      "sample_id": "conv-43",
+      "qa_index": 91,
+      "category": 4
+    },
+    {
+      "question_id": "conv-43:qa-155",
+      "sample_id": "conv-43",
+      "qa_index": 155,
+      "category": 4
+    },
+    {
+      "question_id": "conv-48:qa-112",
+      "sample_id": "conv-48",
+      "qa_index": 112,
+      "category": 4
+    },
+    {
+      "question_id": "conv-48:qa-223",
+      "sample_id": "conv-48",
+      "qa_index": 223,
+      "category": 5
+    },
+    {
+      "question_id": "conv-43:qa-214",
+      "sample_id": "conv-43",
+      "qa_index": 214,
+      "category": 5
+    },
+    {
+      "question_id": "conv-43:qa-201",
+      "sample_id": "conv-43",
+      "qa_index": 201,
+      "category": 5
+    },
+    {
+      "question_id": "conv-48:qa-218",
+      "sample_id": "conv-48",
+      "qa_index": 218,
+      "category": 5
+    },
+    {
+      "question_id": "conv-43:qa-178",
+      "sample_id": "conv-43",
+      "qa_index": 178,
+      "category": 5
+    }
+  ]
+}

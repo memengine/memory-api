@@ -12,6 +12,8 @@ from benchmarks.public.locomo.contract import load_dataset
 PILOT_SEED = "memoryos-locomo-pilot-v1"
 CONVERSATION_COUNT = 2
 QUESTIONS_PER_CATEGORY = 5
+UPSTREAM_REPOSITORY = "https://github.com/snap-research/locomo"
+UPSTREAM_REVISION = "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376"
 
 
 def _order_key(kind: str, identifier: str) -> str:
@@ -56,6 +58,8 @@ def freeze(dataset: Path) -> dict[str, Any]:
         "created_at": datetime.now(UTC).isoformat(),
         "classification": "public-benchmark-pilot-not-official-score",
         "seed": PILOT_SEED,
+        "upstream_repository": UPSTREAM_REPOSITORY,
+        "upstream_revision": UPSTREAM_REVISION,
         "dataset_sha256": dataset_sha256,
         "selection_inputs": ["sample_id", "qa_index", "category"],
         "selection_excludes_answers_and_evidence": True,

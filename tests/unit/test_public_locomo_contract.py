@@ -5,6 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.public.locomo.adapter import (
+    MemoryOSLoCoMoAdapter,
+    RetrievedMemory,
+    candidate_dialog_ids,
+)
 from benchmarks.public.locomo.contract import (
     LoCoMoSample,
     assert_public_dataset_path,
@@ -13,6 +18,7 @@ from benchmarks.public.locomo.contract import (
     parse_locomo_datetime,
 )
 from benchmarks.public.locomo.freeze_pilot import freeze
+from benchmarks.public.locomo.runner import load_pilot, preflight
 
 
 def _sample(sample_id: str, questions_per_category: int = 5) -> dict[str, object]:
@@ -61,13 +67,20 @@ def test_contract_loads_hashes_and_reports_evidence_diagnostics(tmp_path: Path) 
 
 
 def test_contract_preserves_speakers_sessions_and_dialog_ids() -> None:
-    sample = LoCoMoSample.model_validate(_sample("conv-1"))
+    payload = _sample("conv-1")
+    payload["conversation"]["session_1"][0]["img_url"] = [
+        "https://example.test/image.jpg"
+    ]
+    sample = LoCoMoSample.model_validate(payload)
 
     sessions = sample.conversation.sessions()
 
     assert sessions[0][0] == 1
     assert [turn.speaker for turn in sessions[0][2]] == ["A", "B"]
     assert sample.conversation.dialog_ids() == {"D1:1", "D1:2"}
+    assert sample.conversation.sessions()[0][2][0].img_url == [
+        "https://example.test/image.jpg"
+    ]
     assert sample.question_id(0) == "conv-1:qa-0"
 
 
@@ -130,3 +143,77 @@ def test_locomo_timestamp_is_stable_utc() -> None:
     parsed = parse_locomo_datetime("1:56 pm on 8 May, 2023")
 
     assert parsed.isoformat() == "2023-05-08T13:56:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_adapter_payload_preserves_speaker_time_and_candidate_dialog_provenance() -> (
+    None
+):
+    sample = LoCoMoSample.model_validate(_sample("conv-1"))
+    adapter = MemoryOSLoCoMoAdapter(
+        base_url="https://memory.test",
+        api_key="test-key",
+        run_id="run-1",
+    )
+    try:
+        payload, event_id = adapter.session_payload(sample, session_number=1)
+    finally:
+        await adapter.client.aclose()
+
+    assert event_id.startswith("locomo-")
+    assert payload["messages"][0] == {
+        "role": "user",
+        "content": "[A; dialog D1:1] Remember this.",
+    }
+    assert payload["messages"][1]["role"] == "assistant"
+    assert payload["source"]["observed_at"] == "2023-05-08T13:56:00+00:00"
+    assert payload["source"]["scope"]["benchmark_dialog_ids"] == ["D1:1", "D1:2"]
+    assert "answer" not in json.dumps(payload)
+    assert "category" not in json.dumps(payload)
+
+
+def test_candidate_dialog_ids_are_deduplicated_from_retrieval_provenance() -> None:
+    memories = [
+        RetrievedMemory(
+            "1", "one", 0.9, None, {"scope": {"benchmark_dialog_ids": ["D1:1", "D1:2"]}}
+        ),
+        RetrievedMemory(
+            "2", "two", 0.8, None, {"scope": {"benchmark_dialog_ids": ["D1:2", "D2:1"]}}
+        ),
+    ]
+
+    assert candidate_dialog_ids(memories) == ["D1:1", "D1:2", "D2:1"]
+
+
+def test_runner_verifies_frozen_manifest_and_reports_provider_ceiling(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "locomo10.json"
+    dataset.write_text(
+        json.dumps([_sample("conv-1"), _sample("conv-2")]), encoding="utf-8"
+    )
+    manifest = freeze(dataset)
+    manifest_path = tmp_path / "pilot.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    sample, qa_index, _loaded, digest = load_pilot(dataset, manifest_path)
+    report = preflight(sample, qa_index, digest)
+
+    assert report["maximum_extraction_jobs"] == 1
+    assert report["answer_model_calls"] == 0
+    assert report["judge_calls"] == 0
+    assert report["live_provider_calls_required_for_ingestion"] is True
+
+
+def test_runner_rejects_manifest_for_different_dataset(tmp_path: Path) -> None:
+    dataset = tmp_path / "locomo10.json"
+    dataset.write_text(
+        json.dumps([_sample("conv-1"), _sample("conv-2")]), encoding="utf-8"
+    )
+    manifest = freeze(dataset)
+    manifest["dataset_sha256"] = "0" * 64
+    manifest_path = tmp_path / "pilot.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match"):
+        load_pilot(dataset, manifest_path)

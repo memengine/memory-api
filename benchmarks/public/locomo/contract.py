@@ -21,7 +21,8 @@ class LoCoMoTurn(BaseModel):
     speaker: str = Field(min_length=1)
     dia_id: str = Field(pattern=r"^D\d+:\d+$")
     text: str = Field(min_length=1)
-    img_url: str | None = None
+    # Upstream stores image URLs as a list, including single-image turns.
+    img_url: list[str] | None = None
     blip_caption: str | None = None
 
 
