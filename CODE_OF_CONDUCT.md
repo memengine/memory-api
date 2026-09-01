@@ -41,7 +41,7 @@ Examples of representing our community include using an official email address, 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project team at:
 
 ```text
-support@memoryos.dev
+support@memoryo.dev
 ```
 
 All complaints will be reviewed and investigated promptly and fairly.
