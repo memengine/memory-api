@@ -1,0 +1,140 @@
+x-scale-env: &scale-env
+  APP_ENV: benchmark
+  APP_VERSION: scale-benchmark-v1
+  MEMORYOS_SCALE_DEDICATED: "1"
+  MEMORYOS_BENCHMARK_PROVIDER: deterministic
+  SCALE_COMPOSE_PROJECT: memoryos-scale
+  SCALE_SOURCE_SERVICE: scale-benchmark
+  BENCHMARK_API_KEY: ${SCALE_BENCHMARK_API_KEY:?Set SCALE_BENCHMARK_API_KEY in the ignored .env.scale file}
+  DATABASE_URL: postgresql+asyncpg://memoryos_scale:scale_local_only@postgres:5432/memoryos_scale
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_API_KEY: ""
+  QDRANT_COLLECTION: scale_memories_v1
+  EMBEDDING_PROVIDER: openai
+  EMBEDDING_MODEL: benchmark-hash-v1
+  EMBEDDING_MODEL_ID: benchmark-hash-v1
+  EMBEDDING_DIMENSIONS: "1536"
+  LLM_PROVIDER_ORDER: openai
+  OPENAI_API_KEY: ""
+  GEMINI_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  ADMIN_SECRET: benchmark-local-admin-secret-not-shared-2026
+  BENCHMARK_EXTRACT_LATENCY_MS: "75"
+  BENCHMARK_EMBED_LATENCY_MS: "5"
+  BENCHMARK_RUNTIME_TELEMETRY: ${BENCHMARK_RUNTIME_TELEMETRY:-0}
+  BENCHMARK_REDIS_CONNECT_TIMEOUT_MS: ${BENCHMARK_REDIS_CONNECT_TIMEOUT_MS:-500}
+  BENCHMARK_REDIS_SOCKET_TIMEOUT_MS: ${BENCHMARK_REDIS_SOCKET_TIMEOUT_MS:-500}
+  BENCHMARK_REDIS_CIRCUIT_DEADLINE_MS: ${BENCHMARK_REDIS_CIRCUIT_DEADLINE_MS:-750}
+  BENCHMARK_REDIS_TCP_PREFLIGHT: ${BENCHMARK_REDIS_TCP_PREFLIGHT:-enabled}
+  BENCHMARK_CACHE_INVALIDATION_MODE: ${BENCHMARK_CACHE_INVALIDATION_MODE:-legacy-scan}
+  BENCHMARK_CACHE_NAMESPACE: ${BENCHMARK_CACHE_NAMESPACE:-v1}
+  # Benchmark-only candidates; absent overrides preserve application defaults.
+  DB_POOL_SIZE: ${BENCHMARK_DB_POOL_SIZE:-20}
+  DB_MAX_OVERFLOW: ${BENCHMARK_DB_MAX_OVERFLOW:-30}
+  DB_POOL_TIMEOUT_SECONDS: ${BENCHMARK_DB_POOL_TIMEOUT_SECONDS:-30}
+  IMPORTANCE_SHADOW_ENABLED: "false"
+
+x-scale-app: &scale-app
+  build:
+    context: .
+    dockerfile: Dockerfile.scale
+  image: memoryos-api-scale:latest
+  environment: *scale-env
+  init: true
+  restart: "no"
+
+name: memoryos-scale
+
+services:
+  api:
+    <<: *scale-app
+    environment:
+      <<: *scale-env
+      PGAPPNAME: mosb-role-api
+      MEMORYOS_PROCESS_ROLE: api
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["18000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  celery-scale:
+    <<: *scale-app
+    environment:
+      <<: *scale-env
+      PGAPPNAME: mosb-role-celery-scale
+      MEMORYOS_PROCESS_ROLE: celery-scale
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "scale-extraction", "-c", "4", "--prefetch-multiplier", "1", "--loglevel=warning", "--pidfile="]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+
+  celery-background:
+    <<: *scale-app
+    environment:
+      <<: *scale-env
+      PGAPPNAME: mosb-role-celery-background
+      MEMORYOS_PROCESS_ROLE: celery-background
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "celery,reembedding,dead-letter", "-c", "2", "--prefetch-multiplier", "1", "--loglevel=warning", "--pidfile="]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+
+  celery-beat:
+    <<: *scale-app
+    environment:
+      <<: *scale-env
+      PGAPPNAME: mosb-role-celery-beat
+      MEMORYOS_PROCESS_ROLE: celery-beat
+    command: ["celery", "-A", "api.celery_app.celery_app", "beat", "--loglevel=warning", "--pidfile=", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: memoryos_scale
+      POSTGRES_PASSWORD: scale_local_only
+      POSTGRES_DB: memoryos_scale
+    ports: ["15432:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoryos_scale -d memoryos_scale"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    ports: ["16379:6379"]
+    tmpfs: ["/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.3
+    ports: ["16333:6333", "16334:6334"]
+    tmpfs: ["/qdrant/storage"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

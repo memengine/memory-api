@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "classification": "development",
+  "holdout_allowed": false,
+  "production_allowed": false,
+  "traffic": {
+    "current_retrieval": 45,
+    "normal_memory_writes": 20,
+    "corrections_updates": 8,
+    "conflicting_writes": 5,
+    "multi_agent_writes": 5,
+    "duplicate_delivery": 4,
+    "pending_memories": 3,
+    "historical_retrieval": 5,
+    "status_readback": 5
+  },
+  "stages": {
+    "PREFLIGHT": {"virtual_users": 2, "requests_per_second": 1, "duration": "3m"},
+    "LOW": {"virtual_users": 5, "requests_per_second": 2, "duration": "10m"},
+    "MODERATE": {"virtual_users": 20, "requests_per_second": 8, "duration": "20m"},
+    "HIGHER": {"virtual_users": 40, "requests_per_second": 15, "duration": "15m"},
+    "SUSTAINED": {"virtual_users": 20, "requests_per_second": 8, "duration": "2h"}
+  },
+  "hard_caps": {
+    "max_virtual_users": 50,
+    "max_requests": 100000,
+    "max_provider_cost_usd": 5,
+    "max_provider_tokens": 500000
+  },
+  "low_acceptance": {
+    "http_error_rate_max": 0.005,
+    "add_ack_p95_ms_max": 500,
+    "add_ack_p99_ms_max": 1000,
+    "retrieval_p95_ms_max": 750,
+    "retrieval_p99_ms_max": 1500,
+    "job_completion_p95_ms_max": 10000,
+    "correctness_violations_max": 0
+  }
+}
