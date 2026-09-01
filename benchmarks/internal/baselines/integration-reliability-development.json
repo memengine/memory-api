@@ -1,0 +1,13 @@
+{
+  "baseline": "integration-reliability-development-v2-concurrency-safe",
+  "artifact": "artifacts/internal-benchmarks/integration-reliability-baseline-v2-concurrency-safe.json",
+  "sequential_conflict_artifact": "artifacts/internal-benchmarks/conflict-integration-baseline-v4-concurrency-safe.json",
+  "scenario_count": 13,
+  "evaluable_product_scenarios": 12,
+  "passed": 12,
+  "product_failures": 0,
+  "harness_errors": 1,
+  "integration_success_rate": 1.0,
+  "holdout_used": false,
+  "production_behavior_changed_only_for_concurrency_safety": true
+}
