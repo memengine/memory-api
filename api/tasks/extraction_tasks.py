@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 import traceback
 import uuid
 from datetime import UTC
@@ -17,6 +18,7 @@ import redis
 import sentry_sdk
 from celery import shared_task
 from celery.signals import task_postrun
+from celery.signals import worker_process_shutdown
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -53,6 +55,8 @@ EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
 JOB_TTL_SECONDS = 3600
 JOB_STALE_TIMEOUT = timedelta(minutes=10)
 LOGGER = logging.getLogger("memoryos.extraction_jobs")
+_EXTRACTION_SESSION_FACTORY: sessionmaker[Session] | None = None
+_EXTRACTION_SESSION_FACTORY_PID: int | None = None
 
 
 def _job_status_key(job_id: str) -> str:
@@ -69,6 +73,32 @@ def _redis_client() -> redis.Redis:
         encoding="utf-8",
         decode_responses=True,
     )
+
+
+def _wait_for_development_crash_barrier(*, job_id: str, job_payload: dict[str, Any]) -> bool:
+    metadata = dict(job_payload.get("metadata") or {})
+    if metadata.get("_internal_celery_crash_barrier") is not True:
+        return False
+    if get_settings().app_env.strip().lower() in {"production", "prod"}:
+        LOGGER.warning("development_crash_barrier_disabled_in_production job_id=%s", job_id)
+        return False
+
+    client = _redis_client()
+    barrier_key = f"internal-benchmark:celery-crash-barrier:{job_id}"
+    release_key = f"{barrier_key}:release"
+    if not client.set(barrier_key, "armed", nx=True, ex=300):
+        LOGGER.warning("development_crash_barrier_already_consumed job_id=%s", job_id)
+        return False
+
+    LOGGER.warning("development_crash_barrier_armed job_id=%s", job_id)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if client.get(release_key):
+            client.delete(barrier_key, release_key)
+            return True
+        time.sleep(0.05)
+    client.delete(barrier_key, release_key)
+    return True
 
 
 def _raise_missing_redis_url() -> str:
@@ -164,13 +194,25 @@ def _upsert_dead_letter_job(session: Session, *, job: ExtractionJob, error: str,
     session.add(dead_letter)
 
 
-def _set_db_job_processing(*, job_id: str, celery_task_id: str | None) -> int:
+def _set_db_job_processing(*, job_id: str, celery_task_id: str | None) -> int | None:
     session_factory = build_extraction_session_factory()
     session = session_factory()
     try:
-        job = session.get(ExtractionJob, uuid.UUID(job_id))
+        job = session.execute(
+            select(ExtractionJob)
+            .where(ExtractionJob.id == uuid.UUID(job_id))
+            .with_for_update()
+        ).scalar_one_or_none()
         if job is None:
-            return 0
+            return None
+        stored_task_id = str(job.celery_task_id or "").strip()
+        incoming_task_id = str(celery_task_id or "").strip()
+        if job.status not in {ExtractionJobStatus.queued, ExtractionJobStatus.failed}:
+            session.rollback()
+            return None
+        if stored_task_id and stored_task_id != incoming_task_id:
+            session.rollback()
+            return None
         job.status = ExtractionJobStatus.processing
         job.celery_task_id = celery_task_id
         started_at = datetime.now(UTC)
@@ -275,7 +317,34 @@ def _force_dead_letter_job(*, job_id: str, error: str, error_type: str | None = 
 
 
 def build_extraction_session_factory() -> sessionmaker[Session]:
-    return build_sync_session_factory()
+    global _EXTRACTION_SESSION_FACTORY
+    global _EXTRACTION_SESSION_FACTORY_PID
+
+    process_id = os.getpid()
+    if (
+        _EXTRACTION_SESSION_FACTORY is None
+        or _EXTRACTION_SESSION_FACTORY_PID != process_id
+    ):
+        dispose_extraction_session_factory()
+        _EXTRACTION_SESSION_FACTORY = build_sync_session_factory()
+        _EXTRACTION_SESSION_FACTORY_PID = process_id
+    return _EXTRACTION_SESSION_FACTORY
+
+
+@worker_process_shutdown.connect
+def dispose_extraction_session_factory(**_extra: Any) -> None:
+    """Dispose the process-local extraction engine when a Celery child exits."""
+    global _EXTRACTION_SESSION_FACTORY
+    global _EXTRACTION_SESSION_FACTORY_PID
+
+    factory = _EXTRACTION_SESSION_FACTORY
+    _EXTRACTION_SESSION_FACTORY = None
+    _EXTRACTION_SESSION_FACTORY_PID = None
+    if factory is None:
+        return
+    engine = factory.kw.get("bind")
+    if engine is not None:
+        engine.dispose()
 
 
 def _ensure_proxy_backing_user(session: Session, proxy_user_id: str) -> User:
@@ -881,7 +950,14 @@ def run_extraction_pipeline(
 @shared_task(bind=True, name=EXTRACTION_TASK_NAME, max_retries=3, default_retry_delay=2)
 def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job_payload.get("job_id"))
-    _set_db_job_processing(job_id=job_id, celery_task_id=self.request.id)
+    attempts = _set_db_job_processing(job_id=job_id, celery_task_id=self.request.id)
+    if attempts is None:
+        return {
+            "job_id": job_id,
+            "status": "duplicate_ignored",
+            "memories_created": 0,
+        }
+    _wait_for_development_crash_barrier(job_id=job_id, job_payload=job_payload)
     processing_payload = {
         **job_payload,
         "status": "processing",

@@ -127,6 +127,76 @@ class FakeFailureSession:
         return None
 
 
+class FakeProcessingResult:
+    def __init__(self, job) -> None:
+        self.job = job
+
+    def scalar_one_or_none(self):
+        return self.job
+
+
+class FakeProcessingSession:
+    def __init__(self, *, stored_task_id: str | None) -> None:
+        self.job = SimpleNamespace(
+            status=ExtractionJobStatus.queued,
+            celery_task_id=stored_task_id,
+            attempts=0,
+            processing_started_at=None,
+            started_at=None,
+            stale_after=None,
+            completed_at=None,
+            updated_at=None,
+            error=None,
+            error_type=None,
+        )
+        self.commits = 0
+        self.rollbacks = 0
+
+    def execute(self, _statement):
+        return FakeProcessingResult(self.job)
+
+    def add(self, _job):
+        return None
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        return None
+
+
+def test_late_original_task_cannot_replace_watchdog_recovery_lease(monkeypatch) -> None:
+    session = FakeProcessingSession(stored_task_id="recovery-task")
+    monkeypatch.setattr(extraction_tasks, "build_extraction_session_factory", lambda: (lambda: session))
+
+    result = extraction_tasks._set_db_job_processing(  # noqa: SLF001
+        job_id="33333333-3333-3333-3333-333333333333",
+        celery_task_id="late-original-task",
+    )
+
+    assert result is None
+    assert session.job.status == ExtractionJobStatus.queued
+    assert session.job.celery_task_id == "recovery-task"
+    assert session.rollbacks == 1
+
+
+def test_watchdog_recovery_task_claims_reserved_job(monkeypatch) -> None:
+    session = FakeProcessingSession(stored_task_id="recovery-task")
+    monkeypatch.setattr(extraction_tasks, "build_extraction_session_factory", lambda: (lambda: session))
+
+    result = extraction_tasks._set_db_job_processing(  # noqa: SLF001
+        job_id="33333333-3333-3333-3333-333333333333",
+        celery_task_id="recovery-task",
+    )
+
+    assert result == 0
+    assert session.job.status == ExtractionJobStatus.processing
+    assert session.commits == 1
+
+
 def test_set_db_job_failure_moves_to_dead_and_creates_dead_letter(monkeypatch) -> None:
     session = FakeFailureSession(attempts=2, max_attempts=3)
     monkeypatch.setattr(extraction_tasks, "build_extraction_session_factory", lambda: (lambda: session))
@@ -146,3 +216,30 @@ def test_set_db_job_failure_moves_to_dead_and_creates_dead_letter(monkeypatch) -
     assert session.dead_letter is not None
     assert session.dead_letter.error == "proxy_user_not_found"
     assert sentry_calls
+
+
+def test_extraction_session_factory_is_reused_per_process(monkeypatch) -> None:
+    first_factory = SimpleNamespace(kw={"bind": MagicMock()})
+    second_factory = SimpleNamespace(kw={"bind": MagicMock()})
+    factories = iter([first_factory, second_factory])
+    build_calls: list[int] = []
+
+    extraction_tasks.dispose_extraction_session_factory()
+    monkeypatch.setattr(extraction_tasks.os, "getpid", lambda: 101)
+    monkeypatch.setattr(
+        extraction_tasks,
+        "build_sync_session_factory",
+        lambda: build_calls.append(1) or next(factories),
+    )
+
+    assert extraction_tasks.build_extraction_session_factory() is first_factory
+    assert extraction_tasks.build_extraction_session_factory() is first_factory
+    assert len(build_calls) == 1
+
+    monkeypatch.setattr(extraction_tasks.os, "getpid", lambda: 202)
+    assert extraction_tasks.build_extraction_session_factory() is second_factory
+    assert len(build_calls) == 2
+    first_factory.kw["bind"].dispose.assert_called_once_with()
+
+    extraction_tasks.dispose_extraction_session_factory()
+    second_factory.kw["bind"].dispose.assert_called_once_with()

@@ -4,8 +4,10 @@ import logging
 import uuid
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 
 from celery import shared_task
+from sqlalchemy import or_
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
@@ -27,6 +29,7 @@ WATCHDOG_BEAT_SCHEDULE = {
         "schedule": 120.0,
     }
 }
+QUEUED_DISPATCH_GRACE = timedelta(seconds=60)
 
 
 def build_watchdog_session_factory() -> sessionmaker[Session]:
@@ -70,19 +73,87 @@ def run_watchdog_cycle(*, session_factory: sessionmaker[Session] | None = None) 
     requeued = 0
     dead = 0
     try:
+        now = datetime.now(UTC)
+        queued_cutoff = now - QUEUED_DISPATCH_GRACE
         rows = (
             session.query(ExtractionJob)
             .filter(
-                ExtractionJob.status == ExtractionJobStatus.processing,
-                ExtractionJob.stale_after.is_not(None),
-                ExtractionJob.stale_after < datetime.now(UTC),
+                or_(
+                    (
+                        (ExtractionJob.status == ExtractionJobStatus.processing)
+                        & ExtractionJob.stale_after.is_not(None)
+                        & (ExtractionJob.stale_after < now)
+                    ),
+                    (
+                        (ExtractionJob.status == ExtractionJobStatus.queued)
+                        & ExtractionJob.celery_task_id.is_(None)
+                        & ExtractionJob.processing_started_at.is_(None)
+                        & (ExtractionJob.queued_at < queued_cutoff)
+                    ),
+                )
             )
-            .order_by(ExtractionJob.stale_after.asc())
+            .order_by(ExtractionJob.queued_at.asc())
             .limit(100)
             .all()
         )
         for row in rows:
             checked += 1
+            if row.status == ExtractionJobStatus.queued:
+                recovery_task_id = str(uuid.uuid4())
+                update_result = session.execute(
+                    update(ExtractionJob)
+                    .where(
+                        ExtractionJob.id == row.id,
+                        ExtractionJob.status == ExtractionJobStatus.queued,
+                        ExtractionJob.celery_task_id.is_(None),
+                        ExtractionJob.processing_started_at.is_(None),
+                        ExtractionJob.queued_at < queued_cutoff,
+                    )
+                    .values(
+                        celery_task_id=recovery_task_id,
+                        error="queued_dispatch_recovered",
+                        updated_at=now,
+                    )
+                )
+                session.commit()
+                if int(update_result.rowcount or 0) != 1:
+                    continue
+
+                queue_name = str(row.queue_name or "").strip() or get_extraction_queue_sync(
+                    tenant_id=str(row.tenant_id),
+                    session_factory=session_factory,
+                )
+                payload = dict(row.payload or {})
+                payload["job_id"] = str(row.id)
+                payload["queue_name"] = queue_name
+                try:
+                    process_extraction_job.apply_async(
+                        args=[payload],
+                        queue=queue_name,
+                        task_id=recovery_task_id,
+                    )
+                except Exception:
+                    session.execute(
+                        update(ExtractionJob)
+                        .where(
+                            ExtractionJob.id == row.id,
+                            ExtractionJob.status == ExtractionJobStatus.queued,
+                            ExtractionJob.celery_task_id == recovery_task_id,
+                        )
+                        .values(celery_task_id=None, updated_at=datetime.now(UTC))
+                    )
+                    session.commit()
+                    LOGGER.exception("queued_job_recovery_dispatch_failed job_id=%s", row.id)
+                    continue
+                LOGGER.warning(
+                    "queued_job_dispatch_recovered job_id=%s tenant_id=%s queue=%s",
+                    row.id,
+                    row.tenant_id,
+                    queue_name,
+                )
+                requeued += 1
+                continue
+
             current_attempts = int(row.attempts or 0) + 1
             max_attempts = int(row.max_attempts or 3)
             if current_attempts > max_attempts:

@@ -40,6 +40,9 @@ class FakeExecuteResult:
     def scalars(self):
         return FakeScalarResult(self._rows)
 
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
 
 class FakeAsyncSession:
     def __init__(self, job) -> None:
