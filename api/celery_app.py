@@ -15,6 +15,7 @@ from api.tasks.reconciliation_tasks import RECONCILIATION_TASK_BEAT_SCHEDULE
 from api.tasks.reembedding_tasks import REEMBED_TASK_NAME
 from api.tasks.scoring_tasks import LIFECYCLE_TASK_BEAT_SCHEDULE
 from api.tasks.lifecycle_tasks import DAILY_FORGETTING_TASK_NAME
+from api.tasks.lifecycle_tasks import TEMPORAL_VALIDITY_BEAT_SCHEDULE
 from api.tasks.vector_sync_tasks import VECTOR_SYNC_TASK_BEAT_SCHEDULE
 from api.tasks.watchdog_tasks import WATCHDOG_BEAT_SCHEDULE
 
@@ -58,6 +59,7 @@ def create_celery_app() -> Celery:
             **LIFECYCLE_TASK_BEAT_SCHEDULE,
             **EDTECH_FORGETTING_BEAT_SCHEDULE,
             **PROVENANCE_TASK_BEAT_SCHEDULE,
+            **TEMPORAL_VALIDITY_BEAT_SCHEDULE,
             "daily-forgetting": {
                 "task": DAILY_FORGETTING_TASK_NAME,
                 "schedule": crontab(hour=4, minute=0),

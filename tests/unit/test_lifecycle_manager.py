@@ -138,6 +138,7 @@ async def test_lifecycle_decays_archives_promotes_and_reports() -> None:
     )
     session = FakeSession(
         [
+            [],
             [inactive_memory],
             [archive_memory],
             [],
@@ -161,7 +162,11 @@ async def test_lifecycle_decays_archives_promotes_and_reports() -> None:
     assert inactive_memory.metadata_json["original_importance_score"] == 5.0
     assert report.archived_count == 1
     assert archive_memory.is_archived is True
-    assert qdrant.deleted_memory_ids == [str(archive_memory.id)]
+    assert qdrant.deleted_memory_ids == []
+    assert any(
+        getattr(item, "memory_id", None) == archive_memory.id
+        for item in session.added
+    )
     assert report.promoted_to_hot == 1
     assert cache.hot_memories[0]["memory_id"] == str(hot_memory.id)
     assert cache.hot_memories[0]["ttl"] == 86400
@@ -181,7 +186,7 @@ async def test_lifecycle_decays_five_inactive_memories() -> None:
         for index in range(5)
     ]
     original_scores = [memory.importance_score for memory in inactive_memories]
-    session = FakeSession([inactive_memories, [], [], inactive_memories])
+    session = FakeSession([[], inactive_memories, [], [], inactive_memories])
 
     report = await MemoryLifecycleManager(
         session=session,
