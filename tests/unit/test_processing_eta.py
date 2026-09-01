@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import uuid
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,7 @@ from api.tasks import queue_router
 class FakeSyncRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.sorted_sets: dict[str, set[str]] = {}
 
     def get(self, key: str):
         return self.values.get(key)
@@ -23,6 +25,9 @@ class FakeSyncRedis:
     def set(self, key: str, value: str, ex: int | None = None):
         self.values[key] = value
         return True
+
+    def zcard(self, key: str):
+        return len(self.sorted_sets.get(key, set()))
 
 
 class FakeInspector:
@@ -96,7 +101,7 @@ def add_payload() -> dict:
     }
 
 
-def test_get_queue_depth_counts_active_and_reserved_jobs_and_caches(monkeypatch) -> None:
+def test_inspect_queue_depth_counts_active_and_reserved_jobs_and_caches(monkeypatch) -> None:
     redis_client = FakeSyncRedis()
     inspector = FakeInspector(
         active={
@@ -118,8 +123,8 @@ def test_get_queue_depth_counts_active_and_reserved_jobs_and_caches(monkeypatch)
         lambda: inspector,
     )
 
-    first = queue_router.get_queue_depth("growth-extraction")
-    second = queue_router.get_queue_depth("growth-extraction")
+    first = queue_router.inspect_queue_depth("growth-extraction")
+    second = queue_router.inspect_queue_depth("growth-extraction")
 
     assert first == 2
     assert second == 2
@@ -127,7 +132,7 @@ def test_get_queue_depth_counts_active_and_reserved_jobs_and_caches(monkeypatch)
     assert redis_client.values["queue_depth:growth-extraction"] == "2"
 
 
-def test_get_queue_depth_returns_zero_on_inspect_error(monkeypatch) -> None:
+def test_inspect_queue_depth_returns_zero_on_inspect_error(monkeypatch) -> None:
     redis_client = FakeSyncRedis()
     inspector = FakeInspector(error=RuntimeError("inspect failed"))
     monkeypatch.setattr(queue_router, "_redis_sync_client", lambda: redis_client)
@@ -137,9 +142,30 @@ def test_get_queue_depth_returns_zero_on_inspect_error(monkeypatch) -> None:
         lambda: inspector,
     )
 
-    depth = queue_router.get_queue_depth("starter-extraction")
+    depth = queue_router.inspect_queue_depth("starter-extraction")
 
     assert depth == 0
+
+
+def test_get_queue_depth_reads_existing_reservation_ledger_without_inspect(monkeypatch) -> None:
+    redis_client = FakeSyncRedis()
+    redis_client.sorted_sets["queue_depth:growth-extraction:jobs"] = {"tenant:job-1", "tenant:job-2"}
+    inspect = MagicMock()
+    monkeypatch.setattr(queue_router, "_redis_sync_client", lambda: redis_client)
+    monkeypatch.setattr(celery_app.control, "inspect", inspect)
+
+    assert queue_router.get_queue_depth("growth-extraction") == 2
+    inspect.assert_not_called()
+
+
+def test_get_queue_depth_fails_open_when_redis_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        queue_router,
+        "_redis_sync_client",
+        lambda: (_ for _ in ()).throw(RuntimeError("redis unavailable")),
+    )
+
+    assert queue_router.get_queue_depth("starter-extraction") == 0
 
 
 def test_get_processing_eta_returns_none_below_threshold(monkeypatch) -> None:

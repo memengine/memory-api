@@ -320,6 +320,15 @@ def get_extraction_queue_sync(*, tenant_id: str, session_factory=None) -> str:
 
 
 def get_queue_depth(queue_name: str) -> int:
+    try:
+        client = _redis_sync_client()
+        return int(client.zcard(_queue_jobs_key(queue_name)) or 0)
+    except Exception:
+        return 0
+
+
+def inspect_queue_depth(queue_name: str) -> int:
+    """Reconcile worker state operationally; never call from request paths."""
     client = None
     try:
         client = _redis_sync_client()
