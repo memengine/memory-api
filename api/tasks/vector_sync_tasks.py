@@ -82,6 +82,17 @@ def run_outbox_cycle(
             done += done_delta
             failed += failed_delta
 
+        if archive_rows:
+            done_delta, failed_delta = _process_chunks(
+                session,
+                qdrant,
+                archive_rows,
+                chunk_size=DEFAULT_QDRANT_SYNC_CHUNK_SIZE,
+                apply_fn=_apply_archive_batch,
+            )
+            done += done_delta
+            failed += failed_delta
+
         if delete_rows:
             done_delta, failed_delta = _process_chunks(
                 session,
@@ -143,6 +154,25 @@ def _apply_upsert_batch(qdrant: QdrantService, rows: list[VectorSyncOutbox]) -> 
             wait=True,
         )
 
+
+def _apply_archive_batch(qdrant: QdrantService, rows: list[VectorSyncOutbox]) -> None:
+    grouped_rows: dict[str, list[VectorSyncOutbox]] = {}
+    for row in rows:
+        collection_name = str((row.payload or {}).get("qdrant_collection") or qdrant.COLLECTION_NAME)
+        grouped_rows.setdefault(collection_name, []).append(row)
+
+    ensure_collection = getattr(qdrant, "_ensure_collection_if_possible", None)
+    for collection_name, grouped in grouped_rows.items():
+        if callable(ensure_collection):
+            ensure_collection(collection_name, qdrant.VECTOR_SIZE)
+        for row in grouped:
+            qdrant.breaker.call_sync(
+                qdrant.client.set_payload,
+                collection_name=collection_name,
+                payload=dict(row.payload or {}),
+                points=[str(row.memory_id)],
+                wait=True,
+            )
 
 def _apply_delete_batch(qdrant: QdrantService, rows: list[VectorSyncOutbox]) -> None:
     grouped_rows: dict[str, list[VectorSyncOutbox]] = {}

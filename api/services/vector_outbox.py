@@ -47,6 +47,8 @@ def build_vector_payload(
             if getattr(memory, "source_event_id", None)
             else None
         ),
+        "effective_from": _isoformat_or_none(getattr(memory, "effective_from", None)),
+        "effective_until": _isoformat_or_none(getattr(memory, "effective_until", None)),
         "provenance": (getattr(memory, "metadata_json", None) or {}).get("provenance"),
         "embedding_model_id": embedding_model_id or getattr(memory, "embedding_model_id", None),
         "qdrant_collection": (
@@ -60,6 +62,14 @@ def build_vector_payload(
     elif user_id is not None:
         payload["user_id"] = str(user_id)
     return payload
+
+
+def _isoformat_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def enqueue_vector_upsert(
@@ -79,6 +89,22 @@ def enqueue_vector_upsert(
     session.add(row)
     return row
 
+
+def enqueue_vector_archive(
+    session: Any,
+    *,
+    memory_id: uuid.UUID | str,
+    payload: dict[str, Any],
+) -> VectorSyncOutbox:
+    row = VectorSyncOutbox(
+        id=uuid.uuid4(),
+        operation=VectorSyncOperation.archive,
+        memory_id=_as_uuid(memory_id),
+        embedding=None,
+        payload=payload,
+    )
+    session.add(row)
+    return row
 
 def enqueue_vector_delete(
     session: Any,
