@@ -1,0 +1,17 @@
+{"id":"direct_conflicting_claims","expected":"detect_dispute_keep_one_winner","risk":"correctness"}
+{"id":"compatible_claims_coexist","expected":"two_active_claims","risk":"correctness"}
+{"id":"concurrent_same_claim","expected":"one_claim_one_winner","risk":"correctness"}
+{"id":"duplicate_agent_event","expected":"exactly_one_memory_and_revision","risk":"reliability"}
+{"id":"out_of_order_events","expected":"event_time_correct_winner","risk":"correctness"}
+{"id":"older_high_authority","expected":"higher_authority_wins","risk":"correctness"}
+{"id":"equal_authority_conflict","expected":"disputed_existing_winner","risk":"correctness"}
+{"id":"cross_agent_correction","expected":"authorized_supersession","risk":"correctness"}
+{"id":"shared_memory_update","expected":"one_current_shared_value","risk":"correctness"}
+{"id":"revoked_queued_job","expected":"blocked_before_persistence","risk":"security"}
+{"id":"revocation_during_execution","expected":"no_commit_after_revocation","risk":"security"}
+{"id":"delete_agent_private_memories","expected":"private_memories_removed_or_inaccessible","risk":"security"}
+{"id":"delete_agent_shared_memories","expected":"shared_memory_policy_preserved","risk":"correctness"}
+{"id":"provenance_after_agent_delete","expected":"source_snapshot_preserved","risk":"auditability"}
+{"id":"retry_after_partial_failure","expected":"atomic_retry_no_duplicates","risk":"reliability"}
+{"id":"concurrent_winner_transitions","expected":"exactly_one_activated_revision","risk":"correctness"}
+{"id":"coordination_isolation","expected":"zero_unauthorized_cross_agent_user_tenant_leakage","risk":"security"}

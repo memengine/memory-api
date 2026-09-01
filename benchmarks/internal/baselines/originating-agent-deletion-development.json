@@ -1,0 +1,19 @@
+{
+  "baseline": "originating-agent-retirement-development-v2",
+  "artifact": "artifacts/internal-benchmarks/originating-agent-retirement-development-v2.json",
+  "scenario_count": 12,
+  "passed": 12,
+  "end_to_end_lifecycle_success": 1.0,
+  "private_memory_deletion_correctness": 1.0,
+  "shared_memory_continuity_correctness": 1.0,
+  "provenance_source_preservation": 1.0,
+  "claim_chain_integrity": 1.0,
+  "current_winner_correctness": 1.0,
+  "grant_cleanup_correctness": 1.0,
+  "queued_work_revocation_correctness": 1.0,
+  "qdrant_cleanup_retention_correctness": 1.0,
+  "cross_agent_user_tenant_leakage": 0,
+  "privacy_deletion_correctness": 1.0,
+  "holdout_used": false,
+  "production_behavior_changed": true
+}

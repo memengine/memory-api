@@ -1,0 +1,12 @@
+{"id":"private_only_agent_delete","expected":"private_memory_governed","risk":"security"}
+{"id":"shared_memory_continuity","expected":"authorized_reader_retains_access","risk":"correctness"}
+{"id":"delete_after_cross_agent_update","expected":"current_update_and_history_intact","risk":"correctness"}
+{"id":"delete_current_winner_source","expected":"winner_policy_explicit_and_consistent","risk":"correctness"}
+{"id":"delete_historical_source","expected":"historical_chain_and_source_snapshot_intact","risk":"auditability"}
+{"id":"revoke_before_delete","expected":"grants_clean_and_no_access","risk":"security"}
+{"id":"delete_with_queued_work","expected":"queued_write_blocked","risk":"security"}
+{"id":"delete_after_duplicate_retry","expected":"one_durable_write_remains","risk":"reliability"}
+{"id":"provenance_after_delete","expected":"source_identity_readable","risk":"auditability"}
+{"id":"qdrant_after_delete","expected":"vector_policy_matches_database_lifecycle","risk":"correctness"}
+{"id":"deletion_isolation","expected":"zero_cross_agent_user_tenant_leakage","risk":"security"}
+{"id":"privacy_delete_distinct","expected":"privacy_erasure_removes_rows_and_vectors","risk":"privacy"}

@@ -1,0 +1,21 @@
+{
+  "baseline": "multi-agent-coordination-development-v1",
+  "artifact": "artifacts/internal-benchmarks/multi-agent-coordination-development-v3.json",
+  "scenario_count": 17,
+  "passed": 11,
+  "end_to_end_coordination_success": 0.6470588235294118,
+  "conflict_detection_accuracy": 1.0,
+  "resolution_winner_correctness": 1.0,
+  "source_authority_correctness": 0.5,
+  "duplicate_idempotency_correctness": 1.0,
+  "concurrent_single_winner_correctness": 1.0,
+  "revocation_enforcement": 1.0,
+  "agent_deletion_correctness": 0.5,
+  "provenance_preservation": 0.0,
+  "duplicate_active_revisions": 0,
+  "cross_agent_unauthorized_leakage": 0,
+  "cross_user_leakage": 0,
+  "cross_tenant_leakage": 0,
+  "holdout_used": false,
+  "production_behavior_changed": true
+}
