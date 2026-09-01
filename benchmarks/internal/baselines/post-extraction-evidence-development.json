@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "name": "post-extraction-evidence-development",
+  "scope": "private development set only",
+  "holdout_loaded": false,
+  "provider_model": "openai/gpt-4o-mini",
+  "run_count": 3,
+  "annotation_revision": "legacy-importance-rubric-normalization-2026-08-09",
+  "rescored_without_provider_calls": true,
+  "run_artifacts": [
+    "artifacts/internal-benchmarks/post-extraction-evidence-run-1-importance-normalized.json",
+    "artifacts/internal-benchmarks/post-extraction-evidence-run-2-importance-normalized.json",
+    "artifacts/internal-benchmarks/post-extraction-evidence-run-3-importance-normalized.json"
+  ],
+  "mean_metrics": {
+    "micro_precision": 0.966284,
+    "micro_recall": 0.988506,
+    "micro_f1": 0.977206,
+    "macro_f1": 0.953704,
+    "category_accuracy": 0.965107,
+    "disposition_accuracy": 0.895320,
+    "importance_range_accuracy": 0.465107,
+    "confidence_range_accuracy": 0.790640,
+    "evidence_accuracy": 1.0,
+    "false_memory_rate": 0.033716,
+    "forbidden_leak_count": 0,
+    "confidence_brier_score": 0.055243,
+    "confidence_ece": 0.179167
+  },
+  "attribution_overhead_mean": {
+    "calls": 19,
+    "latency_ms_total": 36297.333333,
+    "latency_ms_per_call": 1910.385965,
+    "input_tokens": 4023.667,
+    "output_tokens": 480.667,
+    "total_tokens": 4504.333,
+    "estimated_cost_usd": 0.000892
+  },
+  "acceptance": {
+    "extraction_output_unchanged_all_runs": true,
+    "attribution_errors": 0,
+    "provider_errors": 0,
+    "passed": true
+  }
+}

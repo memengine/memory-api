@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "name": "offline-deterministic-importance-generalization",
+  "scope": "private development generalization pack only",
+  "dataset": "benchmarks/internal/datasets/extraction/development/generalization_v1.jsonl",
+  "case_count": 22,
+  "expected_memory_count": 25,
+  "holdout_loaded": false,
+  "provider_calls": 0,
+  "scorer_changed_after_dataset_freeze": false,
+  "artifact": "artifacts/internal-benchmarks/deterministic-importance-generalization-golden.json",
+  "metrics": {
+    "importance_accuracy": 0.64,
+    "under_rate": 0.12,
+    "over_rate": 0.24,
+    "mean_outside_range_error": 0.80,
+    "distinct_score_count": 4,
+    "score_distribution": {
+      "3.0": 6,
+      "5.0": 4,
+      "6.0": 5,
+      "7.0": 10
+    },
+    "accuracy_by_category": {
+      "expertise": 0.50,
+      "fact": 0.666667,
+      "goal": 0.80,
+      "preference": 0.666667,
+      "procedure": 0.50,
+      "relationship": 1.0
+    }
+  },
+  "acceptance": {
+    "overall_accuracy_minimum": 0.60,
+    "modern_accuracy_minimum": 0.75,
+    "under_rate_maximum": 0.25,
+    "over_rate_maximum": 0.25,
+    "mean_outside_range_error_maximum": 0.58,
+    "distinct_score_count_minimum": 5,
+    "passed": false,
+    "failed_guards": [
+      "modern_accuracy_minimum",
+      "mean_outside_range_error_maximum",
+      "distinct_score_count_minimum"
+    ]
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "name": "offline-deterministic-importance-feature-redesign",
+  "scope": "development only; generalization first, then original development",
+  "holdout_loaded": false,
+  "provider_calls": 0,
+  "production_integrated": false,
+  "feature_specification": "benchmarks/internal/importance-feature-model.md",
+  "original_development_artifact": "artifacts/internal-benchmarks/deterministic-importance-redesign-original-development.json",
+  "generalization": {
+    "case_count": 22,
+    "expected_memory_count": 25,
+    "importance_accuracy": 0.96,
+    "under_rate": 0.04,
+    "over_rate": 0.0,
+    "mean_outside_range_error": 0.04,
+    "distinct_score_count": 7,
+    "accuracy_by_category": {
+      "expertise": 1.0,
+      "fact": 0.833333,
+      "goal": 1.0,
+      "preference": 1.0,
+      "procedure": 1.0,
+      "relationship": 1.0
+    }
+  },
+  "original_development": {
+    "case_count": 24,
+    "matched_memory_count": 29,
+    "importance_accuracy": 0.344828,
+    "under_rate": 0.448276,
+    "over_rate": 0.206897,
+    "mean_outside_range_error": 0.931034,
+    "distinct_score_count": 4,
+    "accuracy_by_category": {
+      "expertise": 0.5,
+      "fact": 0.4,
+      "goal": 0.166667,
+      "preference": 0.166667,
+      "procedure": 0.0,
+      "relationship": 1.0
+    },
+    "extraction_output_unchanged": true
+  },
+  "acceptance": {
+    "generalization_accuracy_minimum": 0.75,
+    "original_accuracy_minimum": 0.70,
+    "expertise_and_procedure_accuracy_minimum": 0.65,
+    "under_rate_maximum": 0.20,
+    "over_rate_maximum": 0.20,
+    "mean_outside_range_error_maximum": 0.50,
+    "distinct_score_count_minimum": 6,
+    "zero_provider_cost_required": true,
+    "non_importance_output_unchanged_required": true,
+    "passed": false,
+    "failed_guards": [
+      "original_accuracy_minimum",
+      "expertise_and_procedure_accuracy_minimum",
+      "under_rate_maximum",
+      "over_rate_maximum",
+      "mean_outside_range_error_maximum",
+      "distinct_score_count_minimum"
+    ]
+  },
+  "decision": "Keep benchmark-only; do not propose shadow-mode integration until original-development generalization is resolved."
+}

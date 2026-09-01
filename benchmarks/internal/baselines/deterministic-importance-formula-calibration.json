@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "name": "offline-deterministic-importance-formula-calibration",
+  "scope": "development only; generalization first, then original development",
+  "holdout_loaded": false,
+  "provider_calls": 0,
+  "production_integrated": false,
+  "feature_derivation_changed": false,
+  "artifacts": {
+    "original_development": "artifacts/internal-benchmarks/deterministic-importance-formula-calibration-original-development.json",
+    "diagnostic": "artifacts/internal-benchmarks/deterministic-importance-formula-calibration-diagnostic.json",
+    "post_boundary_audit": "artifacts/internal-benchmarks/deterministic-importance-post-boundary-audit.json",
+    "boundary_audit": "benchmarks/internal/importance-boundary-audit.md"
+  },
+  "generalization": {
+    "importance_accuracy": 1.0,
+    "minimum_category_accuracy": 1.0,
+    "under_rate": 0.0,
+    "over_rate": 0.0,
+    "mean_outside_range_error": 0.0,
+    "distinct_score_count": 7
+  },
+  "original_development": {
+    "matched_memory_count": 29,
+    "importance_accuracy": 0.827586,
+    "under_rate": 0.0,
+    "over_rate": 0.172414,
+    "mean_outside_range_error": 0.189655,
+    "distinct_score_count": 5,
+    "extraction_output_unchanged": true
+  },
+  "acceptance": {
+    "generalization_accuracy_minimum": 0.75,
+    "generalization_category_minimum": 0.65,
+    "original_accuracy_minimum": 0.75,
+    "under_rate_maximum": 0.15,
+    "over_rate_maximum": 0.15,
+    "mean_outside_range_error_maximum": 0.25,
+    "distinct_score_count_minimum": 6,
+    "passed": false,
+    "failed_guards": ["over_rate_maximum", "distinct_score_count_minimum"]
+  },
+  "annotation_audit_changed_ranges": false,
+  "decision": "Keep benchmark-only. Boundary audit confirmed all five remaining failures are valid scorer failures; do not begin production or shadow-mode integration."
+}

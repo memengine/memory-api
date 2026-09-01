@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "name": "offline-deterministic-importance-development",
+  "scope": "private development set only",
+  "holdout_loaded": false,
+  "production_integrated": false,
+  "production_integration_ready": false,
+  "generalization_baseline": "deterministic-importance-generalization.json",
+  "provider_calls": 0,
+  "run_count": 3,
+  "source_baseline": "post-extraction-evidence-development",
+  "run_artifacts": [
+    "artifacts/internal-benchmarks/deterministic-importance-run-1.json",
+    "artifacts/internal-benchmarks/deterministic-importance-run-2.json",
+    "artifacts/internal-benchmarks/deterministic-importance-run-3.json"
+  ],
+  "importance_metrics": {
+    "accuracy": 0.802545,
+    "legacy_accuracy": 0.712281,
+    "modern_accuracy": 1.0,
+    "under_rate": 0.057882,
+    "over_rate": 0.139573,
+    "mean_outside_range_error": 0.273194,
+    "distinct_score_count": 5,
+    "score_distribution": {
+      "1.0": 3,
+      "3.0": 15,
+      "5.0": 3,
+      "6.0": 14,
+      "7.0": 51
+    },
+    "accuracy_by_category": {
+      "expertise": 0.5,
+      "fact": 0.725926,
+      "goal": 1.0,
+      "preference": 0.833333,
+      "procedure": 1.0,
+      "relationship": 1.0
+    }
+  },
+  "preserved_metric_means": {
+    "micro_precision": 0.966284,
+    "micro_recall": 0.988506,
+    "micro_f1": 0.977206,
+    "macro_f1": 0.953704,
+    "false_memory_rate": 0.033716,
+    "category_accuracy": 0.965107,
+    "disposition_accuracy": 0.895320,
+    "confidence_range_accuracy": 0.790640,
+    "confidence_brier_score": 0.055243,
+    "confidence_ece": 0.179167,
+    "evidence_accuracy": 1.0,
+    "forbidden_leak_count": 0
+  },
+  "overhead": {
+    "latency_ms": 0,
+    "tokens": 0,
+    "estimated_cost_usd": 0.0
+  },
+  "acceptance": {
+    "overall_accuracy_minimum": 0.60,
+    "legacy_accuracy_minimum": 0.45,
+    "modern_accuracy_minimum": 0.75,
+    "under_rate_maximum": 0.25,
+    "over_rate_maximum": 0.25,
+    "mean_outside_range_error_maximum": 0.58,
+    "distinct_score_count_minimum": 5,
+    "output_unchanged_all_runs": true,
+    "passed": true,
+    "superseded_for_integration_decision": true
+  }
+}

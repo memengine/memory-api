@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "name": "offline-deterministic-importance-feature-derivation",
+  "scope": "development only; generalization first, then original development",
+  "holdout_loaded": false,
+  "provider_calls": 0,
+  "production_integrated": false,
+  "weights_and_formula_changed": false,
+  "artifacts": {
+    "original_development": "artifacts/internal-benchmarks/deterministic-importance-feature-derivation-original-development.json",
+    "feature_diagnostic": "artifacts/internal-benchmarks/deterministic-importance-feature-derivation-diagnostic.json"
+  },
+  "generalization": {
+    "case_count": 22,
+    "expected_memory_count": 25,
+    "importance_accuracy": 1.0,
+    "under_rate": 0.0,
+    "over_rate": 0.0,
+    "mean_outside_range_error": 0.0,
+    "distinct_score_count": 7,
+    "minimum_category_accuracy": 1.0
+  },
+  "original_development": {
+    "matched_memory_count": 29,
+    "canonical_proposition_accuracy": 0.655172,
+    "provider_normalized_accuracy": 0.620690,
+    "under_rate": 0.137931,
+    "over_rate": 0.241379,
+    "mean_outside_range_error": 0.517241,
+    "distinct_score_count": 6,
+    "extraction_output_unchanged": true
+  },
+  "acceptance": {
+    "generalization_accuracy_minimum": 0.75,
+    "generalization_category_minimum": 0.65,
+    "canonical_original_accuracy_minimum": 0.60,
+    "provider_original_accuracy_minimum": 0.55,
+    "under_rate_maximum": 0.30,
+    "over_rate_maximum": 0.20,
+    "mean_outside_range_error_maximum": 0.50,
+    "distinct_score_count_minimum": 6,
+    "passed": false,
+    "failed_guards": ["over_rate_maximum", "mean_outside_range_error_maximum"]
+  },
+  "decision": "Keep benchmark-only. Do not begin production or shadow-mode integration."
+}

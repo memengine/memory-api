@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "name": "offline-deterministic-importance-final-development",
+  "scope": "development only; generalization first, then original development",
+  "holdout_loaded": false,
+  "provider_calls": 0,
+  "production_integrated": false,
+  "scorer_tuning_stopped": true,
+  "artifact": "artifacts/internal-benchmarks/deterministic-importance-final-minimal-original-development.json",
+  "generalization": {
+    "case_count": 22,
+    "expected_memory_count": 25,
+    "importance_accuracy": 0.96,
+    "under_rate": 0.04,
+    "over_rate": 0.0,
+    "mean_outside_range_error": 0.04,
+    "distinct_score_count": 7,
+    "minimum_category_accuracy": 0.75
+  },
+  "original_development": {
+    "case_count": 24,
+    "matched_memory_count": 29,
+    "importance_accuracy": 0.965517,
+    "under_rate": 0.034483,
+    "over_rate": 0.0,
+    "mean_outside_range_error": 0.051724,
+    "distinct_score_count": 6,
+    "extraction_output_unchanged": true,
+    "accuracy_by_source": {"legacy": 0.95, "modern": 1.0}
+  },
+  "acceptance": {
+    "original_accuracy_minimum": 0.85,
+    "generalization_accuracy_minimum": 0.95,
+    "over_rate_maximum": 0.15,
+    "under_rate_maximum": 0.15,
+    "mean_outside_range_error_maximum": 0.20,
+    "other_outputs_unchanged_required": true,
+    "zero_provider_cost_required": true,
+    "passed": true,
+    "failed_guards": []
+  },
+  "known_residuals": [
+    "A temporary 'for now' preference and a strictly session-only preference remain indistinguishable at the frozen feature level.",
+    "The generalization weekly reconciliation procedure is under-scored by one point under the low-consequence recurring-procedure rule."
+  ],
+  "decision": "Stop scorer tuning and propose development-only shadow-mode integration."
+}
