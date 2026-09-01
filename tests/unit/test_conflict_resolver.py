@@ -157,7 +157,7 @@ def test_update_resolution_archives_old_and_links_new_version() -> None:
     assert stored[0].previous_version_id == str(existing.id)
     assert existing.is_archived is True
     outbox_rows = [item for item in session.added if isinstance(item, VectorSyncOutbox)]
-    assert [row.operation for row in outbox_rows] == [VectorSyncOperation.delete, VectorSyncOperation.upsert]
+    assert [row.operation for row in outbox_rows] == [VectorSyncOperation.archive, VectorSyncOperation.upsert]
     assert any(isinstance(item, AuditLog) and item.action == AuditAction.updated for item in session.added)
 
 
@@ -294,7 +294,7 @@ def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None
     assert len(conflicts) == 1
     assert conflicts[0].resolution_path == "tenant_review"
     assert conflicts[0].requires_attention is True
-    assert len(clarifications) == 1
+    assert clarifications == []
     outbox_rows = [item for item in session.added if isinstance(item, VectorSyncOutbox)]
     assert outbox_rows == []
 

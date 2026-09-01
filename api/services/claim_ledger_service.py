@@ -63,6 +63,7 @@ class ClaimLedgerService:
         provenance: dict[str, Any] | None,
         resolution: str,
         decision_evidence: dict[str, Any] | None = None,
+        predecessor_memory_id: str | uuid.UUID | None = None,
     ) -> MemoryClaim | None:
         if tenant_id is None or proxy_user_id is None:
             return None
@@ -76,10 +77,16 @@ class ClaimLedgerService:
             else str(memory.category),
             scope=(provenance or {}).get("scope") or {},
         )
-        claim = self._find_claim(
+        predecessor_claim = (
+            self._find_claim_for_memory(predecessor_memory_id)
+            if resolution in {"UPDATE", "MERGE"} and predecessor_memory_id is not None
+            else None
+        )
+        claim = predecessor_claim or self._find_claim(
             tenant_id=uuid.UUID(str(tenant_id)),
             proxy_user_id=uuid.UUID(str(proxy_user_id)),
             fingerprint=identity.fingerprint,
+            for_update=True,
         )
         priority = authority_priority(
             provenance,
@@ -115,11 +122,14 @@ class ClaimLedgerService:
         else:
             active_value = normalize_text(claim.active_value or "")
             incoming_value = normalize_text(identity.value)
-            if should_activate and self._incoming_wins(
-                claim=claim,
-                incoming_priority=priority,
-                incoming_confidence=float(memory.confidence_score or 0.0),
-                incoming_observed_at=observed_at,
+            if should_activate and (
+                predecessor_claim is not None
+                or self._incoming_wins(
+                    claim=claim,
+                    incoming_priority=priority,
+                    incoming_confidence=float(memory.confidence_score or 0.0),
+                    incoming_observed_at=observed_at,
+                )
             ):
                 self._mark_existing_winner_superseded(claim)
                 claim.active_value = identity.value
@@ -148,6 +158,8 @@ class ClaimLedgerService:
             authority_priority=priority,
             confidence_score=float(memory.confidence_score or 0.0),
             observed_at=observed_at,
+            effective_from=getattr(memory, "effective_from", None),
+            effective_until=getattr(memory, "effective_until", None),
             evidence_refs=list((provenance or {}).get("evidence") or []),
             resolution_reason=resolution,
             decision_evidence=decision_evidence or {},
@@ -216,6 +228,7 @@ class ClaimLedgerService:
             tenant_id=uuid.UUID(str(tenant_id)),
             proxy_user_id=uuid.UUID(str(proxy_user_id)),
             fingerprint=identity.fingerprint,
+            for_update=True,
         )
         priority = domain_authority_priority(provenance, domain, field, category)
         confidence = domain_field_confidence(provenance)
@@ -339,7 +352,21 @@ class ClaimLedgerService:
             .scalars()
             .all()
         )
-        affected_claims = {revision.claim_id: revision.claim for revision in rows}
+        claim_ids = {revision.claim_id for revision in rows}
+        locked_claims = (
+            (
+                await self.session.execute(
+                    select(MemoryClaim)
+                    .where(MemoryClaim.id.in_(claim_ids))
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+            if claim_ids
+            else []
+        )
+        affected_claims = {claim.id: claim for claim in locked_claims}
         selected = {
             "A": {memory_a.id},
             "B": {memory_b.id},
@@ -397,17 +424,36 @@ class ClaimLedgerService:
         tenant_id: uuid.UUID,
         proxy_user_id: uuid.UUID,
         fingerprint: str,
+        for_update: bool = False,
     ) -> MemoryClaim | None:
-        result = self.session.execute(
-            select(MemoryClaim).where(
+        statement = select(MemoryClaim).where(
                 MemoryClaim.tenant_id == tenant_id,
                 MemoryClaim.proxy_user_id == proxy_user_id,
                 MemoryClaim.claim_fingerprint == fingerprint,
             )
-        )
+        if for_update:
+            statement = statement.with_for_update()
+        result = self.session.execute(statement)
         if hasattr(result, "scalar_one_or_none"):
             return result.scalar_one_or_none()
         return None
+
+    def _find_claim_for_memory(
+        self,
+        memory_id: str | uuid.UUID,
+    ) -> MemoryClaim | None:
+        result = self.session.execute(
+            select(MemoryClaim)
+            .join(
+                MemoryClaimRevision,
+                MemoryClaimRevision.claim_id == MemoryClaim.id,
+            )
+            .where(MemoryClaimRevision.memory_id == uuid.UUID(str(memory_id)))
+            .order_by(MemoryClaimRevision.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
 
     @staticmethod
     def _incoming_wins(

@@ -46,6 +46,7 @@ from api.services.conflict_routing.registry import get_router
 from api.services.extractor import ExtractedMemory
 from api.services.temporal_validity import temporal_validity_from_provenance
 from api.services.vector_outbox import build_vector_payload
+from api.services.vector_outbox import enqueue_vector_archive
 from api.services.vector_outbox import enqueue_vector_delete
 from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.version_service import VersionService
@@ -1405,34 +1406,77 @@ class ConflictResolver:
     ) -> int:
         if not hasattr(self.session, "add"):
             return 0
-        inserted = 0
+
+        tenant_uuid = uuid.UUID(str(tenant_id))
+        new_memory_uuid = uuid.UUID(str(new_memory_id))
+        candidates: dict[tuple[uuid.UUID, uuid.UUID, Any], SharedContextConflict] = {}
         for conflict in conflicts:
             signal = conflict.conflicting_signal
-            user_a_memory_id = str(signal.source_memory_id) if signal.source_memory_id else None
-            if self._cross_user_conflict_exists(
-                tenant_id=tenant_id,
-                user_a_memory_id=user_a_memory_id,
-                user_b_memory_id=new_memory_id,
-                entity_type=signal.entity_type,
-            ):
+            if signal.source_memory_id is None:
                 continue
+            source_memory_uuid = uuid.UUID(str(signal.source_memory_id))
+            pair = tuple(sorted((source_memory_uuid, new_memory_uuid), key=str))
+            candidates.setdefault((pair[0], pair[1], signal.entity_type), conflict)
+
+        if not candidates:
+            return 0
+
+        entity_types = sorted(
+            {key[2] for key in candidates},
+            key=lambda value: value.value if hasattr(value, "value") else str(value),
+        )
+        stmt = select(CrossUserConflict).where(
+            CrossUserConflict.tenant_id == tenant_uuid,
+            CrossUserConflict.entity_type.in_(entity_types),
+            or_(
+                CrossUserConflict.user_a_memory_id == new_memory_uuid,
+                CrossUserConflict.user_b_memory_id == new_memory_uuid,
+            ),
+        )
+        result = self.session.execute(stmt)
+        existing_rows = result.scalars().all() if hasattr(result, "scalars") else []
+        existing_keys = {
+            (
+                *tuple(
+                    sorted(
+                        (row.user_a_memory_id, row.user_b_memory_id),
+                        key=str,
+                    )
+                ),
+                row.entity_type,
+            )
+            for row in existing_rows
+            if isinstance(row, CrossUserConflict)
+            and row.user_a_memory_id is not None
+            and row.user_b_memory_id is not None
+        }
+
+        inserted_rows: list[tuple[CrossUserConflict, SharedContextConflict]] = []
+        for key, conflict in candidates.items():
+            if key in existing_keys:
+                continue
+            signal = conflict.conflicting_signal
             row = build_cross_user_conflict_row(
                 tenant_id=tenant_id,
-                user_a_memory_id=user_a_memory_id,
+                user_a_memory_id=str(signal.source_memory_id),
                 user_b_memory_id=new_memory_id,
                 entity_type=signal.entity_type,
                 entity_value_a=conflict.entity_value_a,
                 entity_value_b=conflict.entity_value_b,
             )
             self.session.add(row)
-            if hasattr(self.session, "flush"):
-                self.session.flush()
+            inserted_rows.append((row, conflict))
+
+        if inserted_rows and hasattr(self.session, "flush"):
+            self.session.flush()
+
+        for row, conflict in inserted_rows:
+            signal = conflict.conflicting_signal
             result = resolve_cross_user_conflict_automatically(
                 row,
                 self.session,
                 domain_schema=self.domain_schema,
             )
-            inserted += 1
             if result.requires_attention:
                 self._dispatch_context_conflict_webhook(
                     tenant_id=tenant_id,
@@ -1440,49 +1484,7 @@ class ConflictResolver:
                     source_proxy_user_id=signal.source_proxy_user_id,
                     current_proxy_user_id=proxy_user_id,
                 )
-        return inserted
-
-    def _cross_user_conflict_exists(
-        self,
-        *,
-        tenant_id: str,
-        user_a_memory_id: str | None,
-        user_b_memory_id: str,
-        entity_type: Any,
-    ) -> bool:
-        if not hasattr(self.session, "execute") or user_a_memory_id is None:
-            return False
-
-        tenant_uuid = uuid.UUID(str(tenant_id))
-        memory_a_uuid = uuid.UUID(str(user_a_memory_id))
-        memory_b_uuid = uuid.UUID(str(user_b_memory_id))
-        stmt = select(CrossUserConflict.id).where(
-            CrossUserConflict.tenant_id == tenant_uuid,
-            CrossUserConflict.entity_type == entity_type,
-            or_(
-                and_(
-                    CrossUserConflict.user_a_memory_id == memory_a_uuid,
-                    CrossUserConflict.user_b_memory_id == memory_b_uuid,
-                ),
-                and_(
-                    CrossUserConflict.user_a_memory_id == memory_b_uuid,
-                    CrossUserConflict.user_b_memory_id == memory_a_uuid,
-                ),
-            ),
-        ).limit(1)
-        result = self.session.execute(stmt)
-        if hasattr(result, "scalar_one_or_none"):
-            return result.scalar_one_or_none() is not None
-        if hasattr(result, "scalars"):
-            scalars = result.scalars()
-            if hasattr(scalars, "first"):
-                return scalars.first() is not None
-            if hasattr(scalars, "all"):
-                return any(
-                    isinstance(row, (uuid.UUID, CrossUserConflict, str))
-                    for row in scalars.all()
-                )
-        return False
+        return len(inserted_rows)
 
     @staticmethod
     def _dispatch_context_conflict_webhook(
@@ -1661,14 +1663,20 @@ class ConflictResolver:
             )
         except Exception:
             qdrant_collection = None
-        enqueue_vector_delete(
+        archive_payload = build_vector_payload(
+            memory,
+            tenant_id=str(memory.proxy_user.tenant_id) if getattr(memory, "proxy_user", None) else None,
+            proxy_user_id=str(memory.proxy_user_id),
+            user_id=str(memory.user_id),
+            embedding_model_id=getattr(memory, "embedding_model_id", None),
+            qdrant_collection=qdrant_collection,
+        )
+        archive_payload["is_archived"] = True
+        archive_payload["lifecycle_state"] = "superseded"
+        enqueue_vector_archive(
             self.session,
             memory_id=memory.id,
-            payload={
-                "memory_id": str(memory.id),
-                "embedding_model_id": getattr(memory, "embedding_model_id", None),
-                "qdrant_collection": qdrant_collection,
-            },
+            payload=archive_payload,
         )
         if hasattr(self.session, "add"):
             self.session.add(memory)

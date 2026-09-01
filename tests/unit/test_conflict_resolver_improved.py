@@ -12,6 +12,7 @@ from api.db.models import SharedContextSignal
 from api.services.conflict_resolver import resolve_cross_user_conflict_automatically
 from api.services.conflict_resolver import ConflictResolver
 from api.services.conflict_detection import ConflictType
+from api.services.conflict_detection import SharedContextConflict
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.extractor import ExtractedMemory
 
@@ -33,14 +34,20 @@ class FakeResult:
 
 
 class FakeSession:
-    def __init__(self, shared_signals=None):
+    def __init__(self, shared_signals=None, cross_user_conflicts=None):
         self.shared_signals = shared_signals or []
+        self.cross_user_conflicts = cross_user_conflicts or []
         self.added = []
         self.memories = {}
         self.flushes = 0
         self.commits = 0
+        self.executed = []
 
-    def execute(self, _stmt):
+    def execute(self, stmt):
+        self.executed.append(stmt)
+        descriptions = getattr(stmt, "column_descriptions", [])
+        if descriptions and descriptions[0].get("entity") is CrossUserConflict:
+            return FakeResult(self.cross_user_conflicts)
         return FakeResult(self.shared_signals)
 
     def add(self, item):
@@ -107,6 +114,111 @@ def test_resolver_flags_cross_user_shared_context_without_blocking_storage(monke
     assert conflict_rows[0].entity_value_b == "go"
     assert conflict_rows[0].user_a_memory_id == source_memory_id
     assert conflict_rows[0].user_b_memory_id == uuid.UUID(stored[0].id)
+
+
+def test_cross_user_conflicts_are_reconciled_with_one_query_and_one_flush(monkeypatch) -> None:
+    tenant_id = str(uuid.uuid4())
+    new_memory_id = str(uuid.uuid4())
+    signal_a = SimpleNamespace(
+        entity_type=SharedContextEntityType.tech_stack,
+        entity_value="python",
+        source_proxy_user_id=uuid.uuid4(),
+        source_memory_id=uuid.uuid4(),
+    )
+    signal_b = SimpleNamespace(
+        entity_type=SharedContextEntityType.tech_stack,
+        entity_value="rust",
+        source_proxy_user_id=uuid.uuid4(),
+        source_memory_id=uuid.uuid4(),
+    )
+    conflicts = [
+        SharedContextConflict(
+            new_memory=MagicMock(),
+            conflicting_signal=signal,
+            conflict_entity="tech_stack",
+            entity_value_a=signal.entity_value,
+            entity_value_b="go",
+            description="different stack",
+        )
+        for signal in (signal_a, signal_b)
+    ]
+    session = FakeSession()
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        client=MagicMock(),
+        default_source_conversation_id=uuid.uuid4(),
+    )
+    monkeypatch.setattr(
+        "api.services.conflict_resolver.resolve_cross_user_conflict_automatically",
+        lambda *_args, **_kwargs: SimpleNamespace(requires_attention=False),
+    )
+
+    inserted = resolver._insert_cross_user_conflicts(
+        conflicts=conflicts,
+        tenant_id=tenant_id,
+        new_memory_id=new_memory_id,
+        proxy_user_id=str(uuid.uuid4()),
+    )
+
+    assert inserted == 2
+    assert len(session.executed) == 1
+    assert session.flushes == 1
+    assert len([row for row in session.added if isinstance(row, CrossUserConflict)]) == 2
+
+
+def test_cross_user_conflict_reconciliation_skips_existing_symmetric_pair(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    old_memory_id = uuid.uuid4()
+    new_memory_id = uuid.uuid4()
+    existing = CrossUserConflict(
+        tenant_id=tenant_id,
+        user_a_memory_id=new_memory_id,
+        user_b_memory_id=old_memory_id,
+        entity_type=SharedContextEntityType.tech_stack,
+        entity_value_a="go",
+        entity_value_b="python",
+    )
+    signal = SimpleNamespace(
+        entity_type=SharedContextEntityType.tech_stack,
+        entity_value="python",
+        source_proxy_user_id=uuid.uuid4(),
+        source_memory_id=old_memory_id,
+    )
+    conflict = SharedContextConflict(
+        new_memory=MagicMock(),
+        conflicting_signal=signal,
+        conflict_entity="tech_stack",
+        entity_value_a="python",
+        entity_value_b="go",
+        description="different stack",
+    )
+    session = FakeSession(cross_user_conflicts=[existing])
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        client=MagicMock(),
+        default_source_conversation_id=uuid.uuid4(),
+    )
+    automatic = MagicMock()
+    monkeypatch.setattr(
+        "api.services.conflict_resolver.resolve_cross_user_conflict_automatically",
+        automatic,
+    )
+
+    inserted = resolver._insert_cross_user_conflicts(
+        conflicts=[conflict],
+        tenant_id=str(tenant_id),
+        new_memory_id=str(new_memory_id),
+        proxy_user_id=str(uuid.uuid4()),
+    )
+
+    assert inserted == 0
+    assert len(session.executed) == 1
+    assert session.flushes == 0
+    automatic.assert_not_called()
 
 
 def test_personal_goal_cross_user_conflict_is_ignored() -> None:

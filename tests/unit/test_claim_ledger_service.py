@@ -104,6 +104,8 @@ def test_claim_scope_participates_in_identity() -> None:
 def test_record_memory_creates_active_claim_and_revision() -> None:
     session = FakeSession()
     memory = make_memory("Customer's current subscription plan is Growth.")
+    memory.effective_from = datetime(2026, 8, 12, tzinfo=UTC)
+    memory.effective_until = datetime(2026, 9, 12, tzinfo=UTC)
 
     claim = ClaimLedgerService(session).record_memory(
         memory,
@@ -131,6 +133,8 @@ def test_record_memory_creates_active_claim_and_revision() -> None:
     assert revisions[0].asserted_value == "growth"
     assert revisions[0].schema_version == CLAIM_SCHEMA_VERSION
     assert revisions[0].processor_version == CLAIM_PROCESSOR_VERSION
+    assert revisions[0].effective_from == memory.effective_from
+    assert revisions[0].effective_until == memory.effective_until
 
 
 def test_higher_authority_revision_becomes_winner() -> None:
@@ -246,11 +250,11 @@ class _ScalarRows:
 
 
 class FakeAsyncLedgerSession:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, revision_rows, claim_rows):
+        self.result_sets = [revision_rows, claim_rows]
 
     async def execute(self, _statement):
-        return _ScalarRows(self.rows)
+        return _ScalarRows(self.result_sets.pop(0))
 
 
 @pytest.mark.asyncio
@@ -297,7 +301,7 @@ async def test_conflict_selection_updates_claim_winner() -> None:
     revision_b.claim = claim
 
     await ClaimLedgerService(
-        FakeAsyncLedgerSession([revision_a, revision_b])
+        FakeAsyncLedgerSession([revision_a, revision_b], [claim])
     ).apply_conflict_selection(
         memory_a=memory_a,
         memory_b=memory_b,
