@@ -1,4 +1,5 @@
 import fakeredis.aioredis
+import asyncio
 import pytest
 import pytest_asyncio
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -44,6 +45,113 @@ async def test_invalidate_user_cache_removes_hot_memories(fake_redis) -> None:
     await service.invalidate_user_cache("user-1")
 
     assert await service.get_hot_memories("user-1") is None
+
+
+@pytest.mark.asyncio
+async def test_invalidation_removes_query_and_hot_tier_keys_only_for_user(fake_redis) -> None:
+    service = CacheService(client=fake_redis)
+    await service.set_retrieval_results("proxy-1", "query", [{"id": "deleted"}])
+    await service.set_hot_tier_memory("proxy-1", "deleted", {"id": "deleted"})
+    await service.set_retrieval_results("proxy-2", "query", [{"id": "safe"}])
+    await service.set_hot_tier_memory("proxy-2", "safe", {"id": "safe"})
+
+    await service.invalidate_user_cache("proxy-1")
+
+    assert await service.get_retrieval_results("proxy-1", "query") is None
+    assert await service.get_hot_tier_memories("proxy-1") == []
+    assert await service.get_retrieval_results("proxy-2", "query") == [{"id": "safe"}]
+    assert await service.get_hot_tier_memories("proxy-2") == [{"id": "safe"}]
+
+
+def _enable_generation_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "benchmark")
+    monkeypatch.setenv("MEMORYOS_SCALE_DEDICATED", "1")
+    monkeypatch.setenv("MEMORYOS_BENCHMARK_PROVIDER", "deterministic")
+    monkeypatch.setenv("BENCHMARK_CACHE_INVALIDATION_MODE", "generation-v1")
+    monkeypatch.setenv("BENCHMARK_CACHE_NAMESPACE", "v2")
+
+
+@pytest.mark.asyncio
+async def test_generation_cache_is_benchmark_guarded(fake_redis, monkeypatch) -> None:
+    monkeypatch.setenv("BENCHMARK_CACHE_INVALIDATION_MODE", "generation-v1")
+    monkeypatch.setenv("BENCHMARK_CACHE_NAMESPACE", "v2")
+
+    service = CacheService(client=fake_redis)
+
+    assert service._generation_invalidation is False
+    assert service._retrieval_results_key("user-1", "query").startswith("retrieve:")
+
+
+@pytest.mark.asyncio
+async def test_generation_invalidation_makes_prior_values_unreachable_without_scan(
+    fake_redis,
+    monkeypatch,
+) -> None:
+    _enable_generation_cache(monkeypatch)
+    service = CacheService(client=fake_redis)
+    scan_calls = 0
+
+    async def forbidden_scan(*_args, **_kwargs):
+        nonlocal scan_calls
+        scan_calls += 1
+        if False:
+            yield None
+
+    fake_redis.scan_iter = forbidden_scan
+    await service.set_hot_memories("user-1", [{"id": "list-old"}])
+    await service.set_retrieval_results("user-1", "query", [{"id": "result-old"}])
+    await service.set_hot_tier_memory("user-1", "memory-old", {"id": "memory-old"})
+
+    await service.invalidate_user_cache("user-1")
+
+    assert await service.get_hot_memories("user-1") is None
+    assert await service.get_retrieval_results("user-1", "query") is None
+    assert await service.get_hot_tier_memories("user-1") == []
+    assert await fake_redis.get(service._generation_key("user-1")) == "1"
+    assert scan_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_generation_cache_keeps_other_identities_and_new_values(fake_redis, monkeypatch) -> None:
+    _enable_generation_cache(monkeypatch)
+    service = CacheService(client=fake_redis)
+    await service.set_retrieval_results("user-1", "query", [{"id": "old"}])
+    await service.set_retrieval_results("user-2", "query", [{"id": "safe"}])
+
+    await service.invalidate_user_cache("user-1")
+    await service.set_retrieval_results("user-1", "query", [{"id": "new"}])
+
+    assert await service.get_retrieval_results("user-1", "query") == [{"id": "new"}]
+    assert await service.get_retrieval_results("user-2", "query") == [{"id": "safe"}]
+
+
+@pytest.mark.asyncio
+async def test_generation_hot_tier_uses_one_hash_and_refreshes_ttl(fake_redis, monkeypatch) -> None:
+    _enable_generation_cache(monkeypatch)
+    service = CacheService(client=fake_redis)
+
+    await service.set_hot_tier_memory("user-1", "memory-1", {"id": "memory-1"}, ttl=300)
+    await service.set_hot_tier_memory("user-1", "memory-2", {"id": "memory-2"}, ttl=300)
+
+    key = service._generation_hot_tier_key("user-1", 0)
+    assert sorted(item["id"] for item in await service.get_hot_tier_memories("user-1")) == [
+        "memory-1",
+        "memory-2",
+    ]
+    assert await fake_redis.hlen(key) == 2
+    assert 0 < await fake_redis.ttl(key) <= 300
+
+
+@pytest.mark.asyncio
+async def test_concurrent_generation_invalidations_are_monotonic(fake_redis, monkeypatch) -> None:
+    _enable_generation_cache(monkeypatch)
+    service = CacheService(client=fake_redis)
+    await service.set_retrieval_results("user-1", "query", [{"id": "old"}])
+
+    await asyncio.gather(*(service.invalidate_user_cache("user-1") for _ in range(20)))
+
+    assert await fake_redis.get(service._generation_key("user-1")) == "20"
+    assert await service.get_retrieval_results("user-1", "query") is None
 
 
 @pytest.mark.asyncio
@@ -154,6 +262,27 @@ class BrokenRedis:
     async def expire(self, *_args, **_kwargs):
         raise RedisConnectionError("redis unavailable")
 
+
+@pytest.mark.asyncio
+async def test_breaker_owned_cache_failure_falls_back_without_force_open() -> None:
+    class TrackingBreaker:
+        def __init__(self) -> None:
+            self.force_open_calls = 0
+
+        async def call(self, fn, *args, fallback=None, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except RedisConnectionError:
+                raise
+
+        def force_open(self) -> None:
+            self.force_open_calls += 1
+
+    service = CacheService(client=BrokenRedis())
+    service.breaker = TrackingBreaker()
+
+    assert await service.get_hot_memories("user-1") is None
+    assert service.breaker.force_open_calls == 0
 
 @pytest.mark.asyncio
 async def test_cache_service_handles_connection_errors_gracefully() -> None:

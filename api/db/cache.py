@@ -14,6 +14,8 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_redis_open
+from api.infra.redis_benchmark import benchmark_async_redis_from_url
+from api.infra.redis_benchmark import benchmark_cache_generations_enabled
 from api.settings import get_settings
 HOT_MEMORIES_SUFFIX = "hot_memories"
 HOT_TIER_PREFIX = "hot_memory"
@@ -46,14 +48,13 @@ class CacheService:
         *,
         use_direct_breaker: bool | None = None,
     ) -> None:
-        self.client = client or redis.from_url(
+        self.client = client or benchmark_async_redis_from_url(
             get_redis_url(redis_url),
             encoding="utf-8",
             decode_responses=True,
-            socket_connect_timeout=0.1,
-            socket_timeout=0.1,
-            retry=Retry(NoBackoff(), 0),
-            retry_on_timeout=False,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            client_role="cache",
         )
         direct_breaker = bool(client is not None) if use_direct_breaker is None else bool(use_direct_breaker)
         self.breaker = (
@@ -61,14 +62,8 @@ class CacheService:
             if direct_breaker
             else CircuitBreakerRegistry.get_instance().redis_cb
         )
-
-    def _mark_redis_unavailable(self) -> None:
-        force_open = getattr(self.breaker, "force_open", None)
-        if callable(force_open):
-            try:
-                force_open()
-            except Exception:
-                return None
+        self._generation_invalidation = benchmark_cache_generations_enabled()
+        self._cache_namespace = "v2"
 
     @staticmethod
     def _hot_memories_key(user_id: str) -> str:
@@ -86,6 +81,32 @@ class CacheService:
     @staticmethod
     def _hot_tier_memory_pattern(proxy_user_id: str) -> str:
         return f"{HOT_TIER_PREFIX}:{proxy_user_id}:*"
+
+    def _generation_key(self, user_id: str) -> str:
+        return f"memory-cache:{self._cache_namespace}:generation:{user_id}"
+
+    def _generation_hot_memories_key(self, user_id: str, generation: int) -> str:
+        return f"memory-cache:{self._cache_namespace}:hot-list:{user_id}:g{generation}"
+
+    def _generation_retrieval_key(
+        self,
+        user_id: str,
+        generation: int,
+        cache_context: str,
+    ) -> str:
+        context_hash = hashlib.sha256(cache_context.encode("utf-8")).hexdigest()[:24]
+        return f"memory-cache:{self._cache_namespace}:retrieve:{user_id}:g{generation}:{context_hash}"
+
+    def _generation_hot_tier_key(self, user_id: str, generation: int) -> str:
+        return f"memory-cache:{self._cache_namespace}:hot-tier:{user_id}:g{generation}"
+
+    async def _get_generation(self, user_id: str) -> int:
+        raw = await self.breaker.call(
+            self.client.get,
+            self._generation_key(user_id),
+            fallback=lambda: on_redis_open(None),
+        )
+        return int(raw or 0)
 
     @staticmethod
     def _lifecycle_report_key(tenant_id: str) -> str:
@@ -113,13 +134,18 @@ class CacheService:
 
     async def get_hot_memories(self, user_id: str) -> list[dict[str, Any]] | None:
         try:
+            key = self._hot_memories_key(user_id)
+            if self._generation_invalidation:
+                key = self._generation_hot_memories_key(
+                    user_id,
+                    await self._get_generation(user_id),
+                )
             cached_value = await self.breaker.call(
                 self.client.get,
-                self._hot_memories_key(user_id),
+                key,
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         if cached_value is None:
@@ -141,26 +167,37 @@ class CacheService:
         if ttl <= 0:
             raise ValueError("TTL must be greater than zero.")
         try:
+            key = self._hot_memories_key(user_id)
+            if self._generation_invalidation:
+                key = self._generation_hot_memories_key(
+                    user_id,
+                    await self._get_generation(user_id),
+                )
             await self.breaker.call(
                 self.client.set,
-                self._hot_memories_key(user_id),
+                key,
                 json.dumps(memories, default=str),
                 ex=ttl,
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def get_retrieval_results(self, user_id: str, cache_context: str) -> list[dict[str, Any]] | None:
         try:
+            key = self._retrieval_results_key(user_id, cache_context)
+            if self._generation_invalidation:
+                key = self._generation_retrieval_key(
+                    user_id,
+                    await self._get_generation(user_id),
+                    cache_context,
+                )
             cached_value = await self.breaker.call(
                 self.client.get,
-                self._retrieval_results_key(user_id, cache_context),
+                key,
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         if cached_value is None:
@@ -181,19 +218,32 @@ class CacheService:
         if ttl <= 0:
             raise ValueError("TTL must be greater than zero.")
         try:
+            key = self._retrieval_results_key(user_id, cache_context)
+            if self._generation_invalidation:
+                key = self._generation_retrieval_key(
+                    user_id,
+                    await self._get_generation(user_id),
+                    cache_context,
+                )
             await self.breaker.call(
                 self.client.set,
-                self._retrieval_results_key(user_id, cache_context),
+                key,
                 json.dumps(memories, default=str),
                 ex=ttl,
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def invalidate_user_cache(self, user_id: str) -> None:
         try:
+            if self._generation_invalidation:
+                await self.breaker.call(
+                    self.client.incr,
+                    self._generation_key(user_id),
+                    fallback=lambda: on_redis_open(None),
+                )
+                return
             await self.breaker.call(
                 self.client.delete,
                 self._hot_memories_key(user_id),
@@ -202,14 +252,17 @@ class CacheService:
             retrieval_keys: list[str] = []
             async for key in self.client.scan_iter(f"retrieve:{user_id}:*"):
                 retrieval_keys.append(str(key))
-            if retrieval_keys:
+            hot_tier_keys: list[str] = []
+            async for key in self.client.scan_iter(self._hot_tier_memory_pattern(user_id)):
+                hot_tier_keys.append(str(key))
+            scoped_keys = [*retrieval_keys, *hot_tier_keys]
+            if scoped_keys:
                 await self.breaker.call(
                     self.client.delete,
-                    *retrieval_keys,
+                    *scoped_keys,
                     fallback=lambda: on_redis_open(None),
                 )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
     async def set_hot_tier_memory(
@@ -222,6 +275,22 @@ class CacheService:
         if ttl <= 0:
             raise ValueError("TTL must be greater than zero.")
         try:
+            if self._generation_invalidation:
+                generation = await self._get_generation(proxy_user_id)
+                await self.breaker.call(
+                    self.client.hset,
+                    self._generation_hot_tier_key(proxy_user_id, generation),
+                    memory_id,
+                    json.dumps(memory, default=str),
+                    fallback=lambda: on_redis_open(None),
+                )
+                await self.breaker.call(
+                    self.client.expire,
+                    self._generation_hot_tier_key(proxy_user_id, generation),
+                    ttl,
+                    fallback=lambda: on_redis_open(None),
+                )
+                return
             await self.breaker.call(
                 self.client.set,
                 self._hot_tier_memory_key(proxy_user_id, memory_id),
@@ -230,24 +299,31 @@ class CacheService:
                 fallback=lambda: on_redis_open(None),
             )
         except Exception:
-            self._mark_redis_unavailable()
             return None
 
     async def get_hot_tier_memories(self, proxy_user_id: str) -> list[dict[str, Any]]:
         memories: list[dict[str, Any]] = []
         try:
-            keys = []
-            async for key in self.client.scan_iter(self._hot_tier_memory_pattern(proxy_user_id)):
-                keys.append(key)
-            if not keys:
-                return []
-            raw_values = await self.breaker.call(
-                self.client.mget,
-                keys,
-                fallback=lambda: on_redis_open([]),
-            )
+            if self._generation_invalidation:
+                generation = await self._get_generation(proxy_user_id)
+                raw_values = await self.breaker.call(
+                    self.client.hvals,
+                    self._generation_hot_tier_key(proxy_user_id, generation),
+                    fallback=lambda: on_redis_open([]),
+                )
+                keys = []
+            else:
+                keys = []
+                async for key in self.client.scan_iter(self._hot_tier_memory_pattern(proxy_user_id)):
+                    keys.append(key)
+                if not keys:
+                    return []
+                raw_values = await self.breaker.call(
+                    self.client.mget,
+                    keys,
+                    fallback=lambda: on_redis_open([]),
+                )
         except Exception:
-            self._mark_redis_unavailable()
             return []
 
         for raw_value in raw_values or []:
@@ -277,7 +353,6 @@ class CacheService:
                 fallback=lambda: on_redis_open(None),
             )
         except Exception:
-            self._mark_redis_unavailable()
             return None
 
     async def get_lifecycle_reports(self) -> list[dict[str, Any]]:
@@ -288,7 +363,6 @@ class CacheService:
                 fallback=lambda: on_redis_open([]),
             )
         except Exception:
-            self._mark_redis_unavailable()
             return []
 
         reports: list[dict[str, Any]] = []
@@ -323,7 +397,6 @@ class CacheService:
                 )
             return new_count
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return 0
 
     async def increment_provider_usage(self, provider: str, hour_bucket: str, ttl: int = 7200) -> int:
@@ -344,7 +417,6 @@ class CacheService:
             )
             return new_count
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return 0
 
     async def get_provider_usage(self, hour_bucket: str, providers: list[str]) -> dict[str, int]:
@@ -356,7 +428,6 @@ class CacheService:
                 fallback=lambda: on_redis_open([0 for _ in keys]),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return {provider: 0 for provider in providers}
 
         return {
@@ -374,7 +445,6 @@ class CacheService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return 0
 
         return int(raw_value) if raw_value is not None else 0
@@ -419,7 +489,6 @@ class CacheService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
 
         if cached_value is None:
@@ -445,5 +514,4 @@ class CacheService:
                 fallback=lambda: on_redis_open(None),
             )
         except REDIS_FAILURES:
-            self._mark_redis_unavailable()
             return None
