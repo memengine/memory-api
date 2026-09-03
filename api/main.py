@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi import Request
@@ -59,6 +61,35 @@ def _cors_allowed_origins() -> list[str]:
     return ["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"]
 
 
+def _scrub_sentry_event(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any]:
+    """Keep operational error telemetry from exporting customer data.
+
+    MemoryOS may process conversations and identifiers. Error monitoring should
+    receive only the minimum diagnostic shape, never request payloads, auth
+    data, user details, breadcrumbs, arbitrary extras, or exception text that
+    could echo a provider/request payload.
+    """
+    scrubbed = deepcopy(event)
+    scrubbed.pop("user", None)
+    scrubbed.pop("breadcrumbs", None)
+    scrubbed.pop("extra", None)
+
+    request = scrubbed.get("request")
+    if isinstance(request, dict):
+        method = request.get("method")
+        scrubbed["request"] = {"method": method} if method else {}
+
+    exception = scrubbed.get("exception")
+    if isinstance(exception, dict):
+        values = exception.get("values")
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, dict):
+                    value.pop("value", None)
+
+    return scrubbed
+
+
 def _dependency_status(*, breaker_state: str, service_available: bool = True) -> str:
     if not service_available:
         return "unavailable"
@@ -82,7 +113,10 @@ def _configure_sentry() -> None:
         dsn=sentry_dsn,
         environment=settings.app_env,
         release=settings.app_version,
-        send_default_pii=True,
+        # Error monitoring must not receive request or user PII by default.
+        # A deployment may opt in only after its privacy review explicitly permits it.
+        send_default_pii=settings.sentry_send_default_pii,
+        before_send=_scrub_sentry_event,
         integrations=[FastApiIntegration()],
     )
 

@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+.env.*
+!.env.example
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -28,5 +30,8 @@ build/
 *.tfvars
 *.tfvars.json
 *.tfplan
+*.tfstate
+*.tfstate.*
+infrastructure/terraform/backend*.hcl
 edge-tmp/
 tmp/

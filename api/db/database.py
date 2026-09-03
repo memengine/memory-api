@@ -21,6 +21,7 @@ from api.infra.fallbacks import on_postgres_open
 from api.infra.postgres_benchmark import instrument_engine
 from api.infra.postgres_benchmark import postgres_benchmark_enabled
 from api.infra.postgres_benchmark import session_factory_owner
+from api.infra.transport_security import validate_database_transport
 from api.settings import get_settings
 
 
@@ -31,7 +32,7 @@ def get_database_url() -> str:
     database_url = os.getenv("DATABASE_URL") or get_settings().database_url
     if not database_url:
         raise RuntimeError("DATABASE_URL is required.")
-    return database_url
+    return validate_database_transport(database_url, app_env=get_settings().app_env)
 
 
 def get_sync_database_url(database_url: str | None = None) -> str:
@@ -135,7 +136,11 @@ class CircuitBreakerSyncSession(Session):
 
 
 def build_async_engine(database_url: str | None = None):
-    resolved_url = database_url or get_database_url()
+    resolved_url = (
+        validate_database_transport(database_url, app_env=get_settings().app_env)
+        if database_url is not None
+        else get_database_url()
+    )
     if resolved_url.startswith("sqlite"):
         return create_async_engine(resolved_url, pool_pre_ping=True)
     async_engine = create_async_engine(
@@ -174,6 +179,11 @@ async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]
 
 
 def build_sync_session_factory(database_url: str | None = None) -> sessionmaker[Session]:
-    sync_engine = create_engine(get_sync_database_url(database_url), pool_pre_ping=True)
+    resolved_url = (
+        validate_database_transport(database_url, app_env=get_settings().app_env)
+        if database_url is not None
+        else get_database_url()
+    )
+    sync_engine = create_engine(get_sync_database_url(resolved_url), pool_pre_ping=True)
     instrument_engine(sync_engine, kind="sync", owner=session_factory_owner())
     return sessionmaker(bind=sync_engine, expire_on_commit=False, class_=CircuitBreakerSyncSession)

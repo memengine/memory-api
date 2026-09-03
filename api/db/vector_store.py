@@ -14,6 +14,7 @@ from qdrant_client.http import models as qmodels
 from api.infra.circuit_breaker import CircuitOpenError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_qdrant_open
+from api.infra.transport_security import validate_qdrant_transport
 from api.settings import get_settings
 
 
@@ -21,7 +22,7 @@ def get_qdrant_url(url: str | None = None) -> str:
     resolved_url = url or os.getenv("QDRANT_URL") or get_settings().qdrant_url
     if not resolved_url:
         raise RuntimeError("QDRANT_URL is required.")
-    return resolved_url
+    return validate_qdrant_transport(resolved_url, app_env=get_settings().app_env)
 
 
 class QdrantService:

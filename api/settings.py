@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("APP_VERSION", "API_VERSION"),
     )
     sentry_dsn: str = Field(default="", alias="SENTRY_DSN")
+    sentry_send_default_pii: bool = Field(default=False, alias="SENTRY_SEND_DEFAULT_PII")
     database_url: str = Field(default="", alias="DATABASE_URL")
     redis_url: str = Field(default="", alias="REDIS_URL")
     qdrant_url: str = Field(default="", alias="QDRANT_URL")
@@ -55,6 +56,26 @@ class Settings(BaseSettings):
     oauth_credential_encryption_key: str = Field(
         default="",
         alias="OAUTH_CREDENTIAL_ENCRYPTION_KEY",
+    )
+    data_encryption_provider: str = Field(
+        default="disabled",
+        alias="DATA_ENCRYPTION_PROVIDER",
+    )
+    data_encryption_kms_key_id: str = Field(
+        default="",
+        alias="DATA_ENCRYPTION_KMS_KEY_ID",
+    )
+    data_encryption_write_mode: str = Field(
+        default="disabled",
+        alias="DATA_ENCRYPTION_WRITE_MODE",
+    )
+    vector_payload_include_content: bool = Field(
+        default=True,
+        alias="VECTOR_PAYLOAD_INCLUDE_CONTENT",
+    )
+    retrieval_redis_cache_write_enabled: bool = Field(
+        default=True,
+        alias="RETRIEVAL_REDIS_CACHE_WRITE_ENABLED",
     )
 
 

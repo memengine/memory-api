@@ -18,6 +18,18 @@ def test_celery_app_has_expected_broker_and_imports(monkeypatch) -> None:
     assert tuple(app.conf.imports) == CELERY_IMPORTS
 
 
+def test_celery_app_preserves_verified_redis_tls_urls(monkeypatch) -> None:
+    broker_url = "rediss://:token@redis.internal:6379/0?ssl_cert_reqs=required"
+    result_backend = "rediss://:token@redis.internal:6379/1?ssl_cert_reqs=required"
+    monkeypatch.setenv("CELERY_BROKER_URL", broker_url)
+    monkeypatch.setenv("CELERY_RESULT_BACKEND", result_backend)
+
+    app = create_celery_app()
+
+    assert app.conf.broker_url == broker_url
+    assert app.conf.result_backend == result_backend
+
+
 def test_celery_app_registers_decay_schedule() -> None:
     app = create_celery_app()
 
