@@ -8,6 +8,7 @@ from typing import Any
 from api.db.models import Memory
 from api.db.models import VectorSyncOperation
 from api.db.models import VectorSyncOutbox
+from api.settings import get_settings
 
 
 def build_vector_payload(
@@ -22,7 +23,6 @@ def build_vector_payload(
     payload: dict[str, Any] = {
         "memory_id": str(memory.id),
         "agent_id": str(memory.agent_id) if memory.agent_id else None,
-        "content": memory.content,
         "category": memory.category.value if hasattr(memory.category, "value") else str(memory.category),
         "importance_score": float(memory.importance_score),
         "confidence_score": float(getattr(memory, "confidence_score", 1.0) or 1.0),
@@ -56,6 +56,8 @@ def build_vector_payload(
             or getattr(getattr(memory, "embedding_model", None), "qdrant_collection", None)
         ),
     }
+    if get_settings().vector_payload_include_content:
+        payload["content"] = memory.content
     if tenant_id and proxy_user_id:
         payload["tenant_id"] = str(tenant_id)
         payload["proxy_user_id"] = str(proxy_user_id)

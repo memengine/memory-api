@@ -31,6 +31,7 @@ MEMORY_COUNT_CACHE_TTL_SECONDS = float(os.getenv("RETRIEVAL_MEMORY_COUNT_CACHE_T
 HOT_TIER_CACHE_TTL_SECONDS = float(os.getenv("RETRIEVAL_HOT_TIER_CACHE_TTL_SECONDS", "2.0"))
 REDIS_CACHE_READ_TIMEOUT_SECONDS = float(os.getenv("RETRIEVAL_CACHE_READ_TIMEOUT_SECONDS", "0.05"))
 REDIS_CACHE_READ_ENABLED = os.getenv("RETRIEVAL_REDIS_CACHE_READ_ENABLED", "true").lower() in {"1", "true", "yes"}
+REDIS_CACHE_WRITE_ENABLED = os.getenv("RETRIEVAL_REDIS_CACHE_WRITE_ENABLED", "true").lower() in {"1", "true", "yes"}
 OVERFETCH_MULTIPLIER = max(1, int(os.getenv("RETRIEVAL_OVERFETCH_MULTIPLIER", "3")))
 MIN_SEMANTIC_SCORE = min(1.0, max(0.0, float(os.getenv("RETRIEVAL_MIN_SEMANTIC_SCORE", "0.315"))))
 COLD_START_THRESHOLD = 5
@@ -528,6 +529,8 @@ class RetrieverService:
         cache_context: str,
         payload: list[dict[str, Any]],
     ) -> None:
+        if not REDIS_CACHE_WRITE_ENABLED:
+            return
         setter = getattr(self.cache_service, "set_retrieval_results", None)
         if callable(setter):
             value = setter(user_id, cache_context, payload, ttl=CACHE_TTL_SECONDS)
