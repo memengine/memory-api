@@ -1,0 +1,9 @@
+# Copy to backend.staging.hcl. It is ignored by Git.
+# The shared state bucket is encrypted; the state key isolates staging from
+# production. Do not use the production state key for this environment.
+bucket       = "memoryos-terraform-state-909208902203-ap-south-1"
+key          = "memoryos/staging/terraform.tfstate"
+region       = "ap-south-1"
+encrypt      = true
+kms_key_id   = "replace-with-state-bucket-kms-key-arn"
+use_lockfile = true

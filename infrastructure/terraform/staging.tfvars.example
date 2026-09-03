@@ -1,0 +1,80 @@
+# Copy to staging.tfvars. It is ignored by Git, and must be passed explicitly
+# with -var-file=staging.tfvars. Do not use production.auto.tfvars for staging.
+
+aws_region   = "ap-south-1"
+project_name = "memoryos-staging"
+environment  = "staging"
+
+# Must be an ACM certificate in ap-south-1 that covers the staging API domain.
+acm_certificate_arn = "arn:aws:acm:ap-south-1:909208902203:certificate/replace-with-staging-certificate"
+
+# Network ranges must not overlap the production MemoryOS VPC or connected
+# networks. Confirm this range is unused before applying.
+vpc_cidr             = "10.31.0.0/16"
+public_subnet_cidrs  = ["10.31.1.0/24", "10.31.2.0/24"]
+private_subnet_cidrs = ["10.31.11.0/24", "10.31.12.0/24"]
+
+app_env             = "staging"
+app_version         = "bootstrap"
+ecr_repository_name = "memoryos-staging-api"
+# Push this image tag to the staging ECR repository before creating ECS
+# services. A placeholder tag would leave services unable to start.
+container_image_tag = "replace-with-pushed-staging-image"
+
+cors_allowed_origins = "https://app-staging.memoryo.dev,https://consent-staging.memoryo.dev,https://operator-staging.memoryo.dev"
+consent_app_base_url = "https://consent-staging.memoryo.dev"
+billing_upgrade_url  = "https://memoryo.dev/pricing"
+clerk_jwt_issuer     = "https://replace-with-staging-clerk-issuer"
+
+# Do not inherit production mail delivery settings through production.auto.tfvars.
+smtp_host  = ""
+smtp_port  = 587
+smtp_user  = ""
+smtp_from  = ""
+email_from = ""
+
+# Keep a minimal, controlled non-production footprint.
+ecs_cpu              = 512
+ecs_memory           = 1024
+ecs_api_desired_count = 1
+ecs_api_min_capacity  = 1
+ecs_max_capacity      = 2
+redis_node_type       = "cache.t4g.micro"
+# Require encrypted, authenticated Redis for staging. Do not put the token in
+# this ignored file; set it only as TF_VAR_redis_auth_token before plan/apply.
+redis_transit_encryption_enabled = true
+redis_auth_enabled               = true
+redis_snapshot_retention_limit   = 7
+redis_snapshot_window            = "05:00-06:00"
+
+celery_scale_concurrency       = 1
+celery_growth_concurrency      = 1
+celery_starter_concurrency     = 1
+celery_background_concurrency  = 1
+celery_scale_desired_count      = 1
+celery_growth_desired_count     = 1
+celery_starter_desired_count    = 1
+celery_background_desired_count = 1
+celery_scale_max_capacity       = 2
+
+# Maintain separate staging provider and database targets. Their values go in
+# the following separate Secrets Manager records, never in this file.
+openai_api_key_secret_name                  = "memoryos/staging/OPENAI_API_KEY"
+secret_key_secret_name                      = "memoryos/staging/SECRET_KEY"
+admin_secret_secret_name                    = "memoryos/staging/ADMIN_SECRET"
+uui_session_secret_name                     = "memoryos/staging/UUI_SESSION_SECRET"
+oauth_credential_encryption_key_secret_name = "memoryos/staging/OAUTH_CREDENTIAL_ENCRYPTION_KEY"
+qdrant_api_key_secret_name                  = "memoryos/staging/QDRANT_API_KEY"
+qdrant_url_secret_name                      = "memoryos/staging/QDRANT_URL"
+clerk_secret_key_secret_name                = "memoryos/staging/CLERK_SECRET_KEY"
+clerk_webhook_secret_secret_name            = "memoryos/staging/CLERK_WEBHOOK_SECRET"
+smtp_pass_secret_name                       = "memoryos/staging/SMTP_PASS"
+sentry_dsn_secret_name                      = "memoryos/staging/SENTRY_DSN"
+database_url_secret_name                    = "memoryos/staging/DATABASE_URL"
+redis_url_secret_name                       = "memoryos/staging/REDIS_URL"
+celery_broker_url_secret_name               = "memoryos/staging/CELERY_BROKER_URL"
+celery_result_backend_secret_name           = "memoryos/staging/CELERY_RESULT_BACKEND"
+
+# Do not enable envelope encryption during initial infrastructure validation.
+data_encryption_provider   = "disabled"
+data_encryption_write_mode = "disabled"

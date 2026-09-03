@@ -1,0 +1,10 @@
+# Copy to backend.hcl after bootstrap-state is applied. backend.hcl is ignored
+# so each environment can use its own state location without Git changes.
+bucket       = "replace-with-bootstrap-output"
+# Use production only when migrating the existing production-named stack.
+# A separately created staging stack must use its own key.
+key          = "memoryos/production/terraform.tfstate"
+region       = "ap-south-1"
+encrypt      = true
+kms_key_id   = "replace-with-bootstrap-kms-key-arn"
+use_lockfile = true

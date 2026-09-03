@@ -1,0 +1,82 @@
+aws_region          = "ap-south-1"
+project_name        = "memoryos"
+environment         = "production"
+acm_certificate_arn = "arn:aws:acm:ap-south-1:123456789012:certificate/replace-me"
+
+app_env             = "production"
+app_version         = "bootstrap"
+container_image_tag = "latest"
+
+cors_allowed_origins = "https://app.memoryo.dev,https://consent.memoryo.dev,https://operator.memoryo.dev,https://memoryo.dev"
+consent_app_base_url = "https://consent.memoryo.dev"
+billing_upgrade_url  = "https://memoryo.dev/pricing"
+
+db_pool_size            = 20
+db_max_overflow         = 30
+db_pool_timeout_seconds = 30
+
+redis_node_type = "cache.t4g.micro"
+# Production remains unchanged until a separately reviewed rollout. When TLS
+# and AUTH are enabled, supply the token through TF_VAR_redis_auth_token only.
+redis_transit_encryption_enabled = false
+redis_auth_enabled               = false
+redis_snapshot_retention_limit   = 0
+
+celery_scale_concurrency      = 4
+celery_growth_concurrency     = 3
+celery_starter_concurrency    = 3
+celery_background_concurrency = 2
+celery_log_level              = "info"
+
+qdrant_timeout_seconds = 10
+qdrant_prefer_grpc     = false
+qdrant_async_pool_size = 100
+
+llm_provider_order     = "openai"
+openai_model           = "gpt-4o-mini"
+openai_timeout_seconds = 30
+extraction_model       = "gpt-4o-mini"
+
+embedding_provider   = "openai"
+embedding_model      = "text-embedding-3-small"
+embedding_model_id   = "openai-text-embedding-3-small-v1"
+embedding_dimensions = 1536
+
+extraction_payload_retention_days        = 30
+retrieval_l1_cache_ttl_seconds           = 5.0
+retrieval_model_id_cache_ttl_seconds     = 60.0
+retrieval_memory_count_cache_ttl_seconds = 30.0
+retrieval_hot_tier_cache_ttl_seconds     = 2.0
+retrieval_cache_read_timeout_seconds     = 0.05
+retrieval_redis_cache_read_enabled       = true
+retrieval_overfetch_multiplier           = 3
+
+clerk_jwt_issuer = "https://your-clerk-instance.clerk.accounts.dev"
+
+smtp_host  = ""
+smtp_port  = 587
+smtp_user  = ""
+smtp_from  = ""
+email_from = ""
+
+tenant_rate_limit_per_minute = 120
+
+# Keep disabled until the application migration and staging verification are
+# complete. The KMS key ARN is injected by Terraform; it is not a secret.
+data_encryption_provider   = "disabled"
+data_encryption_write_mode = "disabled"
+
+# Secret values are not stored here. Terraform reads these names from AWS Secrets Manager.
+# Override names only if you store secrets under different names.
+# openai_api_key_secret_name                 = "memoryos/OPENAI_API_KEY"
+# secret_key_secret_name                     = "memoryos/SECRET_KEY"
+# admin_secret_secret_name                   = "memoryos/ADMIN_SECRET"
+# uui_session_secret_name                    = "memoryos/UUI_SESSION_SECRET"
+# oauth_credential_encryption_key_secret_name = "memoryos/OAUTH_CREDENTIAL_ENCRYPTION_KEY"
+# qdrant_api_key_secret_name                 = "memoryos/QDRANT_API_KEY"
+# qdrant_url_secret_name                     = "memoryos/QDRANT_URL"
+# clerk_secret_key_secret_name               = "memoryos/CLERK_SECRET_KEY"
+# clerk_webhook_secret_secret_name           = "memoryos/CLERK_WEBHOOK_SECRET"
+# smtp_pass_secret_name                      = "memoryos/SMTP_PASS"
+# sentry_dsn_secret_name                     = "memoryos/SENTRY_DSN"
+# database_url_secret_name                   = "memoryos/DATABASE_URL"
