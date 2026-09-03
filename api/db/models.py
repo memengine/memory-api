@@ -752,6 +752,9 @@ class Memory(Base):
         nullable=True,
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Populated during the tenant-envelope encryption rollout. The plaintext
+    # column remains authoritative until every read/write path has migrated.
+    content_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     category: Mapped[MemoryCategory] = mapped_column(
         Enum(MemoryCategory, name="memory_category_enum"),
         nullable=False,
@@ -1104,6 +1107,7 @@ class MemoryVersion(Base):
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     importance_score: Mapped[float] = mapped_column(Float, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
@@ -1914,6 +1918,9 @@ class UniversalMemory(Base):
         server_default=text("'passport_agent'"),
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable during the staged dual-write rollout. Plaintext remains the
+    # compatibility read path until a separately approved backfill/read cutover.
+    content_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     importance_score: Mapped[float] = mapped_column(Float, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
@@ -2135,6 +2142,7 @@ class UniversalMemoryVersion(Base):
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     importance_score: Mapped[float] = mapped_column(Float, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
@@ -2764,9 +2772,11 @@ class ExtractionJob(Base):
         nullable=False,
         server_default=EMPTY_JSONB_OBJECT,
     )
+    payload_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     result: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
     )
+    result_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

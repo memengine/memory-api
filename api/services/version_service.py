@@ -16,6 +16,7 @@ from api.db.models import MemoryVersion
 from api.db.models import ProxyUser
 from api.db.models import UniversalMemory
 from api.db.models import UniversalMemoryVersion
+from api.infra.protected_storage import encrypt_universal_text_for_dual_write
 
 
 LOGGER = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ class VersionService:
             memory_id=memory.id,
             version_number=self._next_version_number(memory.id),
             content=memory.content,
+            content_envelope=memory.content_envelope,
             category=self._category_value(memory.category),
             importance_score=float(memory.importance_score),
             confidence=float(memory.confidence_score),
@@ -92,6 +94,7 @@ class VersionService:
             memory_id=memory.id,
             version_number=await self._anext_version_number(memory.id),
             content=memory.content,
+            content_envelope=memory.content_envelope,
             category=self._category_value(memory.category),
             importance_score=float(memory.importance_score),
             confidence=float(memory.confidence_score),
@@ -164,11 +167,18 @@ class VersionService:
     ) -> UniversalMemoryVersion:
         self._validate_universal_change(change_type=change_type, changed_by=changed_by)
         session = db_session or self.session
+        version_id = uuid.uuid4()
         version = UniversalMemoryVersion(
-            id=uuid.uuid4(),
+            id=version_id,
             universal_memory_id=memory.id,
             version_number=await self._anext_universal_version_number(memory.id, db_session=session),
             content=memory.content,
+            content_envelope=encrypt_universal_text_for_dual_write(
+                user_uui_id=str(memory.user_uui_id),
+                record_type="universal_memory_version",
+                record_id=str(version_id),
+                value=memory.content,
+            ),
             category=self._category_value(memory.category),
             importance_score=float(memory.importance_score),
             confidence=float(memory.confidence),
@@ -191,11 +201,18 @@ class VersionService:
     ) -> UniversalMemoryVersion:
         self._validate_universal_change(change_type=change_type, changed_by=changed_by)
         session = db_session or self.session
+        version_id = uuid.uuid4()
         version = UniversalMemoryVersion(
-            id=uuid.uuid4(),
+            id=version_id,
             universal_memory_id=memory.id,
             version_number=self._next_universal_version_number(memory.id, db_session=session),
             content=memory.content,
+            content_envelope=encrypt_universal_text_for_dual_write(
+                user_uui_id=str(memory.user_uui_id),
+                record_type="universal_memory_version",
+                record_id=str(version_id),
+                value=memory.content,
+            ),
             category=self._category_value(memory.category),
             importance_score=float(memory.importance_score),
             confidence=float(memory.confidence),

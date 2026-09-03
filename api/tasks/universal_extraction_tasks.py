@@ -20,6 +20,7 @@ from api.db.models import MemoryCategory
 from api.db.models import PermissionGrant
 from api.db.models import UniversalMemory
 from api.db.models import UniversalUser
+from api.infra.protected_storage import encrypt_universal_text_for_dual_write
 from api.services.embedding_service import EmbeddingService
 from api.services.extractor import ExtractionService
 from api.services.importance_scorer import ImportanceScorer
@@ -178,6 +179,12 @@ def run_universal_extraction_pipeline(
                 source_agent_id=uuid.UUID(agent_id),
                 source_type="passport_agent",
                 content=extracted_memory.content,
+                content_envelope=encrypt_universal_text_for_dual_write(
+                    user_uui_id=str(universal_user.id),
+                    record_type="universal_memory",
+                    record_id=str(memory_id),
+                    value=extracted_memory.content,
+                ),
                 category=MemoryCategory(extracted_memory.category),
                 importance_score=float(extracted_memory.importance_score),
                 confidence=float(extracted_memory.confidence),

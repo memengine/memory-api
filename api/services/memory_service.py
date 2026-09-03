@@ -39,6 +39,8 @@ from api.services.common import resolve_authorized_user
 from api.services.quota_manager import QuotaManager
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
+from api.infra.protected_storage import encrypt_json_for_dual_write
+from api.infra.protected_storage import encrypt_text_for_dual_write
 from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.version_service import VersionService
 from api.tasks.queue_router import QueueRouter
@@ -357,6 +359,13 @@ class MemoryService:
             next_embedding = await self._embed_content(next_content)
         if content is not None:
             memory.content = content
+            if tenant_id is not None:
+                memory.content_envelope = encrypt_text_for_dual_write(
+                    tenant_id=str(tenant_id),
+                    record_type="memory-content",
+                    record_id=str(memory.id),
+                    value=content,
+                )
         if importance_score is not None:
             memory.importance_score = importance_score
         if is_archived is not None:
@@ -612,6 +621,12 @@ class MemoryService:
                 max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
                 queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
                 payload=job,
+                payload_envelope=encrypt_json_for_dual_write(
+                    tenant_id=str(tenant_id),
+                    record_type="extraction-job-payload",
+                    record_id=str(job["job_id"]),
+                    value=job,
+                ),
                 result={},
                 source_event_id=source_event.id if source_event is not None else None,
                 raw_payload_expires_at=(

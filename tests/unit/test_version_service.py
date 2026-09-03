@@ -112,17 +112,21 @@ def make_version(memory: Memory, number: int, change_type: str = "created") -> M
 
 def test_record_version_uses_next_version_number_and_current_memory_state() -> None:
     memory = make_memory()
+    memory.content_envelope = {"version": 1, "ciphertext": "first"}
     session = FakeSyncSession()
     first = VersionService(session).record_version(memory, "created", "Extracted from conversation")
 
     memory.content = "User prefers short Python examples"
+    memory.content_envelope = {"version": 1, "ciphertext": "second"}
     memory.importance_score = 9.0
     second = VersionService(session).record_version(memory, "manual_edit", "Edited by tenant admin", "user")
 
     assert first.version_number == 1
     assert first.content == "User prefers concise technical explanations"
+    assert first.content_envelope == {"version": 1, "ciphertext": "first"}
     assert second.version_number == 2
     assert second.content == "User prefers short Python examples"
+    assert second.content_envelope == {"version": 1, "ciphertext": "second"}
     assert second.importance_score == 9.0
     assert session.added == [first, second]
 

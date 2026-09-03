@@ -30,6 +30,7 @@ from api.db.models import Conversation
 from api.db.models import ConversationProcessingStatus
 from api.db.models import DeadLetterJob
 from api.db.models import ExtractionJob
+from api.infra.protected_storage import encrypt_json_for_dual_write
 from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
 from api.db.models import MemorySourceEvent
@@ -240,6 +241,12 @@ def _set_db_job_completed(*, job_id: str, payload: dict[str, Any]) -> None:
         job.status = ExtractionJobStatus.completed
         job.memories_created = int(payload.get("memories_created", 0) or 0)
         job.result = payload
+        job.result_envelope = encrypt_json_for_dual_write(
+            tenant_id=str(job.tenant_id),
+            record_type="extraction-job-result",
+            record_id=str(job.id),
+            value=payload,
+        )
         job.completed_at = datetime.now(UTC)
         job.stale_after = None
         job.updated_at = datetime.now(UTC)

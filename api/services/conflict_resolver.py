@@ -48,6 +48,7 @@ from api.services.temporal_validity import temporal_validity_from_provenance
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_archive
 from api.services.vector_outbox import enqueue_vector_delete
+from api.infra.protected_storage import encrypt_text_for_dual_write
 from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.version_service import VersionService
 from api.settings import get_settings
@@ -1547,6 +1548,12 @@ class ConflictResolver:
             ),
             agent_id=uuid.UUID(agent_id) if agent_id and self._is_uuid(agent_id) else None,
             content=extracted_memory.content,
+            content_envelope=encrypt_text_for_dual_write(
+                tenant_id=tenant_id,
+                record_type="memory-content",
+                record_id=str(memory_id),
+                value=extracted_memory.content,
+            ),
             category=MemoryCategory(extracted_memory.category),
             importance_score=extracted_memory.importance_score,
             confidence_score=extracted_memory.confidence,
