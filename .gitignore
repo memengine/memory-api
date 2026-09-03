@@ -50,16 +50,21 @@ node_modules/
 secrets.*
 !api/infra/secrets.py
 *.secrets.*
+!infrastructure/terraform/secrets.tf
 service-account*.json
 
 # Terraform state and local overrides
 .terraform/
-terraform.tfstate
-terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
 *.tfplan
 *.tfvars
 *.tfvars.json
-infrastructure/
+infrastructure/terraform/backend.hcl
+infrastructure/terraform/backend.*.hcl
+# Terraform source is version-controlled. Keep only generated plans out; the
+# existing tfplan/tfplan2 files do not use the conventional .tfplan suffix.
+infrastructure/terraform/tfplan*
 
 # Misc local runtime artifacts
 edge-tmp/
