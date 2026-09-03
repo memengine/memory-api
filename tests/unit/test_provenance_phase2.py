@@ -149,6 +149,36 @@ def test_retention_redacts_messages_but_keeps_job_context() -> None:
     }
 
 
+def test_retention_preserves_safe_evidence_identifiers_but_redacts_free_text() -> None:
+    payload = {
+        "job_id": "job-1",
+        "messages": [{"role": "user", "content": "private text"}],
+        "metadata": {"note": "also private"},
+        "source": {
+            "service": "billing-service",
+            "event_id": "invoice-42",
+            "scope": {"free_text": "remove this"},
+            "evidence": [
+                {"source_type": "invoice", "reference": "INV-42", "content_hash": "a" * 64},
+                {"source_type": "note", "reference": "customer said a secret thing"},
+            ],
+        },
+        "error": "private provider response",
+    }
+    assert redact_job_payload(payload) == {
+        "job_id": "job-1",
+        "source": {
+            "service": "billing-service",
+            "event_id": "invoice-42",
+            "evidence": [
+                {"source_type": "invoice", "reference": "INV-42", "content_hash": "a" * 64},
+                {"source_type": "note", "reference_redacted": True},
+            ],
+        },
+        "messages_redacted": True,
+    }
+
+
 def test_authority_rules_reject_out_of_range_priority() -> None:
     try:
         AuthorityRules(categories={"fact": 101})
