@@ -3,26 +3,19 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+import sentry_sdk
 from celery import shared_task
 from celery.signals import worker_process_shutdown
 from qdrant_client.http import models as qmodels
-import sentry_sdk
-from sqlalchemy import Select
-from sqlalchemy import select
-from sqlalchemy import update
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session, sessionmaker
 
 from api.db.database import build_sync_session_factory
-from api.db.models import VectorSyncOperation
-from api.db.models import VectorSyncOutbox
-from api.db.models import VectorSyncStatus
+from api.db.models import VectorSyncOperation, VectorSyncOutbox, VectorSyncStatus
 from api.db.vector_store import QdrantService
-
 
 LOGGER = logging.getLogger(__name__)
 PROCESS_OUTBOX_TASK_NAME = "api.tasks.vector_sync_tasks.process_outbox"
@@ -264,7 +257,8 @@ def _mark_rows_failed_or_pending(session: Session, rows: list[VectorSyncOutbox],
     for row in rows:
         refreshed = session.get(VectorSyncOutbox, row.id)
         attempts = int(getattr(refreshed, "attempts", row.attempts) or 0)
-        if attempts >= 3:
+        privacy_delete = bool((getattr(refreshed, "payload", None) or {}).get("privacy_delete"))
+        if attempts >= 3 and not privacy_delete:
             refreshed.status = VectorSyncStatus.failed
             failed_count += 1
             sentry_sdk.capture_message(

@@ -25,9 +25,9 @@ from api.db.models import UniversalMemory
 from api.db.models import UniversalUser
 from api.db.vector_store import QdrantService
 from api.errors import APIError
-from api.infra.fallbacks import ServiceUnavailableError
 from api.infra.fallbacks import on_redis_open
 from api.services.email_service import EmailService
+from api.services.vector_outbox import enqueue_vector_delete
 
 
 UUI_CACHE_TTL_SECONDS: Final[int] = 3600
@@ -351,25 +351,26 @@ class UUIService:
         if user is None:
             return False, 0
 
-        memories_removed_result = await self.session.execute(
-            select(func.count())
-            .select_from(UniversalMemory)
-            .where(UniversalMemory.user_uui_id == user.id)
+        memory_ids_result = await self.session.execute(
+            select(UniversalMemory.id).where(UniversalMemory.user_uui_id == user.id)
         )
-        memories_removed = int(memories_removed_result.scalar_one() or 0)
+        memory_ids = list(memory_ids_result.scalars().all())
+        memories_removed = len(memory_ids)
 
         grant_result = await self.session.execute(
             select(PermissionGrant.agent_id).where(PermissionGrant.user_uui_id == user.id)
         )
         agent_ids = [str(agent_id) for agent_id in grant_result.scalars().all()]
 
-        if self.qdrant_service is None:
-            raise ServiceUnavailableError("qdrant")
-
-        self.qdrant_service.delete_universal_user_memories(
-            str(user.id),
-            collection_name=UNIVERSAL_COLLECTION_NAME,
-        )
+        for memory_id in memory_ids:
+            enqueue_vector_delete(
+                self.session,
+                memory_id=memory_id,
+                payload={
+                    "qdrant_collection": UNIVERSAL_COLLECTION_NAME,
+                    "privacy_delete": True,
+                },
+            )
 
         await self.session.delete(user)
         await self.session.commit()

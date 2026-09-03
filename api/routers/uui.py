@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -46,10 +45,9 @@ from api.db.models import UniversalUser
 from api.db.models import VerifiedOrgConnection
 from api.dependencies import DbSession
 from api.dependencies import get_cache_service
-from api.dependencies import get_qdrant_service
 from api.db.cache import CacheService
-from api.db.vector_store import QdrantService
 from api.errors import APIError
+from api.infra.protected_storage import encrypt_universal_text_for_dual_write
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
 from api.schemas.uui_schemas import OTPSendData
@@ -115,9 +113,12 @@ from api.services.embedding_service import EmbeddingService
 from api.services.conflict_resolution_service import apply_conflict_selection
 from api.services.passport_link_service import PassportLinkService
 from api.services.organisation_connection_service import OrganisationConnectionService
+from api.services.uui_service import UNIVERSAL_COLLECTION_NAME
 from api.services.uui_service import UUIService
 from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
 from api.services.universal_claim_ledger_service import UniversalClaimProvenance
+from api.services.vector_outbox import enqueue_vector_delete
+from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.version_service import VersionService
 
 
@@ -1291,7 +1292,6 @@ async def correct_my_memory(
     memory_id: str,
     payload: UserMemoryCorrectRequest,
     session: DbSession,
-    qdrant_service: Annotated[QdrantService, Depends(get_qdrant_service)],
     universal_user: Annotated[UniversalUser, Depends(_current_universal_user)],
 ) -> UserMemoryCorrectResponse:
     memory = await _get_user_universal_memory(
@@ -1320,6 +1320,12 @@ async def correct_my_memory(
         source_org_connection_id=memory.source_org_connection_id,
         source_type="user_correction",
         content=corrected_content,
+        content_envelope=encrypt_universal_text_for_dual_write(
+            user_uui_id=str(universal_user.id),
+            record_type="universal_memory",
+            record_id=str(new_memory_id),
+            value=corrected_content,
+        ),
         category=memory.category,
         importance_score=float(memory.importance_score or 1.0),
         confidence=float(memory.confidence or 1.0),
@@ -1385,32 +1391,21 @@ async def correct_my_memory(
         )
         .values(status="resolved", resolved_at=now)
     )
+    enqueue_vector_delete(
+        session,
+        memory_id=memory.id,
+        payload={"qdrant_collection": UNIVERSAL_COLLECTION_NAME, "privacy_delete": True},
+    )
+    enqueue_vector_upsert(
+        session,
+        memory_id=new_memory_id,
+        embedding=embedding.vector,
+        payload={
+            **_universal_memory_payload(new_memory, vector_size=embedding.dimensions),
+            "qdrant_collection": UNIVERSAL_COLLECTION_NAME,
+        },
+    )
     await session.commit()
-
-    try:
-        await asyncio.to_thread(
-            qdrant_service.delete_memory,
-            str(memory.id),
-            collection_name=QdrantService.UNIVERSAL_COLLECTION_NAME,
-        )
-        await asyncio.to_thread(
-            qdrant_service.upsert_memory,
-            str(new_memory_id),
-            embedding.vector,
-            _universal_memory_payload(new_memory, vector_size=embedding.dimensions),
-            collection_name=QdrantService.UNIVERSAL_COLLECTION_NAME,
-            vector_size=embedding.dimensions,
-        )
-    except Exception as exc:
-        logger.warning(
-            "universal_memory_correction_vector_sync_failed",
-            extra={
-                "event": "universal_memory_correction_vector_sync_failed",
-                "memory_id": str(memory.id),
-                "new_memory_id": str(new_memory_id),
-                "error": str(exc),
-            },
-        )
 
     return UserMemoryCorrectResponse(
         data=UserMemoryCorrectData(corrected=True, new_memory_id=new_memory_id),
@@ -1424,7 +1419,6 @@ async def delete_my_memory(
     request: Request,
     memory_id: str,
     session: DbSession,
-    qdrant_service: Annotated[QdrantService, Depends(get_qdrant_service)],
     universal_user: Annotated[UniversalUser, Depends(_current_universal_user)],
 ) -> UserMemoryDeleteResponse:
     memory = await _get_user_universal_memory(
@@ -1462,23 +1456,12 @@ async def delete_my_memory(
         reason="Removed by the Passport owner",
     )
     universal_user.memory_count = max(0, int(universal_user.memory_count or 0) - 1)
+    enqueue_vector_delete(
+        session,
+        memory_id=memory.id,
+        payload={"qdrant_collection": UNIVERSAL_COLLECTION_NAME, "privacy_delete": True},
+    )
     await session.commit()
-
-    try:
-        await asyncio.to_thread(
-            qdrant_service.delete_memory,
-            str(memory.id),
-            collection_name=QdrantService.UNIVERSAL_COLLECTION_NAME,
-        )
-    except Exception as exc:
-        logger.warning(
-            "universal_memory_delete_vector_sync_failed",
-            extra={
-                "event": "universal_memory_delete_vector_sync_failed",
-                "memory_id": str(memory.id),
-                "error": str(exc),
-            },
-        )
 
     return UserMemoryDeleteResponse(
         data=UserMemoryDeleteData(deleted=True, memory_id=memory.id),
@@ -1721,13 +1704,11 @@ async def delete_my_uui_data(
     request: Request,
     session: DbSession,
     cache_service: Annotated[CacheService, Depends(get_cache_service)],
-    qdrant_service: Annotated[QdrantService, Depends(get_qdrant_service)],
     universal_user: Annotated[UniversalUser, Depends(_current_universal_user)],
 ) -> UniversalUserDeleteResponse:
     deleted, memories_removed = await UUIService(
         session=session,
         cache_service=cache_service,
-        qdrant_service=qdrant_service,
     ).delete_user_data(uui_token=universal_user.uui_token)
     if not deleted:
         raise APIError(status_code=404, code="UUI_404", error="universal_user_not_found")

@@ -16,6 +16,7 @@ from api.db.models import UniversalMemory
 from api.db.models import UniversalUser
 from api.db.models import VerifiedOrgConnection
 from api.db.vector_store import QdrantService
+from api.infra.protected_storage import encrypt_universal_text_for_dual_write
 from api.services.embedding_service import EmbeddingService
 from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.domain_projection_types import DomainMemoryProjection
@@ -163,6 +164,12 @@ class DomainProjectionService:
                 continue
 
             existing.content = normalized.content
+            existing.content_envelope = encrypt_universal_text_for_dual_write(
+                user_uui_id=str(existing.user_uui_id),
+                record_type="universal_memory",
+                record_id=str(existing.id),
+                value=normalized.content,
+            )
             existing.category = normalized.category
             existing.importance_score = normalized.importance_score
             existing.confidence = normalized.confidence
@@ -345,6 +352,12 @@ class DomainProjectionService:
                 else "passport_agent"
             ),
             content=projection.content,
+            content_envelope=encrypt_universal_text_for_dual_write(
+                user_uui_id=str(user_uui_id),
+                record_type="universal_memory",
+                record_id=str(memory_id),
+                value=projection.content,
+            ),
             category=projection.category,
             importance_score=projection.importance_score,
             confidence=projection.confidence,
