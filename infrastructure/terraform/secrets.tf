@@ -164,6 +164,50 @@ resource "aws_secretsmanager_secret" "database_url" {
   })
 }
 
+# Razorpay credentials are injected only into ECS. Plan identifiers are not
+# credentials and remain regular task-definition environment configuration.
+resource "aws_secretsmanager_secret" "razorpay_key_id" {
+  name                    = var.razorpay_key_id_secret_name
+  recovery_window_in_days = 7
+
+  lifecycle {
+    ignore_changes  = [tags]
+    prevent_destroy = true
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-razorpay-key-id"
+  })
+}
+
+resource "aws_secretsmanager_secret" "razorpay_key_secret" {
+  name                    = var.razorpay_key_secret_secret_name
+  recovery_window_in_days = 7
+
+  lifecycle {
+    ignore_changes  = [tags]
+    prevent_destroy = true
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-razorpay-key-secret"
+  })
+}
+
+resource "aws_secretsmanager_secret" "razorpay_webhook_secret" {
+  name                    = var.razorpay_webhook_secret_secret_name
+  recovery_window_in_days = 7
+
+  lifecycle {
+    ignore_changes  = [tags]
+    prevent_destroy = true
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-razorpay-webhook-secret"
+  })
+}
+
 # These values are created only for environments that explicitly require Redis
 # AUTH. They contain the ElastiCache endpoint plus its authentication token and
 # are injected into ECS as secrets rather than task-definition environment text.
@@ -245,3 +289,6 @@ resource "aws_secretsmanager_secret_version" "celery_result_backend" {
 # aws secretsmanager put-secret-value --secret-id memoryos/CLERK_WEBHOOK_SECRET --secret-string "..."
 # aws secretsmanager put-secret-value --secret-id memoryos/SMTP_PASS --secret-string "your-smtp-password"
 # aws secretsmanager put-secret-value --secret-id memoryos/SENTRY_DSN --secret-string "..."
+# aws secretsmanager put-secret-value --secret-id memoryos/RAZORPAY_KEY_ID --secret-string "rzp_test_..."
+# aws secretsmanager put-secret-value --secret-id memoryos/RAZORPAY_KEY_SECRET --secret-string "..."
+# aws secretsmanager put-secret-value --secret-id memoryos/RAZORPAY_WEBHOOK_SECRET --secret-string "..."

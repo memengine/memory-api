@@ -71,9 +71,27 @@ clerk_webhook_secret_secret_name            = "memoryos/staging/CLERK_WEBHOOK_SE
 smtp_pass_secret_name                       = "memoryos/staging/SMTP_PASS"
 sentry_dsn_secret_name                      = "memoryos/staging/SENTRY_DSN"
 database_url_secret_name                    = "memoryos/staging/DATABASE_URL"
+razorpay_key_id_secret_name                 = "memoryos/staging/RAZORPAY_KEY_ID"
+razorpay_key_secret_secret_name             = "memoryos/staging/RAZORPAY_KEY_SECRET"
+razorpay_webhook_secret_secret_name         = "memoryos/staging/RAZORPAY_WEBHOOK_SECRET"
 redis_url_secret_name                       = "memoryos/staging/REDIS_URL"
 celery_broker_url_secret_name               = "memoryos/staging/CELERY_BROKER_URL"
 celery_result_backend_secret_name           = "memoryos/staging/CELERY_RESULT_BACKEND"
+
+# Razorpay plan IDs are not credentials. Fill only plans enabled for this
+# staging test; leave unsupported currencies/tiers as empty strings.
+razorpay_plan_starter_monthly_inr = ""
+razorpay_plan_starter_annual_inr  = ""
+razorpay_plan_starter_monthly_usd = ""
+razorpay_plan_starter_annual_usd  = ""
+razorpay_plan_growth_monthly_inr  = ""
+razorpay_plan_growth_annual_inr   = ""
+razorpay_plan_growth_monthly_usd  = ""
+razorpay_plan_growth_annual_usd   = ""
+razorpay_plan_scale_monthly_inr   = ""
+razorpay_plan_scale_annual_inr    = ""
+razorpay_plan_scale_monthly_usd   = ""
+razorpay_plan_scale_annual_usd    = ""
 
 # Do not enable envelope encryption during initial infrastructure validation.
 data_encryption_provider   = "disabled"

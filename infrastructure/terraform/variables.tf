@@ -227,6 +227,96 @@ variable "database_url_secret_name" {
   type        = string
   default     = "memoryos/DATABASE_URL"
 }
+
+variable "razorpay_key_id_secret_name" {
+  description = "Secrets Manager name for RAZORPAY_KEY_ID."
+  type        = string
+  default     = "memoryos/RAZORPAY_KEY_ID"
+}
+
+variable "razorpay_key_secret_secret_name" {
+  description = "Secrets Manager name for RAZORPAY_KEY_SECRET."
+  type        = string
+  default     = "memoryos/RAZORPAY_KEY_SECRET"
+}
+
+variable "razorpay_webhook_secret_secret_name" {
+  description = "Secrets Manager name for RAZORPAY_WEBHOOK_SECRET."
+  type        = string
+  default     = "memoryos/RAZORPAY_WEBHOOK_SECRET"
+}
+
+variable "razorpay_plan_starter_monthly_inr" {
+  description = "Razorpay Starter monthly INR plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_starter_annual_inr" {
+  description = "Razorpay Starter annual INR plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_starter_monthly_usd" {
+  description = "Razorpay Starter monthly USD plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_starter_annual_usd" {
+  description = "Razorpay Starter annual USD plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_growth_monthly_inr" {
+  description = "Razorpay Growth monthly INR plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_growth_annual_inr" {
+  description = "Razorpay Growth annual INR plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_growth_monthly_usd" {
+  description = "Razorpay Growth monthly USD plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_growth_annual_usd" {
+  description = "Razorpay Growth annual USD plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_scale_monthly_inr" {
+  description = "Razorpay Scale monthly INR plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_scale_annual_inr" {
+  description = "Razorpay Scale annual INR plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_scale_monthly_usd" {
+  description = "Razorpay Scale monthly USD plan identifier."
+  type        = string
+  default     = ""
+}
+
+variable "razorpay_plan_scale_annual_usd" {
+  description = "Razorpay Scale annual USD plan identifier."
+  type        = string
+  default     = ""
+}
 variable "app_env" {
   description = "Runtime APP_ENV value injected into ECS tasks."
   type        = string
