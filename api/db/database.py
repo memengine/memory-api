@@ -7,6 +7,10 @@ import os
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from urllib.parse import parse_qsl
+from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from fastapi import Request
 from sqlalchemy import create_engine
@@ -40,6 +44,42 @@ def get_sync_database_url(database_url: str | None = None) -> str:
     if url.partition("://")[0] == "postgresql+asyncpg":
         return "postgresql+psycopg2://" + url.partition("://")[2]
     return url
+
+
+def get_async_database_url(database_url: str | None = None) -> str:
+    """Return a PostgreSQL URL accepted by SQLAlchemy's asyncpg dialect.
+
+    Managed PostgreSQL providers commonly publish libpq URLs with
+    ``sslmode=require``. psycopg accepts that option, but asyncpg receives it
+    as an unsupported ``connect()`` keyword. Preserve the TLS requirement by
+    translating it to asyncpg's supported ``ssl=require`` form only for the
+    async engine.
+    """
+    url = database_url or get_database_url()
+    parsed = urlsplit(url)
+    scheme = parsed.scheme
+    if scheme in {"postgres", "postgresql", "postgresql+psycopg2"}:
+        scheme = "postgresql+asyncpg"
+
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    has_ssl = any(key.lower() == "ssl" for key, _ in query_pairs)
+    async_query_pairs: list[tuple[str, str]] = []
+    for key, value in query_pairs:
+        if key.lower() == "sslmode":
+            if not has_ssl:
+                async_query_pairs.append(("ssl", value))
+            continue
+        async_query_pairs.append((key, value))
+
+    return urlunsplit(
+        (
+            scheme,
+            parsed.netloc,
+            parsed.path,
+            urlencode(async_query_pairs, doseq=True),
+            parsed.fragment,
+        )
+    )
 
 
 class CircuitBreakerAsyncSession(AsyncSession):
@@ -141,10 +181,11 @@ def build_async_engine(database_url: str | None = None):
         if database_url is not None
         else get_database_url()
     )
-    if resolved_url.startswith("sqlite"):
-        return create_async_engine(resolved_url, pool_pre_ping=True)
+    async_database_url = get_async_database_url(resolved_url)
+    if async_database_url.startswith("sqlite"):
+        return create_async_engine(async_database_url, pool_pre_ping=True)
     async_engine = create_async_engine(
-        resolved_url,
+        async_database_url,
         pool_size=int(os.getenv("DB_POOL_SIZE", "20")),
         max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "30")),
         pool_timeout=int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),

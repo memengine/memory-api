@@ -31,6 +31,18 @@ def test_production_accepts_database_with_required_tls() -> None:
     assert validate_database_transport(database_url, app_env="production") == database_url
 
 
+def test_async_database_url_translates_libpq_sslmode_without_dropping_tls() -> None:
+    assert database.get_async_database_url(
+        "postgresql+asyncpg://postgres:password@db.example.com:5432/memoryos?sslmode=require"
+    ) == "postgresql+asyncpg://postgres:password@db.example.com:5432/memoryos?ssl=require"
+
+
+def test_async_database_url_keeps_an_explicit_asyncpg_ssl_option() -> None:
+    assert database.get_async_database_url(
+        "postgresql://postgres:password@db.example.com:5432/memoryos?ssl=require&sslmode=require"
+    ) == "postgresql+asyncpg://postgres:password@db.example.com:5432/memoryos?ssl=require"
+
+
 def test_production_rejects_plaintext_qdrant() -> None:
     with pytest.raises(RuntimeError, match="must use HTTPS"):
         validate_qdrant_transport("http://qdrant.example.com:6333", app_env="production")
