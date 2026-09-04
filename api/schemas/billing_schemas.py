@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
-
 
 PlanName = Literal["free", "starter", "growth", "scale", "enterprise"]
 CtaType = Literal["signup", "checkout", "sales"]
@@ -42,7 +42,50 @@ class BillingPlan(BaseModel):
     is_popular: bool
     cta_text: str
     cta_type: CtaType
-    stripe_price_monthly: str | None = None
-    stripe_price_annual: str | None = None
     limits: BillingPlanLimits
     features: BillingPlanFeatures
+
+
+BillingInterval = Literal["monthly", "annual"]
+BillingCurrency = Literal["inr", "usd"]
+PaidPlanName = Literal["starter", "growth", "scale"]
+
+
+class BillingCheckoutRequest(BaseModel):
+    plan_tier: PaidPlanName
+    billing_interval: BillingInterval
+    currency: BillingCurrency = "inr"
+
+
+class BillingCheckoutData(BaseModel):
+    provider: Literal["razorpay"] = "razorpay"
+    key_id: str
+    subscription_id: str
+    checkout_url: str
+    plan_tier: PaidPlanName
+    billing_interval: BillingInterval
+    currency: BillingCurrency
+
+
+class BillingCheckoutResponse(BaseModel):
+    data: BillingCheckoutData
+    request_id: str
+    timestamp: datetime
+
+
+class BillingSubscriptionData(BaseModel):
+    provider: Literal["razorpay"] | None = None
+    provider_subscription_id: str | None = None
+    plan_tier: PlanName
+    billing_interval: BillingInterval | None = None
+    currency: BillingCurrency | None = None
+    status: str
+    current_period_end: datetime | None = None
+    cancel_at_period_end: bool = False
+    limits: BillingPlanLimits
+
+
+class BillingSubscriptionResponse(BaseModel):
+    data: BillingSubscriptionData
+    request_id: str
+    timestamp: datetime

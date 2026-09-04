@@ -687,6 +687,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if request.method == "GET" and path in {"/health", "/docs", "/redoc", "/openapi.json"}:
             return True
+        if request.method == "GET" and path == "/v1/billing/plans":
+            return True
         if path.startswith("/v1/uui/"):
             return True
         if request.method == "GET" and path.startswith("/v1/agents/global/"):

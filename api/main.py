@@ -36,12 +36,14 @@ from api.middleware.universal_auth import UniversalAuthMiddleware
 from api.middleware.versioning import VersioningMiddleware
 from api.routers import agents_router
 from api.routers import api_keys_router
+from api.routers import billing_router
 from api.routers import internal_router
 from api.routers import memories_router
 from api.routers import tenant_router
 from api.routers import uui_router
 from api.routers import users_router
 from api.routers import webhooks_router
+from api.routers import razorpay_webhooks_router
 from api.routers.universal import router as universal_router
 from api.routers.common import get_request_id
 from api.schemas.responses import ErrorResponse
@@ -354,9 +356,11 @@ def create_app() -> FastAPI:
     app.include_router(uui_router)
     app.include_router(users_router)
     app.include_router(api_keys_router)
+    app.include_router(billing_router)
     app.include_router(agents_router)
     app.include_router(universal_router)
     app.include_router(webhooks_router)
+    app.include_router(razorpay_webhooks_router)
 
     def custom_openapi():
         if app.openapi_schema:
@@ -383,7 +387,15 @@ def create_app() -> FastAPI:
             "description": "SDK API key in the Authorization header as `ApiKey <key>`.",
         }
 
-        public_paths = {"/health", "/docs", "/redoc", "/openapi.json", "/v1/webhooks/clerk"}
+        public_paths = {
+            "/health",
+            "/docs",
+            "/redoc",
+            "/openapi.json",
+            "/v1/billing/plans",
+            "/v1/webhooks/clerk",
+            "/v1/webhooks/razorpay",
+        }
         for path, operations in schema.get("paths", {}).items():
             for operation in operations.values():
                 if path in public_paths:

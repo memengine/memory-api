@@ -2519,6 +2519,48 @@ class TenantBudget(Base):
     )
 
 
+class BillingSubscription(Base):
+    __tablename__ = "billing_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("provider_subscription_id", name="uq_billing_provider_subscription"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(30), nullable=False, server_default=text("'razorpay'"))
+    provider_subscription_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_customer_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    plan_tier: Mapped[PlanTier] = mapped_column(
+        Enum(PlanTier, name="plan_tier_enum"), nullable=False
+    )
+    billing_interval: Mapped[str] = mapped_column(String(20), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, server_default=text("'created'"))
+    checkout_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class BillingWebhookEvent(Base):
+    __tablename__ = "billing_webhook_events"
+
+    provider_event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
 class ApiDeprecatedField(Base):
     __tablename__ = "api_deprecated_fields"
 
@@ -3175,6 +3217,8 @@ __all__ = [
     "AuditAction",
     "AuditLog",
     "Base",
+    "BillingSubscription",
+    "BillingWebhookEvent",
     "CallQualityBlockedLayer",
     "CallQualityLog",
     "ClarificationQueue",

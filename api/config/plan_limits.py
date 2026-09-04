@@ -7,7 +7,6 @@ from sqlalchemy import text
 
 from api.db.cache import get_redis_url
 
-
 PLAN_LIMITS = {
     "free": {
         "monthly_call_limit": 5_000,
@@ -63,7 +62,7 @@ def get_limits(plan_tier: str) -> dict[str, Any]:
     return dict(PLAN_LIMITS[plan_tier])
 
 
-def _invalidate_plan_cache(tenant_id: str) -> None:
+def invalidate_plan_cache(tenant_id: str) -> None:
     try:
         client = redis.Redis.from_url(
             get_redis_url(),
@@ -78,8 +77,8 @@ def _invalidate_plan_cache(tenant_id: str) -> None:
             )
         finally:
             client.close()
-    except Exception:
-        return None
+    except Exception:  # noqa: BLE001 - quota cache invalidation is best effort
+        return
 
 
 def apply_plan_limits(tenant_id: str, plan_tier: str, db_session) -> None:
@@ -104,4 +103,4 @@ def apply_plan_limits(tenant_id: str, plan_tier: str, db_session) -> None:
         {**limits, "plan_tier": plan_tier, "tenant_id": tenant_id},
     )
     db_session.commit()
-    _invalidate_plan_cache(tenant_id)
+    invalidate_plan_cache(tenant_id)
