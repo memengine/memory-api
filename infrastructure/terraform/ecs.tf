@@ -150,6 +150,30 @@ resource "aws_iam_role_policy" "ecs_task_memory_content_encryption" {
   policy = data.aws_iam_policy_document.ecs_task_memory_content_encryption.json
 }
 
+# ECS Exec runs its managed agent inside each task. These permissions let that
+# agent establish its Session Manager channels without granting application
+# access to arbitrary AWS resources.
+data "aws_iam_policy_document" "ecs_task_execute_command" {
+  statement {
+    sid = "ConnectToEcsExecSession"
+
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_execute_command" {
+  name   = "${var.project_name}-ecs-exec-policy"
+  role   = aws_iam_role.ecs_task.id
+  policy = data.aws_iam_policy_document.ecs_task_execute_command.json
+}
+
 locals {
   ecs_container_environment = concat([
     { name = "APP_ENV", value = var.app_env },
