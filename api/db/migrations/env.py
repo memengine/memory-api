@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from api.db.database import get_sync_database_url
 from api.db.models import Base
 from alembic import context
-from sqlalchemy import engine_from_config
+from sqlalchemy import create_engine
 from sqlalchemy import pool
 
 config = context.config
@@ -39,11 +39,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # Do not read Alembic's local-development fallback URL here. ECS injects
+    # DATABASE_URL through Secrets Manager, and get_sync_database_url keeps
+    # managed Postgres URLs compatible with psycopg2 for migrations.
+    connectable = create_engine(get_sync_database_url(), poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
         context.configure(
