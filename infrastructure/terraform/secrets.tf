@@ -212,7 +212,7 @@ resource "aws_secretsmanager_secret" "razorpay_webhook_secret" {
 # AUTH. They contain the ElastiCache endpoint plus its authentication token and
 # are injected into ECS as secrets rather than task-definition environment text.
 resource "aws_secretsmanager_secret" "redis_url" {
-  count                   = var.redis_auth_enabled ? 1 : 0
+  count                   = var.redis_auth_enabled || var.manage_redis_connection_secrets ? 1 : 0
   name                    = var.redis_url_secret_name
   recovery_window_in_days = 7
 
@@ -227,7 +227,7 @@ resource "aws_secretsmanager_secret" "redis_url" {
 }
 
 resource "aws_secretsmanager_secret" "celery_broker_url" {
-  count                   = var.redis_auth_enabled ? 1 : 0
+  count                   = var.redis_auth_enabled || var.manage_redis_connection_secrets ? 1 : 0
   name                    = var.celery_broker_url_secret_name
   recovery_window_in_days = 7
 
@@ -242,7 +242,7 @@ resource "aws_secretsmanager_secret" "celery_broker_url" {
 }
 
 resource "aws_secretsmanager_secret" "celery_result_backend" {
-  count                   = var.redis_auth_enabled ? 1 : 0
+  count                   = var.redis_auth_enabled || var.manage_redis_connection_secrets ? 1 : 0
   name                    = var.celery_result_backend_secret_name
   recovery_window_in_days = 7
 
@@ -257,19 +257,19 @@ resource "aws_secretsmanager_secret" "celery_result_backend" {
 }
 
 resource "aws_secretsmanager_secret_version" "redis_url" {
-  count         = var.redis_auth_enabled ? 1 : 0
+  count         = var.redis_auth_enabled || var.manage_redis_connection_secrets ? 1 : 0
   secret_id     = aws_secretsmanager_secret.redis_url[0].id
   secret_string = "rediss://:${var.redis_auth_token}@${aws_elasticache_replication_group.memoryos.primary_endpoint_address}:6379/0?ssl_cert_reqs=required"
 }
 
 resource "aws_secretsmanager_secret_version" "celery_broker_url" {
-  count         = var.redis_auth_enabled ? 1 : 0
+  count         = var.redis_auth_enabled || var.manage_redis_connection_secrets ? 1 : 0
   secret_id     = aws_secretsmanager_secret.celery_broker_url[0].id
   secret_string = "rediss://:${var.redis_auth_token}@${aws_elasticache_replication_group.memoryos.primary_endpoint_address}:6379/0?ssl_cert_reqs=required"
 }
 
 resource "aws_secretsmanager_secret_version" "celery_result_backend" {
-  count         = var.redis_auth_enabled ? 1 : 0
+  count         = var.redis_auth_enabled || var.manage_redis_connection_secrets ? 1 : 0
   secret_id     = aws_secretsmanager_secret.celery_result_backend[0].id
   secret_string = "rediss://:${var.redis_auth_token}@${aws_elasticache_replication_group.memoryos.primary_endpoint_address}:6379/1?ssl_cert_reqs=required"
 }

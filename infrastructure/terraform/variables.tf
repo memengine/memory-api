@@ -122,6 +122,12 @@ variable "redis_auth_enabled" {
   default     = false
 }
 
+variable "manage_redis_connection_secrets" {
+  description = "Keep Redis and Celery connection secrets managed during a staged Redis security migration."
+  type        = bool
+  default     = false
+}
+
 variable "redis_auth_token" {
   description = "URL-safe ElastiCache AUTH token. Supply only as TF_VAR_redis_auth_token; never put it in a tfvars file."
   type        = string
