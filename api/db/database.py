@@ -190,6 +190,11 @@ def build_async_engine(database_url: str | None = None):
         max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "30")),
         pool_timeout=int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
         pool_pre_ping=True,
+        # Supabase's transaction pooler (PgBouncer) can route consecutive
+        # requests to different PostgreSQL connections. asyncpg's cached
+        # prepared statements are connection-specific, so disable that cache
+        # to avoid intermittent "prepared statement does not exist" failures.
+        connect_args={"statement_cache_size": 0},
     )
     instrument_engine(async_engine.sync_engine, kind="async", owner=session_factory_owner())
     return async_engine

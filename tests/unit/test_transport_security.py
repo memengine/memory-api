@@ -43,6 +43,24 @@ def test_async_database_url_keeps_an_explicit_asyncpg_ssl_option() -> None:
     ) == "postgresql+asyncpg://postgres:password@db.example.com:5432/memoryos?ssl=require"
 
 
+def test_async_engine_disables_prepared_statement_cache_for_transaction_poolers(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_async_engine(url: str, **kwargs: object) -> SimpleNamespace:
+        captured["url"] = url
+        captured.update(kwargs)
+        return SimpleNamespace(sync_engine=object())
+
+    monkeypatch.setattr(database, "create_async_engine", fake_create_async_engine)
+    monkeypatch.setattr(database, "instrument_engine", lambda *args, **kwargs: None)
+
+    database.build_async_engine(
+        "postgresql+asyncpg://postgres:password@db.example.com:6543/memoryos?sslmode=require"
+    )
+
+    assert captured["connect_args"] == {"statement_cache_size": 0}
+
+
 def test_production_rejects_plaintext_qdrant() -> None:
     with pytest.raises(RuntimeError, match="must use HTTPS"):
         validate_qdrant_transport("http://qdrant.example.com:6333", app_env="production")
