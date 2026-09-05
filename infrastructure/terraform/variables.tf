@@ -413,6 +413,12 @@ variable "celery_scale_max_capacity" {
   default     = 8
 }
 
+variable "enable_scale_worker_autoscaling" {
+  description = "Whether queue-depth alarms may start scale-worker tasks."
+  type        = bool
+  default     = true
+}
+
 variable "celery_log_level" {
   description = "Celery worker log level."
   type        = string

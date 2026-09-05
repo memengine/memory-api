@@ -362,7 +362,7 @@ resource "aws_ecs_service" "memoryos" {
 
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
-  enable_execute_command             = true
+  enable_execute_command             = false
 
   depends_on = [aws_lb_listener.https]
 
@@ -387,7 +387,7 @@ resource "aws_ecs_service" "celery_worker" {
 
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
-  enable_execute_command             = true
+  enable_execute_command             = false
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-${each.key}-worker-service"
@@ -421,6 +421,7 @@ resource "aws_appautoscaling_policy" "ecs_cpu_target" {
 }
 
 resource "aws_appautoscaling_target" "scale_worker" {
+  count              = var.enable_scale_worker_autoscaling ? 1 : 0
   max_capacity       = var.celery_scale_max_capacity
   min_capacity       = local.celery_worker_configs.scale.desired_count
   resource_id        = "service/${aws_ecs_cluster.memoryos.name}/${aws_ecs_service.celery_worker["scale"].name}"
@@ -429,11 +430,12 @@ resource "aws_appautoscaling_target" "scale_worker" {
 }
 
 resource "aws_appautoscaling_policy" "scale_worker_scale_out" {
+  count              = var.enable_scale_worker_autoscaling ? 1 : 0
   name               = "${var.project_name}-scale-worker-scale-out"
   policy_type        = "StepScaling"
-  resource_id        = aws_appautoscaling_target.scale_worker.resource_id
-  scalable_dimension = aws_appautoscaling_target.scale_worker.scalable_dimension
-  service_namespace  = aws_appautoscaling_target.scale_worker.service_namespace
+  resource_id        = aws_appautoscaling_target.scale_worker[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.scale_worker[0].scalable_dimension
+  service_namespace  = aws_appautoscaling_target.scale_worker[0].service_namespace
 
   step_scaling_policy_configuration {
     adjustment_type         = "ExactCapacity"
@@ -448,11 +450,12 @@ resource "aws_appautoscaling_policy" "scale_worker_scale_out" {
 }
 
 resource "aws_appautoscaling_policy" "scale_worker_scale_in" {
+  count              = var.enable_scale_worker_autoscaling ? 1 : 0
   name               = "${var.project_name}-scale-worker-scale-in"
   policy_type        = "StepScaling"
-  resource_id        = aws_appautoscaling_target.scale_worker.resource_id
-  scalable_dimension = aws_appautoscaling_target.scale_worker.scalable_dimension
-  service_namespace  = aws_appautoscaling_target.scale_worker.service_namespace
+  resource_id        = aws_appautoscaling_target.scale_worker[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.scale_worker[0].scalable_dimension
+  service_namespace  = aws_appautoscaling_target.scale_worker[0].service_namespace
 
   step_scaling_policy_configuration {
     adjustment_type         = "ExactCapacity"
@@ -467,6 +470,7 @@ resource "aws_appautoscaling_policy" "scale_worker_scale_in" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "scale_queue_depth_high" {
+  count               = var.enable_scale_worker_autoscaling ? 1 : 0
   alarm_name          = "${var.project_name}-scale-extraction-depth-high"
   alarm_description   = "Scale out Scale extraction workers when queue depth stays above 60."
   comparison_operator = "GreaterThanThreshold"
@@ -477,7 +481,7 @@ resource "aws_cloudwatch_metric_alarm" "scale_queue_depth_high" {
   period              = 60
   statistic           = "Maximum"
   threshold           = 60
-  alarm_actions       = [aws_appautoscaling_policy.scale_worker_scale_out.arn]
+  alarm_actions       = [aws_appautoscaling_policy.scale_worker_scale_out[0].arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -486,13 +490,14 @@ resource "aws_cloudwatch_metric_alarm" "scale_queue_depth_high" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "all_extraction_queues_empty" {
+  count               = var.enable_scale_worker_autoscaling ? 1 : 0
   alarm_name          = "${var.project_name}-all-extraction-queues-empty"
   alarm_description   = "Scale workers back to baseline when all extraction queues are idle."
   comparison_operator = "LessThanOrEqualToThreshold"
   evaluation_periods  = 10
   datapoints_to_alarm = 10
   threshold           = 0
-  alarm_actions       = [aws_appautoscaling_policy.scale_worker_scale_in.arn]
+  alarm_actions       = [aws_appautoscaling_policy.scale_worker_scale_in[0].arn]
   treat_missing_data  = "breaching"
 
   metric_query {
