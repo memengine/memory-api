@@ -122,6 +122,17 @@ variable "redis_auth_enabled" {
   default     = false
 }
 
+variable "redis_auth_token_update_strategy" {
+  description = "ElastiCache AUTH transition strategy. Existing passwordless clusters must use ROTATE before SET."
+  type        = string
+  default     = "SET"
+
+  validation {
+    condition     = contains(["ROTATE", "SET"], var.redis_auth_token_update_strategy)
+    error_message = "redis_auth_token_update_strategy must be ROTATE or SET."
+  }
+}
+
 variable "manage_redis_connection_secrets" {
   description = "Keep Redis and Celery connection secrets managed during a staged Redis security migration."
   type        = bool
