@@ -47,7 +47,9 @@ resource "aws_elasticache_replication_group" "memoryos" {
   security_group_ids         = [aws_security_group.redis.id]
   at_rest_encryption_enabled = true
   transit_encryption_enabled = var.redis_transit_encryption_enabled
+  transit_encryption_mode    = var.redis_transit_encryption_enabled ? var.redis_transit_encryption_mode : null
   auth_token                 = var.redis_auth_enabled ? var.redis_auth_token : null
+  auth_token_update_strategy = var.redis_auth_enabled ? "SET" : null
   apply_immediately          = true
   snapshot_retention_limit   = var.redis_snapshot_retention_limit
   snapshot_window            = var.redis_snapshot_retention_limit > 0 ? var.redis_snapshot_window : null

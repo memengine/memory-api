@@ -105,6 +105,17 @@ variable "redis_transit_encryption_enabled" {
   default     = false
 }
 
+variable "redis_transit_encryption_mode" {
+  description = "ElastiCache TLS migration mode. Existing clusters must use preferred before required."
+  type        = string
+  default     = "required"
+
+  validation {
+    condition     = contains(["preferred", "required"], var.redis_transit_encryption_mode)
+    error_message = "redis_transit_encryption_mode must be preferred or required."
+  }
+}
+
 variable "redis_auth_enabled" {
   description = "Whether ElastiCache AUTH is required. When enabled, REDIS_URL and Celery URLs are injected as Secrets Manager values."
   type        = bool
