@@ -92,7 +92,7 @@ def make_model(
 
 
 @pytest.mark.asyncio
-async def test_get_active_model_uses_cache_after_first_lookup() -> None:
+async def test_get_active_model_uses_database_record_as_the_authority() -> None:
     model = make_model()
     session = MagicMock()
     session.execute = AsyncMock(return_value=FakeAsyncExecuteResult(scalar=model))
@@ -108,7 +108,37 @@ async def test_get_active_model_uses_cache_after_first_lookup() -> None:
 
     assert first.id == DEFAULT_ACTIVE_MODEL_ID
     assert second.id == DEFAULT_ACTIVE_MODEL_ID
-    session.execute.assert_awaited_once()
+    assert session.execute.await_count == 2
+
+
+def test_get_active_model_sync_ignores_a_stale_cached_model_when_database_is_available() -> None:
+    database_model = make_model(
+        model_id="openai-text-embedding-3-small-v1",
+        provider="openai",
+        model_name="text-embedding-3-small",
+        qdrant_collection="memories_openai",
+    )
+    redis_client = FakeSyncRedis()
+    redis_client.values["embedding_models:active"] = (
+        '{"id":"gemini-embedding-001-v1","provider":"gemini",'
+        '"model_name":"gemini-embedding-001","dimensions":1536,'
+        '"qdrant_collection":"memories","is_active":true,'
+        '"deprecated_at":null,"created_at":"2026-01-01T00:00:00+00:00"}'
+    )
+    session = MagicMock()
+    session.execute.return_value = FakeSyncExecuteResult(scalar=database_model)
+    service = EmbeddingService(
+        sync_session=session,
+        async_redis_client=FakeAsyncRedis(),
+        sync_redis_client=redis_client,
+        gemini_client=MagicMock(),
+    )
+
+    model = service.get_active_model_sync()
+
+    assert model.id == "openai-text-embedding-3-small-v1"
+    assert model.qdrant_collection == "memories_openai"
+    assert session.execute.call_count == 1
 
 
 def test_get_active_model_sync_prefers_database_record_over_environment_defaults(

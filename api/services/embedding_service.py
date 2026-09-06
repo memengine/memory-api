@@ -175,11 +175,10 @@ class EmbeddingService:
         )
 
     async def get_active_model(self) -> EmbeddingModelRecord:
-        cached = await self._get_cached_active_model_async()
-        if cached is not None:
-            return cached
-
         if self.async_session is None:
+            cached = await self._get_cached_active_model_async()
+            if cached is not None:
+                return cached
             return self._default_model_record()
 
         result = await self.async_session.execute(
@@ -194,11 +193,10 @@ class EmbeddingService:
         return record
 
     def get_active_model_sync(self) -> EmbeddingModelRecord:
-        cached = self._get_cached_active_model_sync()
-        if cached is not None:
-            return cached
-
         if self.sync_session is None:
+            cached = self._get_cached_active_model_sync()
+            if cached is not None:
+                return cached
             return self._default_model_record()
 
         model = self.sync_session.execute(
