@@ -631,7 +631,7 @@ def test_remaining_endpoint_shapes(monkeypatch) -> None:
             json={"content": "Updated content", "importance_score": 9.0},
         )
         delete_response = client.delete("/v1/memories/123e4567-e89b-12d3-a456-426614174000")
-        job_response = client.get("/v1/memories/jobs/job_123")
+        job_response = client.get("/v1/memories/jobs/123e4567-e89b-12d3-a456-426614174000")
         profile_response = client.get("/v1/users/me")
         settings_response = client.patch(
             "/v1/users/me/settings",

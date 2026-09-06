@@ -707,7 +707,7 @@ async def delete_memory(
 @router.get("/jobs/{job_id}", response_model=MemoryJobStatusResponse)
 async def get_memory_job_status(
     request: Request,
-    job_id: str,
+    job_id: uuid.UUID,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
 ) -> MemoryJobStatusResponse:
     """Fetch the status of an extraction job.
@@ -719,7 +719,7 @@ async def get_memory_job_status(
     tenant_id = getattr(request.state, "tenant_id", None)
     if not authenticated_user_id and not tenant_id:
         authenticated_user_id = get_authenticated_user_id(request)
-    job = await memory_service.get_job_status(job_id=job_id)
+    job = await memory_service.get_job_status(job_id=str(job_id))
     if tenant_id and job.get("tenant_id") not in {None, str(tenant_id)}:
         raise APIError(status_code=404, code="JOB_404", error="job_not_found")
     return MemoryJobStatusResponse(

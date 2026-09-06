@@ -234,6 +234,23 @@ def test_pipeline_failure_preserves_safe_stage_and_cause() -> None:
     ) == "extraction_pipeline_failed stage=store_memories cause=ValueError"
 
 
+def test_pipeline_failure_records_only_safe_database_diagnostics() -> None:
+    error = extraction_tasks.ExtractionPipelineError(
+        stage="store_memories",
+        cause=SimpleNamespace(
+            orig=SimpleNamespace(
+                sqlstate="23503",
+                diag=SimpleNamespace(constraint_name="fk_memories_embedding_model_id"),
+            )
+        ),
+    )
+
+    assert extraction_tasks._safe_failure_detail(error) == (  # noqa: SLF001
+        "extraction_pipeline_failed stage=store_memories cause=SimpleNamespace "
+        "sqlstate=23503 constraint=fk_memories_embedding_model_id"
+    )
+
+
 def test_json_decode_error_is_classified_as_invalid_llm_response() -> None:
     error = extraction_tasks.ExtractionPipelineError(
         stage="extract_memories",

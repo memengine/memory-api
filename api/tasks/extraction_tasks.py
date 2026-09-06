@@ -162,7 +162,15 @@ def classify_error(exc: Exception | str) -> str:
 def _safe_failure_detail(exc: Exception) -> str:
     """Return durable diagnostic context without persisting tracebacks or customer data."""
     if isinstance(exc, ExtractionPipelineError):
-        return f"extraction_pipeline_failed stage={exc.stage} cause={exc.cause_type}"
+        detail = f"extraction_pipeline_failed stage={exc.stage} cause={exc.cause_type}"
+        diagnostic = getattr(exc.cause, "orig", None)
+        sqlstate = getattr(diagnostic, "sqlstate", None)
+        constraint = getattr(getattr(diagnostic, "diag", None), "constraint_name", None)
+        if sqlstate:
+            detail += f" sqlstate={sqlstate}"
+        if constraint:
+            detail += f" constraint={constraint}"
+        return detail
     _error_type, sanitized_error = _sanitize_job_error(exc)
     return sanitized_error
 
