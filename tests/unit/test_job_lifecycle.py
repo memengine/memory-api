@@ -229,6 +229,9 @@ def test_pipeline_failure_preserves_safe_stage_and_cause() -> None:
     assert extraction_tasks._safe_failure_detail(error) == (  # noqa: SLF001
         "extraction_pipeline_failed stage=store_memories cause=ValueError"
     )
+    assert extraction_tasks._normalize_stored_error(  # noqa: SLF001
+        extraction_tasks._safe_failure_detail(error)  # noqa: SLF001
+    ) == "extraction_pipeline_failed stage=store_memories cause=ValueError"
 
 
 def test_json_decode_error_is_classified_as_invalid_llm_response() -> None:

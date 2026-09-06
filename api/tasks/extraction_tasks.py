@@ -194,6 +194,8 @@ def _capture_error_detail() -> str:
 def _normalize_stored_error(error: str) -> str:
     if "Traceback (most recent call last):" in error:
         return error
+    if error.startswith("extraction_pipeline_failed stage="):
+        return error
     _error_type, sanitized_error = _sanitize_job_error(error)
     return sanitized_error
 
