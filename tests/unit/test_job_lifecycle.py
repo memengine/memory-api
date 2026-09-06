@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
@@ -216,6 +217,27 @@ def test_set_db_job_failure_moves_to_dead_and_creates_dead_letter(monkeypatch) -
     assert session.dead_letter is not None
     assert session.dead_letter.error == "proxy_user_not_found"
     assert sentry_calls
+
+
+def test_pipeline_failure_preserves_safe_stage_and_cause() -> None:
+    error = extraction_tasks.ExtractionPipelineError(
+        stage="store_memories",
+        cause=ValueError("database value was invalid"),
+    )
+
+    assert extraction_tasks.classify_error(error) == "unknown_error"
+    assert extraction_tasks._safe_failure_detail(error) == (  # noqa: SLF001
+        "extraction_pipeline_failed stage=store_memories cause=ValueError"
+    )
+
+
+def test_json_decode_error_is_classified_as_invalid_llm_response() -> None:
+    error = extraction_tasks.ExtractionPipelineError(
+        stage="extract_memories",
+        cause=json.JSONDecodeError("invalid JSON", "{", 1),
+    )
+
+    assert extraction_tasks.classify_error(error) == "llm_invalid_response"
 
 
 def test_extraction_session_factory_is_reused_per_process(monkeypatch) -> None:

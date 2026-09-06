@@ -60,6 +60,16 @@ _EXTRACTION_SESSION_FACTORY: sessionmaker[Session] | None = None
 _EXTRACTION_SESSION_FACTORY_PID: int | None = None
 
 
+class ExtractionPipelineError(RuntimeError):
+    """Safe extraction failure context for logs and durable job diagnostics."""
+
+    def __init__(self, *, stage: str, cause: Exception) -> None:
+        self.stage = stage
+        self.cause = cause
+        self.cause_type = type(cause).__name__
+        super().__init__(f"extraction_pipeline_failed stage={stage} cause={self.cause_type}")
+
+
 def _job_status_key(job_id: str) -> str:
     return f"job:{job_id}:status"
 
@@ -129,7 +139,8 @@ def _invalidate_proxy_user_cache(proxy_user_id: str) -> None:
 
 
 def classify_error(exc: Exception | str) -> str:
-    message = str(exc or "")
+    root_cause = exc.cause if isinstance(exc, ExtractionPipelineError) else exc
+    message = str(root_cause or "")
     normalized = message.lower()
     if "503" in message or "Service Unavailable" in message:
         return "llm_provider_unavailable_503"
@@ -141,11 +152,19 @@ def classify_error(exc: Exception | str) -> str:
         return "timeout"
     if "connection" in normalized:
         return "connection_error"
-    if "json" in normalized or isinstance(exc, (json.JSONDecodeError, ValueError)):
+    if "json" in normalized or isinstance(root_cause, json.JSONDecodeError):
         return "llm_invalid_response"
     if "extraction_spec" in normalized:
         return "missing_extraction_spec"
     return "unknown_error"
+
+
+def _safe_failure_detail(exc: Exception) -> str:
+    """Return durable diagnostic context without persisting tracebacks or customer data."""
+    if isinstance(exc, ExtractionPipelineError):
+        return f"extraction_pipeline_failed stage={exc.stage} cause={exc.cause_type}"
+    _error_type, sanitized_error = _sanitize_job_error(exc)
+    return sanitized_error
 
 
 def _sanitize_job_error(exc: Exception | str) -> tuple[str, str]:
@@ -781,12 +800,14 @@ def run_extraction_pipeline(
 
     session = session_factory()
     conversation: Conversation | None = None
+    stage = "load_proxy_user"
 
     try:
         proxy_user = session.get(ProxyUser, uuid.UUID(proxy_user_id))
         if proxy_user is None:
             raise ValueError(f"Proxy user {proxy_user_id} not found.")
 
+        stage = "create_conversation"
         backing_user = _ensure_proxy_backing_user(session, proxy_user_id)
         conversation = _create_source_conversation(
             session,
@@ -796,6 +817,7 @@ def run_extraction_pipeline(
         )
         session.commit()
 
+        stage = "load_context"
         existing_memories = _load_existing_memories_for_context(session, proxy_user_id)
         domain_schema_name = _tenant_domain_schema(session, tenant_id)
         source_event = (
@@ -809,6 +831,7 @@ def run_extraction_pipeline(
             if source_event is not None and source_payload.get("explicit") is True
             else None
         )
+        stage = "extract_memories"
         try:
             extracted_memories, extraction_meta, should_apply_scorer = _extract_memories_for_pipeline(
                 extractor,
@@ -842,6 +865,7 @@ def run_extraction_pipeline(
                 "general_extraction_error": str(exc),
             }
             should_apply_scorer = False
+        stage = "persist_pending_candidates"
         pending_candidates_buffered, promoted_pending_memories = _persist_pending_extraction_candidates(
             session,
             candidates=list(extraction_meta.get("pending_candidates", []) or []),
@@ -867,6 +891,7 @@ def run_extraction_pipeline(
                 "extraction_metadata": extraction_meta.get("extraction_metadata") or {},
             }
 
+        stage = "store_memories"
         embedding_service = EmbeddingService(sync_session=session, gemini_client=client)
         resolver = conflict_resolver or ConflictResolver(
             session=session,
@@ -904,6 +929,7 @@ def run_extraction_pipeline(
         _refresh_proxy_user_memory_count(session, proxy_user.id)
         session.commit()
 
+        stage = "run_domain_overlay"
         domain_schema_meta = _run_domain_schema_overlay(
             session,
             messages=messages,
@@ -914,6 +940,7 @@ def run_extraction_pipeline(
             client=client,
         ) or {}
 
+        stage = "invalidate_cache"
         _invalidate_proxy_user_cache(proxy_user_id)
 
         conflicts_resolved = sum(
@@ -940,7 +967,7 @@ def run_extraction_pipeline(
             "extraction_metadata": extraction_meta.get("extraction_metadata") or {},
             **domain_schema_meta,
         }
-    except Exception:
+    except Exception as exc:
         session.rollback()
         if conversation is not None:
             try:
@@ -949,7 +976,7 @@ def run_extraction_pipeline(
                 session.commit()
             except Exception:
                 session.rollback()
-        raise
+        raise ExtractionPipelineError(stage=stage, cause=exc) from exc
     finally:
         session.close()
 
@@ -977,8 +1004,19 @@ def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
         _set_job_status(job_id, completed_payload)
         return completed_payload
     except Exception as exc:
-        error_detail = _capture_error_detail()
         error_type = classify_error(exc)
+        error_detail = _safe_failure_detail(exc)
+        LOGGER.error(
+            "extraction_job_failed",
+            extra={
+                "event": "extraction_job_failed",
+                "job_id": job_id,
+                "tenant_id": str(job_payload.get("tenant_id") or ""),
+                "queue_name": str(job_payload.get("queue_name") or ""),
+                "error_type": error_type,
+                "error_detail": error_detail,
+            },
+        )
         next_status, attempts, _max_attempts = _set_db_job_failure(
             job_id=job_id,
             error=error_detail,
