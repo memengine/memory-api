@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -49,6 +50,7 @@ def _subscription() -> BillingSubscription:
         currency="usd",
         status="created",
         checkout_url="https://rzp.io/i/example",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
 
@@ -71,7 +73,11 @@ async def test_webhook_updates_subscription_and_tenant_plan(
     session = MagicMock()
     session.get = AsyncMock(return_value=None)
     session.flush = AsyncMock()
-    session.execute = AsyncMock(side_effect=[result, MagicMock(), MagicMock()])
+    newer_subscription = MagicMock()
+    newer_subscription.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(
+        side_effect=[result, newer_subscription, MagicMock(), MagicMock()]
+    )
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     payload = {
@@ -95,11 +101,54 @@ async def test_webhook_updates_subscription_and_tenant_plan(
 
     assert response == {"received": True}
     assert subscription.status == provider_status
-    assert session.execute.await_count == 3
+    assert session.execute.await_count == 4
     session.commit.assert_awaited_once()
     razorpay_webhooks.invalidate_plan_cache.assert_called_once_with(
         str(subscription.tenant_id)
     )
+
+
+@pytest.mark.asyncio
+async def test_delayed_terminal_webhook_cannot_downgrade_newer_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", "webhook-secret")
+    monkeypatch.setenv("RAZORPAY_PLAN_STARTER_MONTHLY_USD", "plan_starter_usd")
+    subscription = _subscription()
+    provider_lookup = MagicMock()
+    provider_lookup.scalar_one_or_none.return_value = subscription
+    newer_subscription_lookup = MagicMock()
+    newer_subscription_lookup.scalar_one_or_none.return_value = object()
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+    session.flush = AsyncMock()
+    session.execute = AsyncMock(
+        side_effect=[provider_lookup, newer_subscription_lookup]
+    )
+    session.commit = AsyncMock()
+
+    payload = {
+        "event": "subscription.cancelled",
+        "payload": {
+            "subscription": {
+                "entity": {
+                    "id": "sub_123",
+                    "plan_id": "plan_starter_usd",
+                    "status": "cancelled",
+                }
+            }
+        },
+    }
+
+    response = await razorpay_webhooks.receive_razorpay_webhook(
+        _request(payload), session
+    )
+
+    assert response == {"received": True}
+    assert subscription.status == "cancelled"
+    # Provider lookup plus the newer-subscription guard; no tenant downgrade.
+    assert session.execute.await_count == 2
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

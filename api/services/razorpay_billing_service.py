@@ -110,6 +110,18 @@ def verify_webhook_signature(raw_body: bytes, signature: str | None) -> None:
         )
 
 
+def verify_checkout_signature(
+    *, payment_id: str, subscription_id: str, signature: str
+) -> None:
+    _, key_secret = _provider_credentials()
+    message = f"{payment_id}|{subscription_id}".encode()
+    expected = hmac.new(key_secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    if not signature or not hmac.compare_digest(expected, signature):
+        raise APIError(
+            status_code=401, code="BILL_401", error="invalid_checkout_signature"
+        )
+
+
 def webhook_event_id(raw_body: bytes, header_value: str | None) -> str:
     return (
         header_value.strip()

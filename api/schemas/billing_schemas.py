@@ -73,6 +73,23 @@ class BillingCheckoutResponse(BaseModel):
     timestamp: datetime
 
 
+class BillingCheckoutVerificationRequest(BaseModel):
+    razorpay_payment_id: str
+    razorpay_subscription_id: str
+    razorpay_signature: str
+
+
+class BillingCheckoutVerificationData(BaseModel):
+    verified: bool = True
+    plan_tier: PaidPlanName
+
+
+class BillingCheckoutVerificationResponse(BaseModel):
+    data: BillingCheckoutVerificationData
+    request_id: str
+    timestamp: datetime
+
+
 class BillingSubscriptionData(BaseModel):
     provider: Literal["razorpay"] | None = None
     provider_subscription_id: str | None = None

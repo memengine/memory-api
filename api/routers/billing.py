@@ -19,13 +19,20 @@ from api.schemas.billing_schemas import (
     BillingCheckoutData,
     BillingCheckoutRequest,
     BillingCheckoutResponse,
+    BillingCheckoutVerificationData,
+    BillingCheckoutVerificationRequest,
+    BillingCheckoutVerificationResponse,
     BillingPlan,
     BillingPlanFeatures,
     BillingPlanLimits,
     BillingSubscriptionData,
     BillingSubscriptionResponse,
 )
-from api.services.razorpay_billing_service import create_subscription, public_key_id
+from api.services.razorpay_billing_service import (
+    create_subscription,
+    public_key_id,
+    verify_checkout_signature,
+)
 
 router = APIRouter(prefix="/v1/billing", tags=["billing"])
 
@@ -219,6 +226,24 @@ async def create_billing_checkout(
     tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
 ) -> BillingCheckoutResponse:
     tenant_uuid = uuid.UUID(tenant_id)
+    budget = (
+        await session.execute(
+            # Serialize checkout creation for one tenant. Without this lock,
+            # simultaneous browser tabs can each create a Razorpay subscription
+            # before either request persists its local record.
+            select(TenantBudget)
+            .where(TenantBudget.tenant_id == tenant_uuid)
+            .limit(1)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if budget is None:
+        raise APIError(
+            status_code=503,
+            code="BILL_503",
+            error="tenant_billing_not_ready",
+        )
+
     active_subscription = (
         await session.execute(
             select(BillingSubscription)
@@ -285,6 +310,43 @@ async def create_billing_checkout(
             plan_tier=payload.plan_tier,
             billing_interval=payload.billing_interval,
             currency=payload.currency,
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post("/checkout/verify", response_model=BillingCheckoutVerificationResponse)
+async def verify_billing_checkout(
+    request: Request,
+    payload: BillingCheckoutVerificationRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+) -> BillingCheckoutVerificationResponse:
+    subscription = (
+        await session.execute(
+            select(BillingSubscription).where(
+                BillingSubscription.tenant_id == uuid.UUID(tenant_id),
+                BillingSubscription.provider_subscription_id
+                == payload.razorpay_subscription_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if subscription is None:
+        raise APIError(status_code=404, code="BILL_404", error="subscription_not_found")
+
+    verify_checkout_signature(
+        payment_id=payload.razorpay_payment_id,
+        subscription_id=payload.razorpay_subscription_id,
+        signature=payload.razorpay_signature,
+    )
+    if subscription.status == "created":
+        subscription.status = "authenticated"
+        await session.commit()
+
+    return BillingCheckoutVerificationResponse(
+        data=BillingCheckoutVerificationData(
+            plan_tier=subscription.plan_tier.value,
         ),
         request_id=get_request_id(request),
         timestamp=utc_now(),

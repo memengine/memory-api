@@ -37,6 +37,7 @@ TERMINAL_EVENTS = {
     "subscription.expired",
     "subscription.halted",
 }
+CURRENT_SUBSCRIPTION_STATUSES = {"authenticated", "active"}
 
 
 @router.post("")
@@ -114,21 +115,39 @@ async def receive_razorpay_webhook(
     subscription.current_end = unix_timestamp(entity.get("current_end"))
     subscription.cancel_at_period_end = bool(entity.get("has_scheduled_changes"))
 
-    if event_type in ACTIVATION_EVENTS:
-        await session.execute(
-            update(TenantBudget)
-            .where(TenantBudget.tenant_id == subscription.tenant_id)
-            .values(
-                plan_tier=subscription.plan_tier,
-                **get_limits(subscription.plan_tier.value),
+    # Razorpay does not guarantee webhook delivery order. A delayed event for
+    # an older subscription must not overwrite limits from a newer active one.
+    newer_active_subscription = None
+    if event_type in ACTIVATION_EVENTS | TERMINAL_EVENTS:
+        newer_active_subscription = (
+            await session.execute(
+                select(BillingSubscription.id)
+                .where(
+                    BillingSubscription.tenant_id == subscription.tenant_id,
+                    BillingSubscription.id != subscription.id,
+                    BillingSubscription.status.in_(CURRENT_SUBSCRIPTION_STATUSES),
+                    BillingSubscription.created_at > subscription.created_at,
+                )
+                .limit(1)
             )
-        )
-        await session.execute(
-            update(Tenant)
-            .where(Tenant.id == subscription.tenant_id)
-            .values(plan_tier=subscription.plan_tier)
-        )
-    elif event_type in TERMINAL_EVENTS:
+        ).scalar_one_or_none()
+
+    if event_type in ACTIVATION_EVENTS:
+        if newer_active_subscription is None:
+            await session.execute(
+                update(TenantBudget)
+                .where(TenantBudget.tenant_id == subscription.tenant_id)
+                .values(
+                    plan_tier=subscription.plan_tier,
+                    **get_limits(subscription.plan_tier.value),
+                )
+            )
+            await session.execute(
+                update(Tenant)
+                .where(Tenant.id == subscription.tenant_id)
+                .values(plan_tier=subscription.plan_tier)
+            )
+    elif event_type in TERMINAL_EVENTS and newer_active_subscription is None:
         await session.execute(
             update(TenantBudget)
             .where(TenantBudget.tenant_id == subscription.tenant_id)

@@ -9,6 +9,7 @@ import pytest
 from api.errors import APIError
 from api.services.razorpay_billing_service import (
     create_subscription,
+    verify_checkout_signature,
     verify_webhook_signature,
 )
 
@@ -55,3 +56,21 @@ async def test_create_subscription_uses_configured_provider_plan(
     assert result["id"] == "sub_123"
     assert b'"plan_id":"plan_starter_monthly_usd"' in captured["body"]
     assert str(captured["authorization"]).startswith("Basic ")
+
+
+def test_verify_checkout_signature_binds_payment_to_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_test_key")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "test-secret")
+    signature = hmac.new(b"test-secret", b"pay_123|sub_123", hashlib.sha256).hexdigest()
+
+    verify_checkout_signature(
+        payment_id="pay_123", subscription_id="sub_123", signature=signature
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        verify_checkout_signature(
+            payment_id="pay_123", subscription_id="sub_other", signature=signature
+        )
+    assert exc_info.value.status_code == 401
