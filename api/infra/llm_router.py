@@ -177,15 +177,18 @@ class LLMRouter:
 
         cache_key = f"llm_provider_health:{capability}:{provider.provider_name}"
         cached = self._get_cached(cache_key)
-        if isinstance(cached, dict) and "available" in cached:
-            return bool(cached["available"])
+        if isinstance(cached, dict) and cached.get("available") is True:
+            return True
 
         available = bool(provider.is_available())
-        self._set_cached(
-            cache_key,
-            {"available": available},
-            self.HEALTH_CACHE_TTL_SECONDS,
-        )
+        if available:
+            self._set_cached(
+                cache_key,
+                {"available": True},
+                self.HEALTH_CACHE_TTL_SECONDS,
+            )
+        else:
+            self._delete_cached(cache_key)
         return available
 
     @staticmethod
@@ -221,6 +224,14 @@ class LLMRouter:
             return
         try:
             self.redis_client.set(key, json.dumps(payload), ex=ttl_seconds)
+        except Exception:
+            return
+
+    def _delete_cached(self, key: str) -> None:
+        if self.redis_client is None:
+            return
+        try:
+            self.redis_client.delete(key)
         except Exception:
             return
 

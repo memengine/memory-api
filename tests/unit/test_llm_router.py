@@ -30,6 +30,10 @@ class FakeRedis:
         self.values[key] = value
         return True
 
+    def delete(self, key: str):
+        self.values.pop(key, None)
+        return 1
+
 
 class FakeExecuteResult:
     def __init__(self, scalar=None) -> None:
@@ -149,6 +153,23 @@ def test_health_cache_prevents_repeat_availability_checks() -> None:
 
     assert first.provider_name == "openai"
     assert second.provider_name == "openai"
+    assert provider._check_availability.call_count == 1
+    assert json.loads(redis_client.values["llm_provider_health:embed:openai"])["available"] is True
+
+
+def test_health_cache_rechecks_a_stale_negative_result() -> None:
+    redis_client = FakeRedis()
+    redis_client.values["llm_provider_health:embed:openai"] = json.dumps({"available": False})
+    provider = FakeProvider(provider_name="openai", available=True, embedding_dimensions=1536)
+    provider._check_availability = MagicMock(return_value=True)
+    router = LLMRouter(
+        redis_client=redis_client,
+        provider_factories={"openai": lambda **kwargs: provider},
+    )
+
+    selected = router.get_embed_provider()
+
+    assert selected.provider_name == "openai"
     assert provider._check_availability.call_count == 1
     assert json.loads(redis_client.values["llm_provider_health:embed:openai"])["available"] is True
 
