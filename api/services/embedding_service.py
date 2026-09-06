@@ -175,9 +175,6 @@ class EmbeddingService:
         )
 
     async def get_active_model(self) -> EmbeddingModelRecord:
-        if self._env_model_overrides_active_model():
-            return self._default_model_record()
-
         cached = await self._get_cached_active_model_async()
         if cached is not None:
             return cached
@@ -197,9 +194,6 @@ class EmbeddingService:
         return record
 
     def get_active_model_sync(self) -> EmbeddingModelRecord:
-        if self._env_model_overrides_active_model():
-            return self._default_model_record()
-
         cached = self._get_cached_active_model_sync()
         if cached is not None:
             return cached
@@ -429,19 +423,6 @@ class EmbeddingService:
             is_active=True,
             deprecated_at=None,
             created_at=datetime.now(UTC).isoformat(),
-        )
-
-    @staticmethod
-    def _env_model_overrides_active_model() -> bool:
-        return any(
-            os.getenv(name)
-            for name in (
-                "EMBEDDING_PROVIDER",
-                "EMBEDDING_MODEL",
-                "EMBEDDING_MODEL_ID",
-                "EMBEDDING_DIMENSIONS",
-                "QDRANT_COLLECTION",
-            )
         )
 
     @staticmethod

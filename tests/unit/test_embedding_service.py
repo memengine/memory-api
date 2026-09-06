@@ -111,6 +111,32 @@ async def test_get_active_model_uses_cache_after_first_lookup() -> None:
     session.execute.assert_awaited_once()
 
 
+def test_get_active_model_sync_prefers_database_record_over_environment_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_model = make_model(
+        model_id="openai-text-embedding-3-small-v1",
+        provider="openai",
+        model_name="text-embedding-3-small",
+        qdrant_collection="memories_openai",
+    )
+    session = MagicMock()
+    session.execute.return_value = FakeSyncExecuteResult(scalar=database_model)
+    monkeypatch.setenv("EMBEDDING_MODEL_ID", "incorrect-environment-model")
+    monkeypatch.setenv("QDRANT_COLLECTION", "incorrect-environment-collection")
+    service = EmbeddingService(
+        sync_session=session,
+        async_redis_client=FakeAsyncRedis(),
+        sync_redis_client=FakeSyncRedis(),
+        gemini_client=MagicMock(),
+    )
+
+    model = service.get_active_model_sync()
+
+    assert model.id == "openai-text-embedding-3-small-v1"
+    assert model.qdrant_collection == "memories_openai"
+
+
 @pytest.mark.asyncio
 async def test_embed_uses_requested_model_and_returns_metadata() -> None:
     model = make_model(model_id="gemini-embedding-001-v2", qdrant_collection="memories_v2")
