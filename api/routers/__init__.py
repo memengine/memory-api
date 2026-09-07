@@ -3,6 +3,7 @@ from api.routers.api_keys import router as api_keys_router
 from api.routers.billing import router as billing_router
 from api.routers.internal import router as internal_router
 from api.routers.memories import router as memories_router
+from api.routers.mcp import router as mcp_router
 from api.routers.razorpay_webhooks import router as razorpay_webhooks_router
 from api.routers.tenant import router as tenant_router
 from api.routers.users import router as users_router
@@ -15,6 +16,7 @@ __all__ = [
     "billing_router",
     "internal_router",
     "memories_router",
+    "mcp_router",
     "razorpay_webhooks_router",
     "tenant_router",
     "users_router",

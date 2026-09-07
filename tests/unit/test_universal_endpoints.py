@@ -75,6 +75,15 @@ class FakeQualityGateService:
 class FakeCacheService:
     def __init__(self) -> None:
         self.values: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.job_statuses: dict[str, dict[str, Any]] = {}
+
+    async def get_job_status(self, job_id: str) -> dict[str, Any] | None:
+        value = self.job_statuses.get(job_id)
+        return dict(value) if value is not None else None
+
+    async def set_job_status(self, job_id: str, status_payload: dict[str, Any], ttl: int = 3600) -> None:
+        del ttl
+        self.job_statuses[job_id] = dict(status_payload)
 
     async def get_idempotent_response(
         self,
@@ -216,6 +225,108 @@ def test_universal_add_reuses_scoped_idempotent_job(monkeypatch) -> None:
     assert second.status_code == 200
     assert first.json()["job_id"] == second.json()["job_id"]
     assert dispatches == 1
+
+
+def test_universal_job_status_hides_jobs_owned_by_another_user_or_agent(monkeypatch) -> None:
+    app = _build_test_app()
+    cache = FakeCacheService()
+    app.dependency_overrides[get_cache_service] = lambda: cache
+    cache.job_statuses["job-owned-by-someone-else"] = {
+        "user_uui_id": str(uuid.uuid4()),
+        "agent_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    }
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/universal/memories/jobs/job-owned-by-someone-else",
+            headers={
+                "Authorization": "ApiKey agent_sk_valid",
+                "X-MemoryOS-UUI": "uui_valid",
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "UAT_404"
+
+
+def test_universal_job_status_allows_the_submitting_user_and_agent(monkeypatch) -> None:
+    app = _build_test_app()
+    cache = FakeCacheService()
+    app.dependency_overrides[get_cache_service] = lambda: cache
+    cache.job_statuses["job-owned-by-caller"] = {
+        "user_uui_id": "11111111-1111-1111-1111-111111111111",
+        "agent_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    }
+
+    class PendingResult:
+        state = "PENDING"
+        result = None
+
+        def failed(self) -> bool:
+            return False
+
+    monkeypatch.setattr("api.routers.universal.AsyncResult", lambda *_args, **_kwargs: PendingResult())
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/universal/memories/jobs/job-owned-by-caller",
+            headers={
+                "Authorization": "ApiKey agent_sk_valid",
+                "X-MemoryOS-UUI": "uui_valid",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == "job-owned-by-caller"
+
+
+def test_mcp_capability_rechecks_live_grant_before_universal_access(monkeypatch) -> None:
+    """A signed capability cannot outlive a consent revocation."""
+    from api.db.models import GlobalAgent, PermissionGrant, UniversalUser
+
+    agent_id = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    user_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    grant_id = uuid.uuid4()
+    capability = SimpleNamespace(
+        agent_id=str(agent_id), user_uui_id=str(user_id), grant_id=str(grant_id)
+    )
+
+    class CapabilitySession(FakeSessionContext):
+        async def get(self, model, identifier):
+            if model is GlobalAgent and identifier == agent_id:
+                return SimpleNamespace(id=agent_id, is_active=True)
+            if model is UniversalUser and identifier == user_id:
+                return SimpleNamespace(id=user_id, is_active=True)
+            if model is PermissionGrant and identifier == grant_id:
+                return SimpleNamespace(
+                    id=grant_id,
+                    user_uui_id=user_id,
+                    agent_id=agent_id,
+                    is_active=False,
+                    expires_at=None,
+                )
+            return None
+
+    app = FastAPI()
+    app.add_middleware(
+        UniversalAuthMiddleware,
+        session_factory=lambda: CapabilitySession(),
+        global_agent_service_factory=FakeGlobalAgentService,
+        uui_service_factory=FakeUUIAuthService,
+    )
+    app.include_router(router)
+    monkeypatch.setattr(
+        "api.middleware.universal_auth.verify_universal_mcp_capability",
+        lambda token: capability if token == "valid-capability" else None,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/universal/memories/jobs/any-job",
+            headers={"Authorization": "Bearer valid-capability"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "UAT_001"
 
 
 def test_universal_add_rejects_read_only_grant(monkeypatch) -> None:

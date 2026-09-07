@@ -39,6 +39,7 @@ from api.routers import api_keys_router
 from api.routers import billing_router
 from api.routers import internal_router
 from api.routers import memories_router
+from api.routers import mcp_router
 from api.routers import tenant_router
 from api.routers import uui_router
 from api.routers import users_router
@@ -351,6 +352,7 @@ def create_app() -> FastAPI:
         }
 
     app.include_router(memories_router)
+    app.include_router(mcp_router)
     app.include_router(internal_router)
     app.include_router(tenant_router)
     app.include_router(uui_router)

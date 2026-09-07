@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
-from typing import Awaitable
-from typing import Callable
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from api.db.database import SessionLocal
+from api.db.models import GlobalAgent, PermissionGrant, UniversalUser
 from api.dependencies import get_cache_service
 from api.services.global_agent_service import GlobalAgentService
+from api.services.mcp_universal_capability_service import (
+    verify_universal_mcp_capability,
+)
 from api.services.uui_service import UUIService
 
 
@@ -55,6 +59,43 @@ class UniversalAuthMiddleware:
         auth_header = request.headers.get("authorization", "").strip()
         uui_token = request.headers.get("x-memoryos-uui", "").strip()
 
+        if auth_header.lower().startswith("bearer "):
+            capability = verify_universal_mcp_capability(auth_header[7:].strip())
+            if capability is None:
+                await self._forbidden(scope, receive, send)
+                return
+            try:
+                async with self.session_factory() as session:
+                    global_agent = await session.get(GlobalAgent, uuid.UUID(capability.agent_id))
+                    universal_user = await session.get(UniversalUser, uuid.UUID(capability.user_uui_id))
+                    grant = await session.get(PermissionGrant, uuid.UUID(capability.grant_id))
+            except Exception:  # noqa: BLE001 - authentication must fail closed on lookup faults.
+                global_agent = universal_user = grant = None
+            if (
+                global_agent is None
+                or universal_user is None
+                or grant is None
+                or not bool(global_agent.is_active)
+                or not bool(universal_user.is_active)
+                or not bool(grant.is_active)
+                or str(grant.user_uui_id) != capability.user_uui_id
+                or str(grant.agent_id) != capability.agent_id
+                or (grant.expires_at is not None and grant.expires_at <= datetime.now(UTC))
+            ):
+                await self._forbidden(scope, receive, send)
+                return
+            state = scope.setdefault("state", {})
+            state["global_agent"] = global_agent
+            state["universal_user"] = universal_user
+            state["auth_method"] = "mcp_universal_capability"
+            state["auth_scheme"] = "bearer"
+            target_app = self.universal_app or getattr(getattr(scope.get("app"), "state", None), "universal_app", None)
+            if target_app is not None:
+                await target_app(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
         if not auth_header or not uui_token:
             await self._forbidden(scope, receive, send)
             return
@@ -74,7 +115,7 @@ class UniversalAuthMiddleware:
         if main_app is not None:
             try:
                 cache_service = get_cache_service(request)
-            except Exception:
+            except Exception:  # noqa: BLE001 - preserve the existing no-cache fallback.
                 cache_service = getattr(getattr(main_app, "state", None), "cache_service", None)
 
         try:
@@ -87,7 +128,7 @@ class UniversalAuthMiddleware:
                     universal_user = await resolve_by_token(uui_token)
                 else:
                     universal_user = await uui_service.resolve(uui_token)
-        except Exception:
+        except Exception:  # noqa: BLE001 - authentication must fail closed on lookup faults.
             global_agent = None
             universal_user = None
 

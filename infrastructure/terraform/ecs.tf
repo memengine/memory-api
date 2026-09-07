@@ -37,7 +37,7 @@ resource "aws_ecs_cluster" "memoryos" {
 
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.enable_container_insights ? "enabled" : "disabled"
   }
 
   tags = merge(local.common_tags, {
@@ -82,6 +82,7 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
       aws_secretsmanager_secret.secret_key.arn,
       aws_secretsmanager_secret.admin_secret.arn,
       aws_secretsmanager_secret.uui_session_secret.arn,
+      aws_secretsmanager_secret.mcp_universal_capability_secret.arn,
       aws_secretsmanager_secret.oauth_credential_encryption_key.arn,
       aws_secretsmanager_secret.qdrant_api_key.arn,
       aws_secretsmanager_secret.qdrant_url.arn,
@@ -178,6 +179,8 @@ locals {
     { name = "QDRANT_PREFER_GRPC", value = tostring(var.qdrant_prefer_grpc) },
     { name = "QDRANT_ASYNC_POOL_SIZE", value = tostring(var.qdrant_async_pool_size) },
     { name = "CLERK_JWT_ISSUER", value = var.clerk_jwt_issuer },
+    { name = "CLERK_JWT_AUDIENCES", value = var.clerk_jwt_audiences },
+    { name = "MEMORYOS_MCP_CLERK_AUDIENCE", value = var.mcp_clerk_audience },
     { name = "LLM_PROVIDER_ORDER", value = var.llm_provider_order },
     { name = "OPENAI_MODEL", value = var.openai_model },
     { name = "OPENAI_TIMEOUT_SECONDS", value = tostring(var.openai_timeout_seconds) },
@@ -215,6 +218,7 @@ locals {
     { name = "SECRET_KEY", valueFrom = aws_secretsmanager_secret.secret_key.arn },
     { name = "ADMIN_SECRET", valueFrom = aws_secretsmanager_secret.admin_secret.arn },
     { name = "UUI_SESSION_SECRET", valueFrom = aws_secretsmanager_secret.uui_session_secret.arn },
+    { name = "MCP_UNIVERSAL_CAPABILITY_SECRET", valueFrom = aws_secretsmanager_secret.mcp_universal_capability_secret.arn },
     { name = "OAUTH_CREDENTIAL_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.oauth_credential_encryption_key.arn },
     { name = "QDRANT_API_KEY", valueFrom = aws_secretsmanager_secret.qdrant_api_key.arn },
     { name = "QDRANT_URL", valueFrom = aws_secretsmanager_secret.qdrant_url.arn },

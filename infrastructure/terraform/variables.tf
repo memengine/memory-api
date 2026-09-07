@@ -186,6 +186,18 @@ variable "clerk_jwt_issuer" {
   type        = string
 }
 
+variable "clerk_jwt_audiences" {
+  description = "Comma-separated Clerk JWT audiences accepted by the API. Keep empty until all existing clients are listed."
+  type        = string
+  default     = ""
+}
+
+variable "mcp_clerk_audience" {
+  description = "Dedicated Clerk OAuth client audience required for requests from the public MCP gateway. Empty disables public MCP calls fail-closed."
+  type        = string
+  default     = ""
+}
+
 variable "openai_api_key_secret_name" {
   description = "Secrets Manager name for OPENAI_API_KEY."
   type        = string
@@ -208,6 +220,12 @@ variable "uui_session_secret_name" {
   description = "Secrets Manager name for UUI_SESSION_SECRET used by Memory Passport sessions."
   type        = string
   default     = "memoryos/UUI_SESSION_SECRET"
+}
+
+variable "mcp_universal_capability_secret_name" {
+  description = "Secrets Manager name for MCP_UNIVERSAL_CAPABILITY_SECRET used only to sign short-lived public MCP Universal capabilities."
+  type        = string
+  default     = "memoryos/MCP_UNIVERSAL_CAPABILITY_SECRET"
 }
 
 variable "oauth_credential_encryption_key_secret_name" {
@@ -445,6 +463,12 @@ variable "enable_scale_worker_autoscaling" {
   description = "Whether queue-depth alarms may start scale-worker tasks."
   type        = bool
   default     = true
+}
+
+variable "enable_container_insights" {
+  description = "Whether ECS Container Insights publishes CloudWatch operational metrics. Keep disabled for the low-cost production profile."
+  type        = bool
+  default     = false
 }
 
 variable "celery_log_level" {

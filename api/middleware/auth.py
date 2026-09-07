@@ -48,6 +48,8 @@ AUTH_CACHE_TTL_SECONDS = 300
 JWKS_CACHE_TTL_SECONDS = 300
 AUTH_CACHE_PREFIX = "apikey"
 AUTH_FAILURE_PREFIX = "memoryos:auth:failure"
+MCP_PUBLIC_CALLER_HEADER = "x-memoryos-mcp-client"
+MCP_PUBLIC_CALLER_VALUE = "public-v1"
 REDIS_FAILURES = (RedisConnectionError, RedisTimeoutError)
 
 
@@ -63,6 +65,8 @@ class ApiKeyAuthResult:
 class JwtAuthResult:
     user_id: str | None
     tenant_id: str | None
+    email: str | None = None
+    email_verified: bool = False
     error: str | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -85,6 +89,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         http_client: httpx.AsyncClient | None = None,
         clerk_issuer: str | None = None,
         clerk_jwks_url: str | None = None,
+        clerk_audiences: tuple[str, ...] | None = None,
+        mcp_clerk_audience: str | None = None,
     ) -> None:
         super().__init__(app)
         self.session_factory = session_factory or SessionLocal
@@ -107,6 +113,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "CLERK_JWKS_URL",
             f"{self.clerk_issuer}/.well-known/jwks.json" if self.clerk_issuer else "",
         )
+        configured_audiences = clerk_audiences
+        if configured_audiences is None:
+            configured_audiences = tuple(
+                value.strip()
+                for value in os.getenv("CLERK_JWT_AUDIENCES", "").split(",")
+                if value.strip()
+            )
+        self.clerk_audiences = frozenset(configured_audiences)
+        self.mcp_clerk_audience = str(
+            mcp_clerk_audience or os.getenv("MEMORYOS_MCP_CLERK_AUDIENCE", "")
+        ).strip()
         self._jwks_cache: dict[str, Any] | None = None
         self._jwks_cached_at = 0.0
 
@@ -148,7 +165,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         scheme_normalized = scheme.lower()
         if scheme_normalized == "bearer":
-            auth_result = await self._authenticate_jwt(credentials.strip())
+            is_public_mcp_call = (
+                request.headers.get(MCP_PUBLIC_CALLER_HEADER, "").strip().lower()
+                == MCP_PUBLIC_CALLER_VALUE
+            )
+            auth_result = await self._authenticate_jwt(
+                credentials.strip(),
+                require_mcp_audience=is_public_mcp_call,
+            )
             if auth_result is None:
                 return await self._unauthorized(
                     request=request,
@@ -156,7 +180,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     reason="JWT verification failed",
                 )
             requires_tenant_context = request.url.path.startswith("/v1/tenant")
-            if auth_result.error_code and requires_tenant_context:
+            if auth_result.error_code and (requires_tenant_context or is_public_mcp_call):
                 return await self._jwt_auth_error(
                     request=request,
                     request_id=request_id,
@@ -167,6 +191,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     org_id=auth_result.org_id,
                 )
             request.state.user_id = auth_result.user_id
+            request.state.auth_email = auth_result.email
+            request.state.auth_email_verified = auth_result.email_verified
             request.state.tenant_id = (
                 auth_result.tenant_id if not auth_result.error_code else None
             )
@@ -202,7 +228,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             reason="Unsupported authorization scheme",
         )
 
-    async def _authenticate_jwt(self, token: str) -> JwtAuthResult | None:
+    async def _authenticate_jwt(
+        self,
+        token: str,
+        *,
+        require_mcp_audience: bool = False,
+    ) -> JwtAuthResult | None:
         if not self.clerk_jwks_url:
             return None
 
@@ -230,6 +261,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if self.clerk_issuer and claims.get("iss") not in {None, self.clerk_issuer}:
                 return None
 
+            # A Clerk signature proves the token came from the same instance;
+            # the audience check prevents a token minted for an unrelated Clerk
+            # OAuth application from being replayed against this API. Keep it
+            # opt-in during the transition so existing deployments can add both
+            # dashboard and MCP audiences before enforcing it.
+            required_audiences = self.clerk_audiences
+            if require_mcp_audience:
+                # Public MCP traffic has a separate OAuth client.  Fail closed
+                # until its audience is configured instead of accepting any
+                # token from the same Clerk instance.
+                if not self.mcp_clerk_audience:
+                    return None
+                required_audiences = frozenset({self.mcp_clerk_audience})
+            if required_audiences:
+                token_audience = claims.get("aud")
+                audiences = (
+                    {str(value) for value in token_audience}
+                    if isinstance(token_audience, list)
+                    else {str(token_audience)} if token_audience else set()
+                )
+                if not audiences.intersection(required_audiences):
+                    return None
+
             expires_at = claims.get("exp")
             if expires_at is not None and time.time() >= float(expires_at):
                 return None
@@ -239,6 +293,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return None
 
             org_id = str(claims.get("org_id", "")).strip() or None
+            email = str(claims.get("email") or "").strip().lower() or None
+            email_verified = claims.get("email_verified") is True
             if org_id is None:
                 # Legacy service tokens may carry a direct tenant claim, but an
                 # interactive Clerk session must be scoped by its active org.
@@ -247,6 +303,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return JwtAuthResult(
                         user_id=str(subject),
                         tenant_id=tenant_id,
+                        email=email,
+                        email_verified=email_verified,
                     )
                 return JwtAuthResult(
                     user_id=str(subject),
@@ -257,6 +315,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         "Please select or create a workspace in the dashboard to continue."
                     ),
                     org_id=None,
+                    email=email,
+                    email_verified=email_verified,
                 )
 
             org_name = (
@@ -278,12 +338,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         "No MemoryOS tenant found for this workspace. Please try again or contact support."
                     ),
                     org_id=org_id,
+                    email=email,
+                    email_verified=email_verified,
                 )
 
             return JwtAuthResult(
                 user_id=str(subject),
                 tenant_id=tenant_id,
                 org_id=org_id,
+                email=email,
+                email_verified=email_verified,
             )
         except (JWTError, ValueError, TypeError, httpx.HTTPError):
             return None

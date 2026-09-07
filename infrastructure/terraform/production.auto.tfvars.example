@@ -22,6 +22,10 @@ redis_transit_encryption_enabled = false
 redis_auth_enabled               = false
 redis_snapshot_retention_limit   = 0
 
+# Keep ECS task diagnostics in CloudWatch Logs while avoiding Container
+# Insights' additional CloudWatch metric series in low-cost environments.
+enable_container_insights = false
+
 celery_scale_concurrency      = 4
 celery_growth_concurrency     = 3
 celery_starter_concurrency    = 3
@@ -52,6 +56,9 @@ retrieval_redis_cache_read_enabled       = true
 retrieval_overfetch_multiplier           = 3
 
 clerk_jwt_issuer = "https://your-clerk-instance.clerk.accounts.dev"
+# Once the dashboard and dedicated MCP OAuth client IDs are known, list both.
+# clerk_jwt_audiences = "dashboard-client-id,mcp-client-id"
+# mcp_clerk_audience  = "mcp-client-id"
 
 smtp_host  = ""
 smtp_port  = 587
@@ -72,6 +79,7 @@ data_encryption_write_mode = "disabled"
 # secret_key_secret_name                     = "memoryos/SECRET_KEY"
 # admin_secret_secret_name                   = "memoryos/ADMIN_SECRET"
 # uui_session_secret_name                    = "memoryos/UUI_SESSION_SECRET"
+# mcp_universal_capability_secret_name        = "memoryos/MCP_UNIVERSAL_CAPABILITY_SECRET"
 # oauth_credential_encryption_key_secret_name = "memoryos/OAUTH_CREDENTIAL_ENCRYPTION_KEY"
 # qdrant_api_key_secret_name                 = "memoryos/QDRANT_API_KEY"
 # qdrant_url_secret_name                     = "memoryos/QDRANT_URL"

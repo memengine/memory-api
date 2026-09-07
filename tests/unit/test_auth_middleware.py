@@ -137,6 +137,8 @@ def build_test_app(
     redis_client,
     http_client: httpx.AsyncClient,
     clerk_issuer: str = "https://clerk.example.test",
+    clerk_audiences: tuple[str, ...] | None = None,
+    mcp_clerk_audience: str | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.add_middleware(
@@ -146,6 +148,8 @@ def build_test_app(
         http_client=http_client,
         clerk_issuer=clerk_issuer,
         clerk_jwks_url=f"{clerk_issuer}/.well-known/jwks.json",
+        clerk_audiences=clerk_audiences,
+        mcp_clerk_audience=mcp_clerk_audience,
     )
 
     @app.get("/private")
@@ -182,6 +186,7 @@ def build_token(
     issuer: str,
     subject: str = "user_clerk_123",
     org_id: str | None = None,
+    audience: str | None = None,
 ) -> str:
     claims = {
         "sub": subject,
@@ -190,6 +195,8 @@ def build_token(
     }
     if org_id is not None:
         claims["org_id"] = org_id
+    if audience is not None:
+        claims["aud"] = audience
 
     return jwt.encode(
         claims,
@@ -224,6 +231,29 @@ def test_jwt_with_valid_org_id_maps_to_tenant_and_sets_request_state() -> None:
         "auth_scheme": "bearer",
         "auth_method": "clerk_jwt",
     }
+
+
+def test_configured_clerk_audiences_reject_unrelated_oauth_clients() -> None:
+    private_key, jwks = build_rsa_jwks()
+    tenant_id = uuid.uuid4()
+    org_id = "org_audience_123"
+    token = build_token(
+        private_key,
+        issuer="https://clerk.example.test",
+        org_id=org_id,
+        audience="unrelated-oauth-client",
+    )
+    app = build_test_app(
+        session_factory=FakeSessionFactory({org_id: tenant_id}),
+        redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
+        http_client=build_http_client(jwks),
+        clerk_audiences=("dashboard-client", "memoryos-mcp-client"),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/private", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 401
 
 
 def test_jwt_with_unmapped_org_id_provisions_tenant_and_sets_request_state() -> None:
@@ -274,3 +304,58 @@ def test_jwt_without_org_id_returns_auth_003() -> None:
     assert response.status_code == 401
     assert response.json()["error"] == "org_required"
     assert response.json()["code"] == "AUTH_003"
+
+
+def test_public_mcp_marker_requires_an_active_organisation() -> None:
+    private_key, jwks = build_rsa_jwks()
+    token = build_token(
+        private_key,
+        issuer="https://clerk.example.test",
+        org_id=None,
+        audience="memoryos-mcp-client",
+    )
+    app = build_test_app(
+        session_factory=FakeSessionFactory(),
+        redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
+        http_client=build_http_client(jwks),
+        mcp_clerk_audience="memoryos-mcp-client",
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/private",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-MemoryOS-MCP-Client": "public-v1",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_003"
+
+
+def test_public_mcp_marker_requires_the_dedicated_mcp_audience() -> None:
+    private_key, jwks = build_rsa_jwks()
+    token = build_token(
+        private_key,
+        issuer="https://clerk.example.test",
+        org_id="org_mcp_123",
+        audience="dashboard-client",
+    )
+    app = build_test_app(
+        session_factory=FakeSessionFactory({"org_mcp_123": uuid.uuid4()}),
+        redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
+        http_client=build_http_client(jwks),
+        mcp_clerk_audience="memoryos-mcp-client",
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/private",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-MemoryOS-MCP-Client": "public-v1",
+            },
+        )
+
+    assert response.status_code == 401

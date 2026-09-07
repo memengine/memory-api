@@ -45,6 +45,7 @@ from api.services.uui_service import UUIService
 
 UNIVERSAL_EXTRACTION_TASK_NAME = "api.tasks.universal_extraction_tasks.extract_universal_memory"
 UNIVERSAL_COLLECTION_NAME = "universal_memories"
+UNIVERSAL_JOB_STATUS_TTL_SECONDS = 7 * 24 * 60 * 60
 
 router = APIRouter(prefix="/v1/universal", tags=["universal"])
 
@@ -337,6 +338,17 @@ async def add_universal_memories(
         "queued_at": utc_now().isoformat(),
         "processing_status": "normal",
     }
+    # Celery's task-result backend is not an authorization store.  Persist the
+    # submitting user/agent pairing before dispatch so status requests can be
+    # authorised while the task is pending as well as after it completes.
+    await cache_service.set_job_status(
+        job_payload["job_id"],
+        {
+            "user_uui_id": str(user.id),
+            "agent_id": str(agent.id),
+        },
+        ttl=UNIVERSAL_JOB_STATUS_TTL_SECONDS,
+    )
     if payload.idempotency_key:
         await cache_service.set_idempotent_response(
             payload.idempotency_key,
@@ -389,8 +401,26 @@ async def add_universal_memories(
 
 @router.get("/memories/jobs/{job_id}", response_model=UniversalMemoryJobStatusResponse)
 async def get_universal_memory_job_status(
+    request: Request,
     job_id: str,
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
 ) -> UniversalMemoryJobStatusResponse:
+    agent = _current_global_agent(request)
+    user = _current_universal_user(request)
+    ownership = await cache_service.get_job_status(job_id)
+    if (
+        ownership is None
+        or str(ownership.get("user_uui_id") or "") != str(user.id)
+        or str(ownership.get("agent_id") or "") != str(agent.id)
+    ):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "universal_job_not_found",
+                "code": "UAT_404",
+                "request_id": get_request_id(request),
+            },
+        )
     result = AsyncResult(job_id, app=celery_app)
     payload = result.result if isinstance(result.result, dict) else None
     if payload is None:
