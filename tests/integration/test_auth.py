@@ -301,6 +301,45 @@ def test_bearer_token_maps_clerk_org_id_to_tenant() -> None:
     }
 
 
+def test_bearer_token_prefers_active_clerk_org_over_tenant_claim() -> None:
+    private_key, jwks = build_rsa_jwks()
+    issuer = "https://clerk.example.test"
+    tenant_from_org = uuid.uuid4()
+    stale_tenant_claim = uuid.uuid4()
+    org_id = "org_active_workspace"
+    token = jwt.encode(
+        {
+            "sub": "user_clerk_999",
+            "iss": issuer,
+            "exp": int(time.time()) + 3600,
+            "org_id": org_id,
+            "tenant_id": str(stale_tenant_claim),
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "test-key-id"},
+    )
+
+    async def jwks_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=jwks)
+
+    app = build_test_app(
+        session_factory=FakeSessionFactory(
+            api_keys=[],
+            clerk_org_to_tenant_id={org_id: tenant_from_org},
+        ),
+        redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(jwks_handler)),
+        clerk_issuer=issuer,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/private", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["tenant_id"] == str(tenant_from_org)
+
+
 def test_invalid_jwt_is_rejected_with_401() -> None:
     private_key, jwks = build_rsa_jwks()
     issuer = "https://clerk.example.test"

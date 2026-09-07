@@ -238,15 +238,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if not subject:
                 return None
 
-            tenant_id = self._jwt_tenant_id(claims)
-            if tenant_id is not None:
-                return JwtAuthResult(
-                    user_id=str(subject),
-                    tenant_id=tenant_id,
-                )
-
             org_id = str(claims.get("org_id", "")).strip() or None
             if org_id is None:
+                # Legacy service tokens may carry a direct tenant claim, but an
+                # interactive Clerk session must be scoped by its active org.
+                tenant_id = self._jwt_tenant_id(claims)
+                if tenant_id is not None:
+                    return JwtAuthResult(
+                        user_id=str(subject),
+                        tenant_id=tenant_id,
+                    )
                 return JwtAuthResult(
                     user_id=str(subject),
                     tenant_id=None,

@@ -720,7 +720,10 @@ async def get_memory_job_status(
     if not authenticated_user_id and not tenant_id:
         authenticated_user_id = get_authenticated_user_id(request)
     job = await memory_service.get_job_status(job_id=str(job_id))
-    if tenant_id and job.get("tenant_id") not in {None, str(tenant_id)}:
+    # A tenant-scoped caller may learn a job only when the authoritative job
+    # record explicitly names that same tenant. Treat missing ownership (for
+    # example, a legacy or malformed cache entry) as not found.
+    if tenant_id and str(job.get("tenant_id") or "") != str(tenant_id):
         raise APIError(status_code=404, code="JOB_404", error="job_not_found")
     return MemoryJobStatusResponse(
         data=MemoryJobStatusData(
