@@ -139,6 +139,7 @@ def build_test_app(
     clerk_issuer: str = "https://clerk.example.test",
     clerk_audiences: tuple[str, ...] | None = None,
     mcp_clerk_audience: str | None = None,
+    mcp_clerk_client_secret: str | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.add_middleware(
@@ -150,6 +151,7 @@ def build_test_app(
         clerk_jwks_url=f"{clerk_issuer}/.well-known/jwks.json",
         clerk_audiences=clerk_audiences,
         mcp_clerk_audience=mcp_clerk_audience,
+        mcp_clerk_client_secret=mcp_clerk_client_secret,
     )
 
     @app.get("/private")
@@ -331,7 +333,9 @@ def test_public_mcp_marker_requires_an_active_organisation() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json()["code"] == "AUTH_003"
+    # Public MCP now requires Clerk token introspection credentials before any
+    # bearer can be accepted; an unconfigured deployment must fail closed.
+    assert response.json()["code"] == "AUTH_001"
 
 
 def test_public_mcp_marker_requires_the_dedicated_mcp_audience() -> None:
@@ -347,6 +351,90 @@ def test_public_mcp_marker_requires_the_dedicated_mcp_audience() -> None:
         redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
         http_client=build_http_client(jwks),
         mcp_clerk_audience="memoryos-mcp-client",
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/private",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-MemoryOS-MCP-Client": "public-v1",
+            },
+        )
+
+    assert response.status_code == 401
+
+
+def test_public_mcp_marker_uses_clerk_introspection_when_oauth_jwt_has_no_audience() -> None:
+    private_key, jwks = build_rsa_jwks()
+    tenant_id = uuid.uuid4()
+    org_id = "org_mcp_123"
+    token = build_token(
+        private_key,
+        issuer="https://clerk.example.test",
+        org_id=org_id,
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/jwks.json"):
+            return httpx.Response(200, json=jwks)
+        if request.url.path.endswith("/oauth/token_info"):
+            assert request.headers["authorization"].startswith("Basic ")
+            return httpx.Response(
+                200,
+                json={
+                    "active": True,
+                    "client_id": "memoryos-mcp-client",
+                    "org_id": org_id,
+                },
+            )
+        return httpx.Response(404)
+
+    app = build_test_app(
+        session_factory=FakeSessionFactory({org_id: tenant_id}),
+        redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        mcp_clerk_audience="memoryos-mcp-client",
+        mcp_clerk_client_secret="test-mcp-client-secret",
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/private",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-MemoryOS-MCP-Client": "public-v1",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tenant_id"] == str(tenant_id)
+
+
+def test_public_mcp_marker_rejects_introspection_for_another_client() -> None:
+    private_key, jwks = build_rsa_jwks()
+    token = build_token(
+        private_key,
+        issuer="https://clerk.example.test",
+        org_id="org_mcp_123",
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/jwks.json"):
+            return httpx.Response(200, json=jwks)
+        if request.url.path.endswith("/oauth/token_info"):
+            return httpx.Response(
+                200,
+                json={"active": True, "client_id": "unrelated-client", "org_id": "org_mcp_123"},
+            )
+        return httpx.Response(404)
+
+    app = build_test_app(
+        session_factory=FakeSessionFactory({"org_mcp_123": uuid.uuid4()}),
+        redis_client=fakeredis.aioredis.FakeRedis(decode_responses=True),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        mcp_clerk_audience="memoryos-mcp-client",
+        mcp_clerk_client_secret="test-mcp-client-secret",
     )
 
     with TestClient(app) as client:

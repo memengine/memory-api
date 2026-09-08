@@ -198,6 +198,12 @@ variable "mcp_clerk_audience" {
   default     = ""
 }
 
+variable "mcp_clerk_client_secret_name" {
+  description = "Secrets Manager name for the Clerk OAuth client secret used to introspect public MCP tokens."
+  type        = string
+  default     = "memoryos/MCP_CLERK_CLIENT_SECRET"
+}
+
 variable "openai_api_key_secret_name" {
   description = "Secrets Manager name for OPENAI_API_KEY."
   type        = string

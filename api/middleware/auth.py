@@ -91,6 +91,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         clerk_jwks_url: str | None = None,
         clerk_audiences: tuple[str, ...] | None = None,
         mcp_clerk_audience: str | None = None,
+        mcp_clerk_client_secret: str | None = None,
     ) -> None:
         super().__init__(app)
         self.session_factory = session_factory or SessionLocal
@@ -123,6 +124,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.clerk_audiences = frozenset(configured_audiences)
         self.mcp_clerk_audience = str(
             mcp_clerk_audience or os.getenv("MEMORYOS_MCP_CLERK_AUDIENCE", "")
+        ).strip()
+        self.mcp_clerk_client_secret = str(
+            mcp_clerk_client_secret or os.getenv("MEMORYOS_MCP_CLERK_CLIENT_SECRET", "")
         ).strip()
         self._jwks_cache: dict[str, Any] | None = None
         self._jwks_cached_at = 0.0
@@ -266,22 +270,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # OAuth application from being replayed against this API. Keep it
             # opt-in during the transition so existing deployments can add both
             # dashboard and MCP audiences before enforcing it.
-            required_audiences = self.clerk_audiences
             if require_mcp_audience:
-                # Public MCP traffic has a separate OAuth client.  Fail closed
-                # until its audience is configured instead of accepting any
-                # token from the same Clerk instance.
-                if not self.mcp_clerk_audience:
+                # Clerk OAuth access-token JWTs can omit `aud`. Introspection
+                # is therefore the authoritative proof that this active token
+                # was issued to our dedicated public MCP client.
+                if not await self._validate_public_mcp_oauth_token(token, claims):
                     return None
-                required_audiences = frozenset({self.mcp_clerk_audience})
-            if required_audiences:
+            elif self.clerk_audiences:
                 token_audience = claims.get("aud")
                 audiences = (
                     {str(value) for value in token_audience}
                     if isinstance(token_audience, list)
                     else {str(token_audience)} if token_audience else set()
                 )
-                if not audiences.intersection(required_audiences):
+                if not audiences.intersection(self.clerk_audiences):
                     return None
 
             expires_at = claims.get("exp")
@@ -351,6 +353,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
         except (JWTError, ValueError, TypeError, httpx.HTTPError):
             return None
+
+    async def _validate_public_mcp_oauth_token(
+        self,
+        token: str,
+        claims: dict[str, Any],
+    ) -> bool:
+        """Fail closed unless Clerk confirms this is our active MCP OAuth token."""
+        if not self.clerk_issuer or not self.mcp_clerk_audience or not self.mcp_clerk_client_secret:
+            return False
+
+        response = await self.http_client.post(
+            f"{self.clerk_issuer}/oauth/token_info",
+            data={"token": token},
+            auth=(self.mcp_clerk_audience, self.mcp_clerk_client_secret),
+            timeout=5.0,
+        )
+        if response.status_code != 200:
+            return False
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("active") is not True:
+            return False
+        client_id = str(payload.get("client_id") or payload.get("aud") or "").strip()
+        if client_id != self.mcp_clerk_audience:
+            return False
+        introspected_org_id = str(payload.get("org_id") or "").strip()
+        jwt_org_id = str(claims.get("org_id") or "").strip()
+        return bool(introspected_org_id and jwt_org_id and introspected_org_id == jwt_org_id)
 
     def _jwt_tenant_id(self, claims: dict[str, Any]) -> str | None:
         # Support both direct custom claims and nested metadata if Clerk templates add them later.

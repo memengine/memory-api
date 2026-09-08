@@ -77,6 +77,11 @@ output "uui_session_secret_name" {
   value       = aws_secretsmanager_secret.uui_session_secret.name
 }
 
+output "mcp_clerk_client_secret_name" {
+  description = "Secrets Manager name that must contain the Clerk OAuth client secret used for MCP token introspection."
+  value       = aws_secretsmanager_secret.mcp_clerk_client_secret.name
+}
+
 output "oauth_credential_encryption_key_secret_name" {
   description = "Secrets Manager name that must contain OAUTH_CREDENTIAL_ENCRYPTION_KEY."
   value       = aws_secretsmanager_secret.oauth_credential_encryption_key.name

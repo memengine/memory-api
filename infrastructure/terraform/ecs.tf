@@ -83,6 +83,7 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
       aws_secretsmanager_secret.admin_secret.arn,
       aws_secretsmanager_secret.uui_session_secret.arn,
       aws_secretsmanager_secret.mcp_universal_capability_secret.arn,
+      aws_secretsmanager_secret.mcp_clerk_client_secret.arn,
       aws_secretsmanager_secret.oauth_credential_encryption_key.arn,
       aws_secretsmanager_secret.qdrant_api_key.arn,
       aws_secretsmanager_secret.qdrant_url.arn,
@@ -235,6 +236,11 @@ locals {
     { name = "CELERY_BROKER_URL", valueFrom = aws_secretsmanager_secret.celery_broker_url[0].arn },
     { name = "CELERY_RESULT_BACKEND", valueFrom = aws_secretsmanager_secret.celery_result_backend[0].arn },
   ] : [])
+  # The Clerk OAuth client secret is required only by the public API auth path;
+  # keep it out of Celery worker containers.
+  ecs_api_container_secrets = concat(local.ecs_container_secrets, [
+    { name = "MEMORYOS_MCP_CLERK_CLIENT_SECRET", valueFrom = aws_secretsmanager_secret.mcp_clerk_client_secret.arn },
+  ])
 
   celery_worker_configs = {
     scale = {
@@ -282,7 +288,7 @@ resource "aws_ecs_task_definition" "memoryos" {
         }
       ]
       environment = local.ecs_container_environment
-      secrets     = local.ecs_container_secrets
+      secrets     = local.ecs_api_container_secrets
       logConfiguration = {
         logDriver = "awslogs"
         options = {

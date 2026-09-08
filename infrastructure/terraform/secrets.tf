@@ -68,6 +68,20 @@ resource "aws_secretsmanager_secret" "mcp_universal_capability_secret" {
   })
 }
 
+resource "aws_secretsmanager_secret" "mcp_clerk_client_secret" {
+  name                    = var.mcp_clerk_client_secret_name
+  recovery_window_in_days = 7
+
+  lifecycle {
+    ignore_changes  = [tags]
+    prevent_destroy = true
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-mcp-clerk-client-secret"
+  })
+}
+
 resource "aws_secretsmanager_secret" "oauth_credential_encryption_key" {
   name                    = var.oauth_credential_encryption_key_secret_name
   recovery_window_in_days = 7
