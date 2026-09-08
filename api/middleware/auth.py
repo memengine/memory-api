@@ -361,14 +361,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
     ) -> bool:
         """Fail closed unless Clerk confirms this is our active MCP OAuth token."""
         if not self.clerk_issuer or not self.mcp_clerk_audience or not self.mcp_clerk_client_secret:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "public_mcp_token_introspection",
-                        "configured": False,
-                    }
-                )
-            )
             return False
 
         response = await self.http_client.post(
@@ -378,59 +370,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             timeout=5.0,
         )
         if response.status_code != 200:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "public_mcp_token_introspection",
-                        "configured": True,
-                        "status_code": response.status_code,
-                    }
-                )
-            )
             return False
         payload = response.json()
         if not isinstance(payload, dict) or payload.get("active") is not True:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "public_mcp_token_introspection",
-                        "configured": True,
-                        "status_code": response.status_code,
-                        "active": False,
-                    }
-                )
-            )
             return False
         client_id = str(payload.get("client_id") or payload.get("aud") or "").strip()
         if client_id != self.mcp_clerk_audience:
-            LOGGER.warning(
-                json.dumps(
-                    {
-                        "event": "public_mcp_token_introspection",
-                        "configured": True,
-                        "status_code": response.status_code,
-                        "active": True,
-                        "client_matches": False,
-                    }
-                )
-            )
             return False
         introspected_org_id = str(payload.get("org_id") or "").strip()
         jwt_org_id = str(claims.get("org_id") or "").strip()
-        org_matches = bool(introspected_org_id and jwt_org_id and introspected_org_id == jwt_org_id)
-        LOGGER.warning(
-            json.dumps(
-                {
-                    "event": "public_mcp_token_introspection",
-                    "configured": True,
-                    "status_code": response.status_code,
-                    "active": True,
-                    "client_matches": True,
-                    "org_matches": org_matches,
-                }
-            )
-        )
-        return org_matches
+        return bool(introspected_org_id and jwt_org_id and introspected_org_id == jwt_org_id)
 
     def _jwt_tenant_id(self, claims: dict[str, Any]) -> str | None:
         # Support both direct custom claims and nested metadata if Clerk templates add them later.
