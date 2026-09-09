@@ -58,6 +58,19 @@ class TenantMCPContextRequest(BaseModel):
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
 
 
+class TenantMCPSessionContextRequest(BaseModel):
+    """Compact bootstrap context for an authenticated MCP chat session."""
+
+    context_max_tokens: int = Field(default=180, ge=50, le=400)
+
+
+_SESSION_CONTEXT_QUERY = (
+    "Stable user preferences, long-lived working style, active goals, important decisions, "
+    "and unresolved clarifications relevant across an assistant chat session."
+)
+_SESSION_CONTEXT_LIMIT = 6
+
+
 def _public_tenant_mcp_external_user_id(request: Request) -> str:
     """Return a stable self-only profile identity for a verified public MCP caller.
 
@@ -124,6 +137,41 @@ async def context_for_public_tenant_mcp(
             limit=payload.limit,
             categories=payload.categories,
             format=payload.format,
+            context_max_tokens=payload.context_max_tokens,
+        ),
+        retriever_service=retriever_service,
+        proxy_user_service=proxy_user_service,
+        context_builder=context_builder,
+        cache_service=cache_service,
+        session=session,
+        tenant_id=str(request.state.tenant_id),
+    )
+
+
+@router.post("/tenant/session-context", response_model=MemoryRetrieveResponse)
+async def session_context_for_public_tenant_mcp(
+    request: Request,
+    payload: TenantMCPSessionContextRequest,
+    retriever_service: Annotated[RetrieverService, Depends(get_retriever_service)],
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    session: DbSession,
+) -> MemoryRetrieveResponse:
+    """Build a compact, self-scoped memory capsule at the start of a chat.
+
+    The caller supplies neither an identity nor a query.  A fixed bootstrap
+    query avoids leaking caller-selected profile scope while keeping ordinary
+    conversation turns free of retrieval round trips.
+    """
+    external_user_id = _public_tenant_mcp_external_user_id(request)
+    return await retrieve_memories(
+        request=request,
+        payload=MemoryRetrieveRequest(
+            external_user_id=external_user_id,
+            query=_SESSION_CONTEXT_QUERY,
+            limit=_SESSION_CONTEXT_LIMIT,
+            format="bullets",
             context_max_tokens=payload.context_max_tokens,
         ),
         retriever_service=retriever_service,
