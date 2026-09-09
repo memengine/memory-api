@@ -328,11 +328,13 @@ class MemoryService:
         authenticated_user_id: str | None,
         memory_id: str,
         tenant_id: str | None = None,
+        external_user_id: str | None = None,
     ) -> Memory:
         memory = await self._get_authorized_memory(
             authenticated_user_id=authenticated_user_id,
             memory_id=memory_id,
             tenant_id=tenant_id,
+            external_user_id=external_user_id,
         )
         return memory
 
@@ -345,11 +347,13 @@ class MemoryService:
         importance_score: float | None,
         is_archived: bool | None,
         tenant_id: str | None = None,
+        external_user_id: str | None = None,
     ) -> Memory:
         memory = await self._get_authorized_memory(
             authenticated_user_id=authenticated_user_id,
             memory_id=memory_id,
             tenant_id=tenant_id,
+            external_user_id=external_user_id,
         )
         requires_vector_sync = content is not None or importance_score is not None or is_archived is not None
         next_content = content if content is not None else memory.content
@@ -429,11 +433,13 @@ class MemoryService:
         memory_id: str,
         hard_delete: bool,
         tenant_id: str | None = None,
+        external_user_id: str | None = None,
     ) -> bool:
         memory = await self._get_authorized_memory(
             authenticated_user_id=authenticated_user_id,
             memory_id=memory_id,
             tenant_id=tenant_id,
+            external_user_id=external_user_id,
         )
         if hard_delete:
             await VersionService(self.session).asafe_record_version(
@@ -747,6 +753,7 @@ class MemoryService:
         authenticated_user_id: str | None,
         memory_id: str,
         tenant_id: str | None = None,
+        external_user_id: str | None = None,
     ) -> Memory:
         if tenant_id:
             statement = (
@@ -755,6 +762,11 @@ class MemoryService:
                 .where(
                     Memory.id == uuid.UUID(memory_id),
                     ProxyUser.tenant_id == uuid.UUID(tenant_id),
+                    *(
+                        [ProxyUser.external_user_id == external_user_id]
+                        if external_user_id is not None
+                        else []
+                    ),
                 )
             )
             result = await self.session.execute(statement)

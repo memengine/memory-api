@@ -17,7 +17,13 @@ from api.dependencies import (
     get_retriever_service,
 )
 from api.errors import APIError
-from api.routers.memories import add_memories, list_memories, retrieve_memories
+from api.routers.common import get_request_id, utc_now
+from api.routers.memories import (
+    _memory_to_data,
+    add_memories,
+    list_memories,
+    retrieve_memories,
+)
 from api.schemas.requests import (
     ConversationMessageRequest,
     MemoryAddRequest,
@@ -25,7 +31,11 @@ from api.schemas.requests import (
 )
 from api.schemas.responses import (
     MemoryAddResponse,
+    MemoryDeleteData,
+    MemoryDeleteResponse,
+    MemoryGetResponse,
     MemoryListResponse,
+    MemoryMutationResponse,
     MemoryRetrieveResponse,
 )
 from api.services.context_builder import ContextBuilder
@@ -62,6 +72,10 @@ class TenantMCPSessionContextRequest(BaseModel):
     """Compact bootstrap context for an authenticated MCP chat session."""
 
     context_max_tokens: int = Field(default=180, ge=50, le=400)
+
+
+class TenantMCPCorrectMemoryRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
 
 
 _SESSION_CONTEXT_QUERY = (
@@ -201,6 +215,61 @@ async def memories_for_public_tenant_mcp(
         agent_id=None,
         external_user_id=_public_tenant_mcp_external_user_id(request),
     )
+
+
+@router.get("/tenant/memories/{memory_id}/why", response_model=MemoryGetResponse)
+async def explain_memory_for_public_tenant_mcp(
+    request: Request,
+    memory_id: str,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+) -> MemoryGetResponse:
+    """Return self-owned memory provenance for an in-chat explanation."""
+    external_user_id = _public_tenant_mcp_external_user_id(request)
+    memory = await memory_service.get_memory(
+        authenticated_user_id=None,
+        memory_id=memory_id,
+        tenant_id=str(request.state.tenant_id),
+        external_user_id=external_user_id,
+    )
+    return MemoryGetResponse(data=_memory_to_data(memory), request_id=get_request_id(request), timestamp=utc_now())
+
+
+@router.post("/tenant/memories/{memory_id}/correct", response_model=MemoryMutationResponse)
+async def correct_memory_for_public_tenant_mcp(
+    request: Request,
+    memory_id: str,
+    payload: TenantMCPCorrectMemoryRequest,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+) -> MemoryMutationResponse:
+    """Correct only a memory owned by the authenticated public MCP caller."""
+    external_user_id = _public_tenant_mcp_external_user_id(request)
+    memory = await memory_service.update_memory(
+        authenticated_user_id=None,
+        memory_id=memory_id,
+        content=payload.content,
+        importance_score=None,
+        is_archived=None,
+        tenant_id=str(request.state.tenant_id),
+        external_user_id=external_user_id,
+    )
+    return MemoryMutationResponse(data=_memory_to_data(memory), request_id=get_request_id(request), timestamp=utc_now())
+
+
+@router.delete("/tenant/memories/{memory_id}", response_model=MemoryDeleteResponse)
+async def forget_memory_for_public_tenant_mcp(
+    request: Request,
+    memory_id: str,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+) -> MemoryDeleteResponse:
+    """Recoverably archive only a memory owned by the authenticated MCP caller."""
+    deleted = await memory_service.delete_memory(
+        authenticated_user_id=None,
+        memory_id=memory_id,
+        hard_delete=False,
+        tenant_id=str(request.state.tenant_id),
+        external_user_id=_public_tenant_mcp_external_user_id(request),
+    )
+    return MemoryDeleteResponse(data=MemoryDeleteData(deleted=deleted), request_id=get_request_id(request), timestamp=utc_now())
 
 
 @router.post("/universal/capability")
