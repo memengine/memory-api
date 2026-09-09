@@ -1,17 +1,158 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from api.db.cache import CacheService
-from api.dependencies import DbSession, get_cache_service
+from api.dependencies import (
+    DbSession,
+    get_cache_service,
+    get_context_builder,
+    get_memory_service,
+    get_proxy_user_service,
+    get_quality_gate_service,
+    get_retriever_service,
+)
 from api.errors import APIError
+from api.routers.memories import add_memories, list_memories, retrieve_memories
+from api.schemas.requests import (
+    ConversationMessageRequest,
+    MemoryAddRequest,
+    MemoryRetrieveRequest,
+)
+from api.schemas.responses import (
+    MemoryAddResponse,
+    MemoryListResponse,
+    MemoryRetrieveResponse,
+)
+from api.services.context_builder import ContextBuilder
 from api.services.global_agent_service import GlobalAgentService
 from api.services.mcp_universal_capability_service import issue_universal_mcp_capability
+from api.services.memory_service import MemoryService
+from api.services.proxy_user_service import ProxyUserService
+from api.services.quality_gate import QualityGateService
+from api.services.retriever import RetrieverService
 from api.services.uui_service import UUIService
 
 router = APIRouter(prefix="/v1/mcp", tags=["mcp"])
+
+
+class TenantMCPRememberRequest(BaseModel):
+    """Conversation content to remember for the authenticated MCP caller."""
+
+    messages: list[ConversationMessageRequest] = Field(min_length=1)
+    metadata: dict = Field(default_factory=dict)
+    agent_id: str | None = None
+
+
+class TenantMCPContextRequest(BaseModel):
+    """A contextual query for the authenticated MCP caller."""
+
+    query: str = Field(min_length=1)
+    limit: int = Field(default=10, ge=1, le=50)
+    categories: list[str] = Field(default_factory=list)
+    format: str = "bullets"
+    context_max_tokens: int = Field(default=500, ge=50, le=4000)
+
+
+def _public_tenant_mcp_external_user_id(request: Request) -> str:
+    """Return a stable self-only profile identity for a verified public MCP caller.
+
+    The identity is derived server-side from the authenticated Clerk subject and
+    tenant.  Public MCP callers must never supply an external user ID, which
+    prevents one organisation member from selecting another member's profile.
+    """
+    if request.headers.get("x-memoryos-mcp-client", "").strip().lower() != "public-v1":
+        raise APIError(status_code=403, code="MCP_403", error="public_mcp_marker_required")
+    tenant_id = str(getattr(request.state, "tenant_id", "") or "").strip()
+    clerk_subject = str(getattr(request.state, "user_id", "") or "").strip()
+    if not tenant_id or not clerk_subject:
+        raise APIError(status_code=401, code="AUTH_001", error="unauthorized")
+    digest = hashlib.sha256(f"memoryos-mcp-profile:v1:{tenant_id}:{clerk_subject}".encode()).hexdigest()
+    return f"mcp:{digest}"
+
+
+@router.post("/tenant/remember", response_model=MemoryAddResponse)
+async def remember_for_public_tenant_mcp(
+    request: Request,
+    response: Response,
+    payload: TenantMCPRememberRequest,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    quality_gate_service: Annotated[QualityGateService, Depends(get_quality_gate_service)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> MemoryAddResponse:
+    """Queue remembering for only the authenticated public MCP caller."""
+    external_user_id = _public_tenant_mcp_external_user_id(request)
+    return await add_memories(
+        request=request,
+        response=response,
+        payload=MemoryAddRequest(
+            external_user_id=external_user_id,
+            messages=payload.messages,
+            metadata={**payload.metadata, "source": "public_tenant_mcp"},
+            agent_id=payload.agent_id,
+        ),
+        memory_service=memory_service,
+        proxy_user_service=proxy_user_service,
+        quality_gate_service=quality_gate_service,
+        tenant_id=str(request.state.tenant_id),
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/tenant/context", response_model=MemoryRetrieveResponse)
+async def context_for_public_tenant_mcp(
+    request: Request,
+    payload: TenantMCPContextRequest,
+    retriever_service: Annotated[RetrieverService, Depends(get_retriever_service)],
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    session: DbSession,
+) -> MemoryRetrieveResponse:
+    """Retrieve prompt-ready context for only the authenticated MCP caller."""
+    external_user_id = _public_tenant_mcp_external_user_id(request)
+    return await retrieve_memories(
+        request=request,
+        payload=MemoryRetrieveRequest(
+            external_user_id=external_user_id,
+            query=payload.query,
+            limit=payload.limit,
+            categories=payload.categories,
+            format=payload.format,
+            context_max_tokens=payload.context_max_tokens,
+        ),
+        retriever_service=retriever_service,
+        proxy_user_service=proxy_user_service,
+        context_builder=context_builder,
+        cache_service=cache_service,
+        session=session,
+        tenant_id=str(request.state.tenant_id),
+    )
+
+
+@router.get("/tenant/memories", response_model=MemoryListResponse)
+async def memories_for_public_tenant_mcp(
+    request: Request,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    categories: Annotated[list[str] | None, Query()] = None,
+) -> MemoryListResponse:
+    """List only memories owned by the authenticated public MCP caller."""
+    return await list_memories(
+        request=request,
+        memory_service=memory_service,
+        cursor=cursor,
+        limit=limit,
+        categories=categories or [],
+        agent_id=None,
+        external_user_id=_public_tenant_mcp_external_user_id(request),
+    )
 
 
 @router.post("/universal/capability")
