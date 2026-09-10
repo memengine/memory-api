@@ -553,6 +553,7 @@ class ConflictResolver:
         source_conversation_id: str | None = None,
         agent_id: str | None = None,
         auto_commit: bool = True,
+        clarification_requested: bool = False,
     ) -> list[StoredMemory]:
         stored_memories: list[StoredMemory] = []
         self.last_cross_user_conflicts_flagged = 0
@@ -627,6 +628,23 @@ class ConflictResolver:
                     )
                 if decision is None:
                     decision = self._temporal_conflict_decision(new_memory, existing_memory)
+                if decision is None and clarification_requested:
+                    decision = ConflictDecision(
+                        action="CLARIFY",
+                        reasoning="The user explicitly asked to choose between conflicting memories.",
+                        decision_evidence=review_evidence(
+                            action="USER_REVIEW",
+                            reason_codes=[
+                                "explicit_user_clarification_request",
+                                "matched_personal_memory_candidate",
+                            ],
+                            explanation=(
+                                "The user asked MemoryOS not to decide this matched memory "
+                                "contradiction automatically."
+                            ),
+                            details={"scope": "same_proxy_user"},
+                        ),
+                    )
                 if decision is None:
                     decision = self._classify_conflict(new_memory, existing_memory, candidate)
 

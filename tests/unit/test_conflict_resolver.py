@@ -310,7 +310,7 @@ def test_ambiguous_same_user_preference_queues_a_self_scoped_clarification() -> 
         session=session,
         qdrant_service=qdrant,
         embedder=lambda _text: [0.1] * 3,
-        client=make_llm_client("CLARIFY"),
+        client=make_llm_client("UPDATE"),
         default_source_conversation_id=uuid.uuid4(),
     )
 
@@ -328,6 +328,7 @@ def test_ambiguous_same_user_preference_queues_a_self_scoped_clarification() -> 
         user_id=str(existing.user_id),
         tenant_id=str(uuid.uuid4()),
         proxy_user_id=str(existing.proxy_user_id),
+        clarification_requested=True,
     )
 
     assert len(stored) == 1

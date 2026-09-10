@@ -165,6 +165,7 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert resolver.calls[0]["proxy_user_id"] == str(proxy_user.id)
     assert resolver.calls[0]["source_conversation_id"] == str(conversation.id)
     assert resolver.calls[0]["auto_commit"] is False
+    assert resolver.calls[0]["clarification_requested"] is False
     assert resolver.calls[0]["memories"][0].importance_score == 8.0
     assert invalidated["proxy_user_id"] == str(proxy_user.id)
     assert refreshed["proxy_user_id"] == str(proxy_user.id)
@@ -172,6 +173,57 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert session.commits == 2
     assert session.rollbacks == 0
     assert session.closed is True
+
+
+def test_explicit_clarification_request_is_forwarded_to_conflict_resolver(monkeypatch) -> None:
+    proxy_user = ProxyUser(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        external_user_id="ext-clarify",
+        external_user_id_hash="hash-clarify",
+        memory_count=0,
+        metadata_json={},
+        is_blocked=False,
+    )
+    session = FakeSession(proxy_user)
+    resolver = FakeConflictResolver()
+    backing_user = User(
+        id=uuid.uuid4(),
+        external_id=f"proxy::{proxy_user.id}",
+        email="proxy@example.test",
+        settings={},
+        memory_count=0,
+        is_active=True,
+    )
+    conversation = Conversation(
+        id=uuid.uuid4(),
+        user_id=backing_user.id,
+        message_count=1,
+        processing_status=ConversationProcessingStatus.processing,
+    )
+    monkeypatch.setattr(extraction_tasks, "_ensure_proxy_backing_user", lambda *_args: backing_user)
+    monkeypatch.setattr(extraction_tasks, "_create_source_conversation", lambda *_args, **_kwargs: conversation)
+    monkeypatch.setattr(extraction_tasks, "_refresh_proxy_user_memory_count", lambda *_args: None)
+    monkeypatch.setattr(extraction_tasks, "_invalidate_proxy_user_cache", lambda *_args: None)
+
+    extraction_tasks.run_extraction_pipeline(
+        {
+            "job_id": "job-clarify",
+            "tenant_id": str(proxy_user.tenant_id),
+            "proxy_user_id": str(proxy_user.id),
+            "messages": [
+                {"role": "user", "content": "I am unsure whether this replaces my earlier preference."}
+            ],
+        },
+        session_factory=FakeSessionFactory(session),
+        extractor=FakeExtractor(),
+        scorer=FakeScorer(),
+        qdrant_service=SimpleNamespace(),
+        conflict_resolver=resolver,
+        client=SimpleNamespace(),
+    )
+
+    assert resolver.calls[0]["clarification_requested"] is True
 
 def test_pending_candidate_similarity_allows_rephrased_reinforcement() -> None:
     existing = SimpleNamespace(content="User may prefer short replies for difficult topics")

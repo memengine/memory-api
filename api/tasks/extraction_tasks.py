@@ -784,6 +784,26 @@ def _extract_memories_for_pipeline(
     return list(extracted), {}, True
 
 
+_CLARIFICATION_INTENT_PHRASES = (
+    "i am unsure whether",
+    "i'm unsure whether",
+    "ask me to choose",
+    "do not decide",
+    "don't decide",
+    "need you to ask",
+)
+
+
+def _requests_memory_clarification(messages: list[dict[str, Any]]) -> bool:
+    """Preserve an explicit user request to decide a matched memory later."""
+    user_text = " ".join(
+        str(message.get("content") or "")
+        for message in messages
+        if str(message.get("role") or "").lower() == "user"
+    ).lower()
+    return any(phrase in user_text for phrase in _CLARIFICATION_INTENT_PHRASES)
+
+
 def run_extraction_pipeline(
     job_payload: dict[str, Any],
     *,
@@ -799,6 +819,7 @@ def run_extraction_pipeline(
     agent_id = job_payload.get("agent_id")
     source_event_id = job_payload.get("source_event_id")
     messages = list(job_payload.get("messages", []))
+    clarification_requested = _requests_memory_clarification(messages)
 
     if not tenant_id or not proxy_user_id:
         raise ValueError("Extraction job requires tenant_id and proxy_user_id.")
@@ -923,6 +944,7 @@ def run_extraction_pipeline(
             source_conversation_id=str(conversation.id),
             agent_id=str(agent_id) if agent_id else None,
             auto_commit=False,
+            clarification_requested=clarification_requested,
         )
 
         conversation.processing_status = ConversationProcessingStatus.done
