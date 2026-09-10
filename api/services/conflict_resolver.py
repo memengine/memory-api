@@ -70,7 +70,9 @@ TYPE_SPECIFIC_PROMPTS: dict[ConflictType, str] = {
         "Memory A: {existing}\n"
         "Memory B: {new}\n"
         "Has this person's preference changed or are these about different things?\n"
-        'Return JSON: {{"type":"changed|different_context","keep":"B|A|both","reason":"one sentence"}}'
+        "If the two statements cannot be safely treated as an update or different contexts, "
+        "ask the user to choose.\n"
+        'Return JSON: {{"type":"changed|different_context|uncertain","keep":"B|A|both|clarify","reason":"one sentence"}}'
     ),
     ConflictType.NEGATION: (
         "Memory A: {existing}\n"
@@ -636,6 +638,22 @@ class ConflictResolver:
                 )
 
                 if decision.action == "CLARIFY":
+                    is_self_scoped_clarification = bool(
+                        tenant_id
+                        and proxy_user_id
+                        and str(existing_memory.proxy_user_id) == str(proxy_user_id)
+                    )
+                    if not (equal_authority_conflict or is_self_scoped_clarification):
+                        # A non-tenant call cannot safely surface an interactive
+                        # clarification. Preserve both memories instead of creating
+                        # an unreachable pending record.
+                        decision = ConflictDecision(
+                            action="KEEP_BOTH",
+                            reasoning=decision.reasoning,
+                            decision_evidence=decision.decision_evidence,
+                        )
+
+                if decision.action == "CLARIFY":
                     pending = self._store_new_memory_with_shared_context(
                         extracted_memory=new_memory,
                         user_id=user_id,
@@ -650,13 +668,23 @@ class ConflictResolver:
                         record_shared_context=False,
                         decision_evidence=decision_evidence,
                     )
-                    self._create_equal_authority_conflict(
-                        tenant_id=tenant_id,
-                        proxy_user_id=proxy_user_id,
-                        existing_memory=existing_memory,
-                        pending_memory_id=pending.id,
-                        category=new_memory.category,
-                    )
+                    if equal_authority_conflict:
+                        self._create_equal_authority_conflict(
+                            tenant_id=tenant_id,
+                            proxy_user_id=proxy_user_id,
+                            existing_memory=existing_memory,
+                            pending_memory_id=pending.id,
+                            category=new_memory.category,
+                        )
+                    else:
+                        self._create_self_scoped_clarification(
+                            tenant_id=tenant_id,
+                            proxy_user_id=proxy_user_id,
+                            existing_memory=existing_memory,
+                            pending_memory_id=pending.id,
+                            category=new_memory.category,
+                            reasoning=decision.reasoning,
+                        )
                     stored_memories.append(pending)
                     self._create_audit_log(
                         user_id=user_id,
@@ -916,26 +944,53 @@ class ConflictResolver:
                 reasoning=str(merged_payload["reasoning"]).strip(),
             )
 
-        normalized_action = action if action in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT"} else "KEEP_BOTH"
+        normalized_action = (
+            action
+            if action in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"}
+            else "KEEP_BOTH"
+        )
         return ConflictDecision(
             action=normalized_action,
             reasoning=reasoning,
             merged_memory=merged_memory,
-            decision_evidence=automatic_evidence(
-                action=normalized_action,  # type: ignore[arg-type]
-                reason_codes=[
-                    "semantic_conflict_classified",
-                    f"conflict_type:{conflict_type.value}",
-                    f"decision:{normalized_action.lower()}",
-                ],
-                explanation=reasoning,
-                confidence=None,
-                details={
-                    "classifier": "llm",
-                    "raw_action": action,
-                    "conflict_type": conflict_type.value,
-                },
+            decision_evidence=self._classifier_decision_evidence(
+                action=normalized_action,
+                conflict_type=conflict_type,
+                raw_action=action,
+                reasoning=reasoning,
             ),
+        )
+
+    @staticmethod
+    def _classifier_decision_evidence(
+        *,
+        action: str,
+        conflict_type: ConflictType,
+        raw_action: str,
+        reasoning: str,
+    ) -> dict[str, Any]:
+        details = {
+            "classifier": "llm",
+            "raw_action": raw_action,
+            "conflict_type": conflict_type.value,
+        }
+        if action == "CLARIFY":
+            return review_evidence(
+                action="USER_REVIEW",
+                reason_codes=["ambiguous_personal_contradiction", "clarification_requested"],
+                explanation=reasoning,
+                details=details,
+            )
+        return automatic_evidence(
+            action=action,  # type: ignore[arg-type]
+            reason_codes=[
+                "semantic_conflict_classified",
+                f"conflict_type:{conflict_type.value}",
+                f"decision:{action.lower()}",
+            ],
+            explanation=reasoning,
+            confidence=None,
+            details=details,
         )
 
     def _build_conflict_user_prompt(
@@ -1004,6 +1059,8 @@ class ConflictResolver:
 
         keep = str(payload.get("keep", "")).upper()
         conflict_type = str(payload.get("type", "")).lower()
+        if keep == "CLARIFY" or conflict_type == "uncertain":
+            return "CLARIFY"
         if keep == "B":
             return "REJECT" if conflict_type == "same" else "UPDATE"
         if keep == "A":
@@ -1338,6 +1395,65 @@ class ConflictResolver:
         self.session.add(conflict)
         if hasattr(self.session, "flush"):
             self.session.flush()
+        self.last_cross_user_conflicts_flagged += 1
+
+    def _create_self_scoped_clarification(
+        self,
+        *,
+        tenant_id: str | None,
+        proxy_user_id: str | None,
+        existing_memory: Memory,
+        pending_memory_id: str,
+        category: str,
+        reasoning: str,
+    ) -> None:
+        """Queue an ambiguous contradiction for its single owning profile.
+
+        Candidate lookup is already bounded to the profile's top vector matches.
+        This method is intentionally reached only after the conflict classifier
+        asks for clarification; ordinary preference changes continue through the
+        automatic update/keep-both decisions.
+        """
+        if tenant_id is None or proxy_user_id is None:
+            return
+        pending_memory = self.session.get(Memory, uuid.UUID(pending_memory_id))
+        if pending_memory is None or str(existing_memory.proxy_user_id) != str(proxy_user_id):
+            return
+        entity_type = {
+            "preference": SharedContextEntityType.personal_preference,
+            "goal": SharedContextEntityType.individual_goal,
+            "expertise": SharedContextEntityType.personal_skill,
+        }.get(category, SharedContextEntityType.personal_fact)
+        conflict = CrossUserConflict(
+            tenant_id=uuid.UUID(tenant_id),
+            user_a_memory_id=existing_memory.id,
+            user_b_memory_id=pending_memory.id,
+            entity_type=entity_type,
+            entity_value_a=existing_memory.content,
+            entity_value_b=pending_memory.content,
+            status=CrossUserConflictStatus.clarification_queued,
+            auto_resolution="self_scoped_clarification",
+            auto_resolution_at=datetime.now(UTC),
+            resolution_path="user_session",
+            requires_attention=False,
+            decision_evidence=review_evidence(
+                action="USER_REVIEW",
+                reason_codes=["ambiguous_personal_contradiction", "clarification_queued"],
+                explanation=reasoning,
+                details={"category": category, "scope": "same_proxy_user"},
+            ),
+        )
+        conflict.user_a_memory = existing_memory
+        conflict.user_b_memory = pending_memory
+        self.session.add(conflict)
+        if hasattr(self.session, "flush"):
+            self.session.flush()
+        _queue_user_session_clarification(
+            db_session=self.session,
+            conflict=conflict,
+            target_memory=pending_memory,
+            question_context=f"{entity_type.value}: {conflict.entity_value_a} vs {conflict.entity_value_b}",
+        )
         self.last_cross_user_conflicts_flagged += 1
 
     def _record_shared_context_for_stored_memory(

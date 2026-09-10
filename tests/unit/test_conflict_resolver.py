@@ -299,6 +299,53 @@ def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None
     assert outbox_rows == []
 
 
+def test_ambiguous_same_user_preference_queues_a_self_scoped_clarification() -> None:
+    existing = make_existing_memory()
+    existing.content = "For dashboard UI, user prefers compact cards."
+    existing.category = MemoryCategory.preference
+    session = FakeSession(existing_memory=existing)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing)]
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=qdrant,
+        embedder=lambda _text: [0.1] * 3,
+        client=make_llm_client("CLARIFY"),
+        default_source_conversation_id=uuid.uuid4(),
+    )
+
+    stored = resolver.check_and_store(
+        [
+            ExtractedMemory(
+                content="For the same dashboard UI, user prefers detailed cards.",
+                category="preference",
+                importance_score=8.0,
+                confidence=0.95,
+                expiry="permanent",
+                reasoning="Ambiguous preference change",
+            )
+        ],
+        user_id=str(existing.user_id),
+        tenant_id=str(uuid.uuid4()),
+        proxy_user_id=str(existing.proxy_user_id),
+    )
+
+    assert len(stored) == 1
+    assert stored[0].resolution == "CLARIFICATION_PENDING"
+    conflicts = [item for item in session.added if isinstance(item, CrossUserConflict)]
+    clarifications = [item for item in session.added if isinstance(item, ClarificationQueue)]
+    assert len(conflicts) == 1
+    assert conflicts[0].resolution_path == "user_session"
+    assert conflicts[0].requires_attention is False
+    assert len(clarifications) == 1
+    assert clarifications[0].proxy_user_id == existing.proxy_user_id
+    assert clarifications[0].conflict_id == conflicts[0].id
+
+
+def test_uncertain_classifier_result_maps_to_user_clarification() -> None:
+    assert ConflictResolver._action_from_payload({"type": "uncertain", "keep": "both"}) == "CLARIFY"
+
+
 def test_temporal_conflicts_keep_both_without_llm_classification() -> None:
     existing = make_existing_memory()
     existing.content = "User used Python heavily in 2024"
