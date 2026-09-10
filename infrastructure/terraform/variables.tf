@@ -459,6 +459,17 @@ variable "celery_background_desired_count" {
   default     = 2
 }
 
+variable "celery_beat_desired_count" {
+  description = "Celery Beat scheduler task count. This must remain exactly one to prevent duplicate periodic dispatch."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.celery_beat_desired_count == 1
+    error_message = "Celery Beat must run exactly one replica; additional replicas can dispatch duplicate periodic tasks."
+  }
+}
+
 variable "celery_scale_max_capacity" {
   description = "Maximum ECS task count for the scale worker auto-scaling target."
   type        = number

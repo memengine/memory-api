@@ -351,6 +351,50 @@ resource "aws_ecs_task_definition" "celery_worker" {
   })
 }
 
+# Beat only dispatches scheduled tasks. The background worker consumes the
+# default `celery` queue, including the five-second vector-sync outbox task.
+# Keep its local schedule state in /tmp because the image runs as non-root.
+resource "aws_ecs_task_definition" "celery_beat" {
+  family                   = "${var.project_name}-celery-beat"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = tostring(var.ecs_cpu)
+  memory                   = tostring(var.ecs_memory)
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "memoryos-celery-beat"
+      image     = "${aws_ecr_repository.memoryos.repository_url}:${var.container_image_tag}"
+      essential = true
+      command = [
+        "celery",
+        "-A",
+        "api.celery_app.celery_app",
+        "beat",
+        "--schedule=/tmp/celerybeat-schedule",
+        "--pidfile=/tmp/celerybeat.pid",
+        "--loglevel=${var.celery_log_level}",
+      ]
+      environment = local.ecs_container_environment
+      secrets     = local.ecs_container_secrets
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.ecs.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-celery-beat-task"
+  })
+}
+
 resource "aws_ecs_service" "memoryos" {
   name            = "${var.project_name}-service"
   cluster         = aws_ecs_cluster.memoryos.id
@@ -401,6 +445,31 @@ resource "aws_ecs_service" "celery_worker" {
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-${each.key}-worker-service"
+  })
+}
+
+resource "aws_ecs_service" "celery_beat" {
+  name            = "${var.project_name}-celery-beat"
+  cluster         = aws_ecs_cluster.memoryos.id
+  task_definition = aws_ecs_task_definition.celery_beat.arn
+  desired_count   = var.celery_beat_desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    assign_public_ip = false
+    subnets          = [for subnet in aws_subnet.private : subnet.id]
+    security_groups  = [aws_security_group.ecs.id]
+  }
+
+  # ECS must stop the old scheduler before starting its replacement. A rolling
+  # deployment with 200% maximum can briefly run two schedulers and duplicate
+  # periodic dispatches.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+  enable_execute_command             = false
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project_name}-celery-beat-service"
   })
 }
 

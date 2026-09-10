@@ -30,6 +30,7 @@ celery_scale_concurrency      = 4
 celery_growth_concurrency     = 3
 celery_starter_concurrency    = 3
 celery_background_concurrency = 2
+celery_beat_desired_count     = 1
 celery_log_level              = "info"
 
 qdrant_timeout_seconds = 10
