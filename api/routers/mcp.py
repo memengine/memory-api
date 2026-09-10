@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from api.db.cache import CacheService
+from api.db.models import (
+    ClarificationQueue,
+    ClarificationQueueStatus,
+    CrossUserConflict,
+    CrossUserConflictStatus,
+)
 from api.dependencies import (
     DbSession,
     get_cache_service,
@@ -38,6 +48,7 @@ from api.schemas.responses import (
     MemoryMutationResponse,
     MemoryRetrieveResponse,
 )
+from api.services.conflict_resolution_service import apply_conflict_selection
 from api.services.context_builder import ContextBuilder
 from api.services.global_agent_service import GlobalAgentService
 from api.services.mcp_universal_capability_service import issue_universal_mcp_capability
@@ -78,6 +89,43 @@ class TenantMCPCorrectMemoryRequest(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
 
 
+class TenantMCPClarificationAnswerRequest(BaseModel):
+    answer: str = Field(pattern="^(A|B|both|neither)$")
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class TenantMCPClarificationItem(BaseModel):
+    id: UUID
+    question_context: str
+    value_a: str
+    value_b: str
+    entity_type: str
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+    status: str
+
+
+class TenantMCPClarificationListData(BaseModel):
+    clarifications: list[TenantMCPClarificationItem]
+
+
+class TenantMCPClarificationListResponse(BaseModel):
+    data: TenantMCPClarificationListData
+    request_id: str
+    timestamp: datetime
+
+
+class TenantMCPClarificationAnswerData(BaseModel):
+    resolved: bool
+    clarification_id: UUID
+
+
+class TenantMCPClarificationAnswerResponse(BaseModel):
+    data: TenantMCPClarificationAnswerData
+    request_id: str
+    timestamp: datetime
+
+
 _SESSION_CONTEXT_QUERY = (
     "Stable user preferences, long-lived working style, active goals, important decisions, "
     "and unresolved clarifications relevant across an assistant chat session."
@@ -100,6 +148,45 @@ def _public_tenant_mcp_external_user_id(request: Request) -> str:
         raise APIError(status_code=401, code="AUTH_001", error="unauthorized")
     digest = hashlib.sha256(f"memoryos-mcp-profile:v1:{tenant_id}:{clerk_subject}".encode()).hexdigest()
     return f"mcp:{digest}"
+
+
+def _is_self_scoped_public_clarification(
+    clarification: ClarificationQueue,
+    *,
+    proxy_user_id: object,
+) -> bool:
+    """Allow public resolution only for a contradiction inside one profile.
+
+    ``user_session`` is a routing hint, not sufficient authorization: an
+    incorrectly routed cross-profile conflict must never disclose its values
+    through the public MCP.  Both source memories must belong to the resolved
+    public profile before a question or its A/B values are returned.
+    """
+    conflict = clarification.conflict
+    if (
+        conflict is None
+        or conflict.resolution_path != "user_session"
+        or conflict.user_a_memory is None
+        or conflict.user_b_memory is None
+    ):
+        return False
+    expected_proxy_id = str(proxy_user_id)
+    return (
+        str(clarification.proxy_user_id) == expected_proxy_id
+        and str(conflict.user_a_memory.proxy_user_id) == expected_proxy_id
+        and str(conflict.user_b_memory.proxy_user_id) == expected_proxy_id
+    )
+
+
+async def _public_tenant_mcp_proxy_user(
+    *,
+    request: Request,
+    proxy_user_service: ProxyUserService,
+):
+    return await proxy_user_service.resolve(
+        tenant_id=str(request.state.tenant_id),
+        external_user_id=_public_tenant_mcp_external_user_id(request),
+    )
 
 
 @router.post("/tenant/remember", response_model=MemoryAddResponse)
@@ -270,6 +357,150 @@ async def forget_memory_for_public_tenant_mcp(
         external_user_id=_public_tenant_mcp_external_user_id(request),
     )
     return MemoryDeleteResponse(data=MemoryDeleteData(deleted=deleted), request_id=get_request_id(request), timestamp=utc_now())
+
+
+@router.get("/tenant/clarifications", response_model=TenantMCPClarificationListResponse)
+async def clarifications_for_public_tenant_mcp(
+    request: Request,
+    session: DbSession,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+) -> TenantMCPClarificationListResponse:
+    """List unresolved, self-owned conflict choices for the signed-in caller.
+
+    This deliberately excludes generic queue questions and every conflict whose
+    two source memories are not both owned by this exact public-MCP profile.
+    """
+    proxy_user = await _public_tenant_mcp_proxy_user(
+        request=request,
+        proxy_user_service=proxy_user_service,
+    )
+    clarifications = (
+        await session.execute(
+            select(ClarificationQueue)
+            .options(
+                selectinload(ClarificationQueue.conflict).selectinload(CrossUserConflict.user_a_memory),
+                selectinload(ClarificationQueue.conflict).selectinload(CrossUserConflict.user_b_memory),
+            )
+            .where(
+                ClarificationQueue.tenant_id == request.state.tenant_id,
+                ClarificationQueue.proxy_user_id == proxy_user.id,
+                ClarificationQueue.status.in_(
+                    [ClarificationQueueStatus.pending, ClarificationQueueStatus.triggered]
+                ),
+                ClarificationQueue.expires_at > utc_now(),
+            )
+            .order_by(ClarificationQueue.created_at.asc(), ClarificationQueue.id.asc())
+        )
+    ).scalars().all()
+    items = [
+        TenantMCPClarificationItem(
+            id=item.id,
+            question_context=item.question_context,
+            value_a=item.conflict.entity_value_a,
+            value_b=item.conflict.entity_value_b,
+            entity_type=(
+                item.conflict.entity_type.value
+                if hasattr(item.conflict.entity_type, "value")
+                else str(item.conflict.entity_type)
+            ),
+            created_at=item.created_at,
+            expires_at=item.expires_at,
+            status=item.status.value if hasattr(item.status, "value") else str(item.status),
+        )
+        for item in clarifications
+        if _is_self_scoped_public_clarification(item, proxy_user_id=proxy_user.id)
+    ]
+    return TenantMCPClarificationListResponse(
+        data=TenantMCPClarificationListData(clarifications=items),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
+@router.post(
+    "/tenant/clarifications/{clarification_id}/answer",
+    response_model=TenantMCPClarificationAnswerResponse,
+)
+async def answer_clarification_for_public_tenant_mcp(
+    request: Request,
+    clarification_id: str,
+    payload: TenantMCPClarificationAnswerRequest,
+    session: DbSession,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+) -> TenantMCPClarificationAnswerResponse:
+    """Resolve one self-owned clarification after the user explicitly chooses."""
+    try:
+        parsed_id = UUID(clarification_id)
+    except ValueError as exc:
+        raise APIError(status_code=404, code="CLR_404", error="clarification_not_found") from exc
+
+    proxy_user = await _public_tenant_mcp_proxy_user(
+        request=request,
+        proxy_user_service=proxy_user_service,
+    )
+    clarification = (
+        await session.execute(
+            select(ClarificationQueue)
+            .options(
+                selectinload(ClarificationQueue.conflict).selectinload(CrossUserConflict.user_a_memory),
+                selectinload(ClarificationQueue.conflict).selectinload(CrossUserConflict.user_b_memory),
+            )
+            .where(
+                ClarificationQueue.id == parsed_id,
+                ClarificationQueue.tenant_id == request.state.tenant_id,
+                ClarificationQueue.proxy_user_id == proxy_user.id,
+                ClarificationQueue.status.in_(
+                    [ClarificationQueueStatus.pending, ClarificationQueueStatus.triggered]
+                ),
+                ClarificationQueue.expires_at > utc_now(),
+            )
+        )
+    ).scalar_one_or_none()
+    if clarification is None or not _is_self_scoped_public_clarification(
+        clarification,
+        proxy_user_id=proxy_user.id,
+    ):
+        raise APIError(status_code=404, code="CLR_404", error="clarification_not_found")
+
+    conflict = clarification.conflict
+    if conflict.status in {CrossUserConflictStatus.resolved, CrossUserConflictStatus.ignored}:
+        raise APIError(status_code=409, code="CLR_409", error="clarification_already_resolved")
+
+    default_reasons = {
+        "A": "User confirmed memory A.",
+        "B": "User confirmed memory B.",
+        "both": "User said both versions are correct.",
+        "neither": "User said neither version is correct.",
+    }
+    reason = payload.reason or default_reasons[payload.answer]
+    try:
+        await apply_conflict_selection(
+            session,
+            conflict=conflict,
+            selection=payload.answer,
+            changed_by="user",
+            reason=reason,
+        )
+    except ValueError as exc:
+        raise APIError(status_code=400, code="CLR_400", error=str(exc)) from exc
+
+    conflict.status = (
+        CrossUserConflictStatus.ignored
+        if payload.answer == "neither"
+        else CrossUserConflictStatus.resolved
+    )
+    conflict.resolved_at = datetime.now(UTC)
+    conflict.resolved_by = "user_session"
+    conflict.resolution = "both_valid" if payload.answer == "both" else payload.answer
+    conflict.resolution_reason = reason
+    conflict.requires_attention = False
+    clarification.status = ClarificationQueueStatus.resolved
+    await session.commit()
+    return TenantMCPClarificationAnswerResponse(
+        data=TenantMCPClarificationAnswerData(resolved=True, clarification_id=clarification.id),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
 
 
 @router.post("/universal/capability")

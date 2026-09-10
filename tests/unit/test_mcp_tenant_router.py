@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,7 +9,9 @@ from starlette.requests import Request
 
 from api.errors import APIError
 from api.routers.mcp import (
+    TenantMCPClarificationAnswerRequest,
     TenantMCPSessionContextRequest,
+    _is_self_scoped_public_clarification,
     _public_tenant_mcp_external_user_id,
     session_context_for_public_tenant_mcp,
 )
@@ -72,3 +75,34 @@ def test_session_context_uses_a_fixed_query_and_server_derived_identity() -> Non
     assert payload.external_user_id == _public_tenant_mcp_external_user_id(request)
     assert payload.query.startswith("Stable user preferences")
     assert payload.context_max_tokens == 180
+
+
+def test_public_clarification_requires_both_conflict_memories_to_be_self_owned() -> None:
+    own_proxy_id = "proxy_a"
+    self_owned = SimpleNamespace(
+        proxy_user_id=own_proxy_id,
+    )
+    clarification = SimpleNamespace(
+        proxy_user_id=own_proxy_id,
+        conflict=SimpleNamespace(
+            resolution_path="user_session",
+            user_a_memory=self_owned,
+            user_b_memory=self_owned,
+        ),
+    )
+    assert _is_self_scoped_public_clarification(
+        clarification,
+        proxy_user_id=own_proxy_id,
+    )
+
+    clarification.conflict.user_b_memory = SimpleNamespace(proxy_user_id="proxy_other")
+    assert not _is_self_scoped_public_clarification(
+        clarification,
+        proxy_user_id=own_proxy_id,
+    )
+
+
+def test_public_clarification_answer_is_limited_to_explicit_user_choices() -> None:
+    assert TenantMCPClarificationAnswerRequest(answer="both").answer == "both"
+    with pytest.raises(ValueError):
+        TenantMCPClarificationAnswerRequest(answer="keep newest")
