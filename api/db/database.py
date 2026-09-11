@@ -244,7 +244,11 @@ async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]
         yield session
 
 
-def build_sync_session_factory(database_url: str | None = None) -> sessionmaker[Session]:
+def build_sync_session_factory(
+    database_url: str | None = None,
+    *,
+    use_circuit_breaker: bool = True,
+) -> sessionmaker[Session]:
     resolved_url = (
         validate_database_transport(database_url, app_env=get_settings().app_env)
         if database_url is not None
@@ -256,4 +260,5 @@ def build_sync_session_factory(database_url: str | None = None) -> sessionmaker[
         pool_recycle=int(os.getenv("DB_POOL_RECYCLE_SECONDS", "900")),
     )
     instrument_engine(sync_engine, kind="sync", owner=session_factory_owner())
-    return sessionmaker(bind=sync_engine, expire_on_commit=False, class_=CircuitBreakerSyncSession)
+    session_class = CircuitBreakerSyncSession if use_circuit_breaker else Session
+    return sessionmaker(bind=sync_engine, expire_on_commit=False, class_=session_class)

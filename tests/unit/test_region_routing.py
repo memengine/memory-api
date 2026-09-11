@@ -184,6 +184,31 @@ def test_region_connection_pool_initializes_per_region_resources() -> None:
     assert pool.get_db("IN1") is not pool.get_db("EU1")
 
 
+def test_region_discovery_bypasses_request_circuit_breaker(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Result:
+        def __iter__(self):
+            return iter(())
+
+    class _Session:
+        def execute(self, _statement):
+            return _Result()
+
+        def close(self):
+            return None
+
+    def build_factory(*_args, **kwargs):
+        captured.update(kwargs)
+        return _Session
+
+    monkeypatch.setattr("api.infra.region_pool.build_sync_session_factory", build_factory)
+    pool = RegionConnectionPool(bootstrap_database_url="postgresql://example")
+
+    assert pool._load_active_regions() == []
+    assert captured["use_circuit_breaker"] is False
+
+
 @pytest.mark.asyncio
 async def test_region_connection_pool_close_disposes_every_client() -> None:
     pool = RegionConnectionPool(app_env="test", region_rows=[])

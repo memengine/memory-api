@@ -187,7 +187,14 @@ class RegionConnectionPool:
         )
 
     def _load_active_regions(self) -> list[dict[str, Any]]:
-        sync_session_factory = build_sync_session_factory(self.bootstrap_database_url)
+        # Region discovery happens during application startup. It must verify
+        # physical database reachability even while the shared request circuit
+        # is temporarily open, otherwise every replacement task fails before
+        # it can become healthy.
+        sync_session_factory = build_sync_session_factory(
+            self.bootstrap_database_url,
+            use_circuit_breaker=False,
+        )
         session = sync_session_factory()
         try:
             result = session.execute(
