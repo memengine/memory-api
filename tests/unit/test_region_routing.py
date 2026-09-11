@@ -65,6 +65,9 @@ class FakeRegionPool:
     def get_qdrant(self, region_id: str):
         return self.qdrant_client
 
+    async def probe_postgres(self, region_id: str) -> None:
+        return None
+
 
 class FakeSecretsClient:
     def __init__(self, payloads: dict[str, str]) -> None:
@@ -199,3 +202,26 @@ async def test_region_connection_pool_close_disposes_every_client() -> None:
     redis_client.aclose.assert_awaited_once()
     qdrant_client.close.assert_called_once()
     assert pool._resources == {}
+
+
+@pytest.mark.asyncio
+async def test_region_connection_pool_probe_bypasses_request_session_policy() -> None:
+    result = SimpleNamespace()
+    connection = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+    class _ConnectionContext:
+        async def __aenter__(self):
+            return connection
+
+        async def __aexit__(self, *_args):
+            return None
+
+    engine = SimpleNamespace(connect=lambda: _ConnectionContext())
+    pool = RegionConnectionPool(app_env="test", region_rows=[])
+    pool._resources["IN1"] = SimpleNamespace(
+        session_factory=SimpleNamespace(kw={"bind": engine}),
+    )
+
+    await pool.probe_postgres("IN1")
+
+    connection.execute.assert_awaited_once()

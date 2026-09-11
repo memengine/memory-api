@@ -52,7 +52,6 @@ from api.schemas.responses import ErrorResponse
 from api.schemas.responses import HealthData
 from api.schemas.responses import HealthResponse
 from api.settings import get_settings
-from sqlalchemy import text
 
 
 LOGGER = logging.getLogger("memoryos.main")
@@ -331,16 +330,12 @@ def create_app() -> FastAPI:
         try:
             region_pool = getattr(request.app.state, "region_pool", None)
             if region_pool is not None:
-                async with region_pool.get_db(DEFAULT_REGION_ID) as session:
-                    await session.execute(text("SELECT 1"))
+                await region_pool.probe_postgres(DEFAULT_REGION_ID)
                 postgres_available = True
         except Exception:
             LOGGER.warning("postgres_health_probe_failed", exc_info=True)
 
-        postgres_status = _dependency_status(
-            breaker_state=breaker_states.get("postgres", "CLOSED"),
-            service_available=postgres_available,
-        )
+        postgres_status = "ok" if postgres_available else "unavailable"
         if not postgres_available:
             overall_status = "CRITICAL"
             response.status_code = 503

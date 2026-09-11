@@ -91,6 +91,21 @@ class RegionConnectionPool:
         )
         return resources.session_factory()
 
+    async def probe_postgres(self, region_id: str) -> None:
+        """Verify physical PostgreSQL reachability without invoking request policy.
+
+        ECS liveness must distinguish a database outage from a temporarily open
+        application circuit breaker. The latter is a request-shedding policy
+        whose state can be shared by workers through Redis; treating it as a
+        failed container makes ECS repeatedly replace otherwise healthy tasks.
+        """
+        resources = self._require_region(region_id)
+        engine = resources.session_factory.kw.get("bind")
+        if engine is None:
+            raise RuntimeError(f"Region {region_id} has no PostgreSQL engine.")
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
     def get_qdrant(self, region_id: str) -> QdrantClient:
         resources = self._require_region(region_id)
         LOGGER.info(
