@@ -251,10 +251,15 @@ class _ScalarRows:
 
 class FakeAsyncLedgerSession:
     def __init__(self, revision_rows, claim_rows):
-        self.result_sets = [revision_rows, claim_rows]
+        self.result_sets = [revision_rows, claim_rows, revision_rows]
+        self.revision_rows = revision_rows
+        self.flushes: list[list[str]] = []
 
     async def execute(self, _statement):
         return _ScalarRows(self.result_sets.pop(0))
+
+    async def flush(self):
+        self.flushes.append([row.status for row in self.revision_rows])
 
 
 @pytest.mark.asyncio
@@ -300,9 +305,8 @@ async def test_conflict_selection_updates_claim_winner() -> None:
     revision_a.claim = claim
     revision_b.claim = claim
 
-    await ClaimLedgerService(
-        FakeAsyncLedgerSession([revision_a, revision_b], [claim])
-    ).apply_conflict_selection(
+    session = FakeAsyncLedgerSession([revision_a, revision_b], [claim])
+    await ClaimLedgerService(session).apply_conflict_selection(
         memory_a=memory_a,
         memory_b=memory_b,
         selection="B",
@@ -315,6 +319,60 @@ async def test_conflict_selection_updates_claim_winner() -> None:
     assert claim.active_value == "growth"
     assert claim.active_memory_id == memory_b.id
     assert claim.winning_revision_id == revision_b.id
+    assert session.flushes == [
+        ["rejected", "disputed"],
+        ["rejected", "activated"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_conflict_selection_keeps_same_claim_values_disputed_for_both() -> None:
+    tenant_id = uuid.uuid4()
+    proxy_user_id = uuid.uuid4()
+    memory_a = make_memory("Customer prefers compact dashboard cards.")
+    memory_b = make_memory("Customer prefers detailed dashboard cards.", archived=True)
+    claim = MemoryClaim(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        proxy_user_id=proxy_user_id,
+        category=MemoryCategory.preference,
+        claim_fingerprint="dashboard-card-style",
+        subject_key="customer",
+        predicate_key="dashboard card style",
+        active_value="compact",
+        status="disputed",
+        active_memory_id=memory_a.id,
+        authority_priority=50,
+        confidence_score=1.0,
+    )
+    revision_a = MemoryClaimRevision(
+        id=uuid.uuid4(),
+        claim_id=claim.id,
+        memory_id=memory_a.id,
+        asserted_value="compact",
+        status="activated",
+    )
+    revision_b = MemoryClaimRevision(
+        id=uuid.uuid4(),
+        claim_id=claim.id,
+        memory_id=memory_b.id,
+        asserted_value="detailed",
+        status="disputed",
+    )
+
+    session = FakeAsyncLedgerSession([revision_a, revision_b], [claim])
+    await ClaimLedgerService(session).apply_conflict_selection(
+        memory_a=memory_a,
+        memory_b=memory_b,
+        selection="both",
+        reason="Customer uses both card styles in different contexts.",
+    )
+
+    assert revision_a.status == "disputed"
+    assert revision_b.status == "disputed"
+    assert claim.status == "disputed"
+    assert claim.active_memory_id is None
+    assert claim.winning_revision_id is None
 
 
 def test_domain_fields_create_source_backed_revisions() -> None:

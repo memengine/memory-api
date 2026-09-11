@@ -339,7 +339,7 @@ class ClaimLedgerService:
     ) -> None:
         if not hasattr(self.session, "execute"):
             return
-        rows = (
+        target_rows = (
             (
                 await self.session.execute(
                     select(MemoryClaimRevision)
@@ -352,7 +352,7 @@ class ClaimLedgerService:
             .scalars()
             .all()
         )
-        claim_ids = {revision.claim_id for revision in rows}
+        claim_ids = {revision.claim_id for revision in target_rows}
         locked_claims = (
             (
                 await self.session.execute(
@@ -367,36 +367,86 @@ class ClaimLedgerService:
             else []
         )
         affected_claims = {claim.id: claim for claim in locked_claims}
+        rows = (
+            (
+                await self.session.execute(
+                    select(MemoryClaimRevision)
+                    .where(MemoryClaimRevision.claim_id.in_(claim_ids))
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+            if claim_ids
+            else []
+        )
         selected = {
             "A": {memory_a.id},
             "B": {memory_b.id},
             "both": {memory_a.id, memory_b.id},
             "neither": set(),
         }[selection]
+
+        selected_by_claim: dict[object, list[MemoryClaimRevision]] = {}
         for revision in rows:
-            revision.status = (
-                "activated" if revision.memory_id in selected else "rejected"
+            if revision.memory_id in selected:
+                selected_by_claim.setdefault(revision.claim_id, []).append(revision)
+
+        # A claim has a partial unique index allowing only one activated revision.
+        # Demote the current winner before promoting a new one; otherwise an ORM
+        # batch may send the promotion first and violate that invariant.
+        desired_statuses: dict[object, str] = {}
+        for claim_id, claim in affected_claims.items():
+            claim_selected = selected_by_claim.get(claim_id, [])
+            keep_multiple_for_same_claim = (
+                selection == "both" and len(claim_selected) > 1
             )
+            for revision in rows:
+                if revision.claim_id != claim_id:
+                    continue
+                desired_statuses[revision.id] = (
+                    "disputed"
+                    if keep_multiple_for_same_claim and revision in claim_selected
+                    else ("activated" if revision in claim_selected else "rejected")
+                )
+
+        decision_evidence = {
+            "action": "manual_resolution",
+            "decision_level": "manual",
+            "reason_codes": ["human_review_completed"],
+            "explanation": reason,
+            "details": {"selection": selection},
+        }
+        for revision in rows:
+            desired_status = desired_statuses[revision.id]
+            if desired_status != "activated":
+                revision.status = desired_status
             revision.resolution_reason = reason
-            revision.decision_evidence = {
-                "action": "manual_resolution",
-                "decision_level": "manual",
-                "reason_codes": ["human_review_completed"],
-                "explanation": reason,
-                "details": {"selection": selection},
-            }
+            revision.decision_evidence = decision_evidence
+
+        # Flush the demotions before an activation. This creates a deterministic
+        # transition under uq_memory_claim_revisions_one_activated.
+        await self.session.flush()
+
+        for revision in rows:
+            if desired_statuses[revision.id] == "activated":
+                revision.status = "activated"
+
+        await self.session.flush()
 
         for claim in affected_claims.values():
-            claim_revisions = [
-                revision for revision in rows if revision.claim_id == claim.id
-            ]
-            active_revisions = [
-                revision
-                for revision in claim_revisions
-                if revision.memory_id in selected
-            ]
-            if len(active_revisions) == 1:
-                winner = active_revisions[0]
+            selected_revisions = selected_by_claim.get(claim.id, [])
+            if selection == "both" and len(selected_revisions) > 1:
+                # Both values can remain visible in memory retrieval, but a
+                # single claim cannot name two authoritative winners.
+                claim.status = "disputed"
+                claim.active_value = "; ".join(
+                    revision.asserted_value for revision in selected_revisions
+                )
+                claim.active_memory_id = None
+                claim.winning_revision_id = None
+            elif len(selected_revisions) == 1:
+                winner = selected_revisions[0]
                 claim.status = "active"
                 claim.active_value = winner.asserted_value
                 claim.active_memory_id = winner.memory_id
@@ -404,13 +454,6 @@ class ClaimLedgerService:
                 claim.authority_priority = winner.authority_priority
                 claim.confidence_score = winner.confidence_score
                 claim.observed_at = winner.observed_at or claim.observed_at
-            elif len(active_revisions) > 1:
-                claim.status = "active"
-                claim.active_value = "; ".join(
-                    revision.asserted_value for revision in active_revisions
-                )
-                claim.active_memory_id = None
-                claim.winning_revision_id = None
             else:
                 claim.status = "archived"
                 claim.active_value = None
