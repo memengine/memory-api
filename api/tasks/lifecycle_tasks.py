@@ -3,20 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 
 from celery import shared_task
 from celery.schedules import crontab
 from sqlalchemy import select
 
 from api.db.cache import CacheService
-from api.db.database import SessionLocal
+from api.db.database import scoped_async_session_factory
 from api.db.models import Tenant
 from api.services.lifecycle_manager import MemoryLifecycleManager
-
 from api.tasks.scoring_tasks import run_lifecycle_for_all_tenants
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,12 +42,19 @@ TEMPORAL_VALIDITY_BEAT_SCHEDULE = {
 
 
 async def run_temporal_validity_transitions_for_all_tenants(
-    *, now: datetime | None = None
+    *, now: datetime | None = None, session_factory=None
 ) -> dict[str, object]:
     """Run restart-safe catch-up while containing failures to one tenant."""
+    if session_factory is None:
+        async with scoped_async_session_factory() as task_session_factory:
+            return await run_temporal_validity_transitions_for_all_tenants(
+                now=now,
+                session_factory=task_session_factory,
+            )
+
     started = time.perf_counter()
     reference_time = now or datetime.now(UTC)
-    async with SessionLocal() as session:
+    async with session_factory() as session:
         tenant_ids = list(
             (
                 await session.execute(
@@ -65,7 +69,7 @@ async def run_temporal_validity_transitions_for_all_tenants(
     failures: list[dict[str, str]] = []
     for tenant_id in tenant_ids:
         try:
-            async with SessionLocal() as session:
+            async with session_factory() as session:
                 report = await MemoryLifecycleManager(
                     session=session,
                     cache_service=CacheService(),

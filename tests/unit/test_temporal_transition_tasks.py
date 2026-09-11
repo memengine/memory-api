@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -43,10 +44,26 @@ def test_temporal_transition_schedule_is_registered_at_five_minutes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transition_cycle_owns_a_loop_local_session_factory(monkeypatch) -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def task_sessions():
+        events.append("enter")
+        yield lambda: _Session()
+        events.append("exit")
+
+    monkeypatch.setattr(lifecycle_tasks, "scoped_async_session_factory", task_sessions)
+    result = await lifecycle_tasks.run_temporal_validity_transitions_for_all_tenants()
+
+    assert result["tenant_count"] == 0
+    assert events == ["enter", "exit"]
+
+
+@pytest.mark.asyncio
 async def test_transition_cycle_reports_counts_latency_and_tenant_failures(monkeypatch) -> None:
     tenant_ids = [uuid.uuid4(), uuid.uuid4()]
     sessions = iter([_Session(tenant_ids), _Session(), _Session()])
-    monkeypatch.setattr(lifecycle_tasks, "SessionLocal", lambda: next(sessions))
     monkeypatch.setattr(lifecycle_tasks, "CacheService", lambda: object())
 
     class _Manager:
@@ -67,7 +84,8 @@ async def test_transition_cycle_reports_counts_latency_and_tenant_failures(monke
 
     monkeypatch.setattr(lifecycle_tasks, "MemoryLifecycleManager", _Manager)
     result = await lifecycle_tasks.run_temporal_validity_transitions_for_all_tenants(
-        now=datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+        now=datetime(2026, 8, 13, 12, 0, tzinfo=UTC),
+        session_factory=lambda: next(sessions),
     )
 
     assert result["tenant_count"] == 2

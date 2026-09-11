@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from unittest.mock import Mock
 
 import pytest
 from starlette.responses import Response
@@ -178,3 +179,23 @@ def test_region_connection_pool_initializes_per_region_resources() -> None:
     assert pool.get_cache_service("IN1") is not pool.get_cache_service("EU1")
     assert pool.get_qdrant("IN1") is not pool.get_qdrant("EU1")
     assert pool.get_db("IN1") is not pool.get_db("EU1")
+
+
+@pytest.mark.asyncio
+async def test_region_connection_pool_close_disposes_every_client() -> None:
+    pool = RegionConnectionPool(app_env="test", region_rows=[])
+    engine = SimpleNamespace(dispose=AsyncMock())
+    redis_client = SimpleNamespace(aclose=AsyncMock())
+    qdrant_client = SimpleNamespace(close=Mock())
+    pool._resources["IN1"] = SimpleNamespace(
+        session_factory=SimpleNamespace(kw={"bind": engine}),
+        redis_client=redis_client,
+        qdrant_client=qdrant_client,
+    )
+
+    await pool.close()
+
+    engine.dispose.assert_awaited_once()
+    redis_client.aclose.assert_awaited_once()
+    qdrant_client.close.assert_called_once()
+    assert pool._resources == {}

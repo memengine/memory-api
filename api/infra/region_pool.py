@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -61,6 +62,25 @@ class RegionConnectionPool:
             raise RuntimeError("No active regions configured.")
         for row in region_rows:
             self._initialize_region(row)
+
+    async def close(self) -> None:
+        """Release every regional client during application shutdown."""
+        resources = list(self._resources.values())
+        self._resources.clear()
+        for resource in resources:
+            engine = resource.session_factory.kw.get("bind")
+            if engine is not None:
+                await engine.dispose()
+            for client, method_name in (
+                (resource.redis_client, "aclose"),
+                (resource.qdrant_client, "close"),
+            ):
+                close = getattr(client, method_name, None)
+                if close is None:
+                    continue
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
 
     def get_db(self, region_id: str) -> AsyncSession:
         resources = self._require_region(region_id)

@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi import Request
+from fastapi import Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -51,6 +52,7 @@ from api.schemas.responses import ErrorResponse
 from api.schemas.responses import HealthData
 from api.schemas.responses import HealthResponse
 from api.settings import get_settings
+from sqlalchemy import text
 
 
 LOGGER = logging.getLogger("memoryos.main")
@@ -184,6 +186,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        region_pool = getattr(app.state, "region_pool", None)
+        if region_pool is not None:
+            await region_pool.close()
         if runtime_telemetry is not None:
             await runtime_telemetry.stop()
 
@@ -305,7 +310,7 @@ def create_app() -> FastAPI:
     _register_exception_handlers(app)
 
     @app.get("/health", response_model=HealthResponse, tags=["health"])
-    async def health_check(request: Request) -> HealthResponse:
+    async def health_check(request: Request, response: Response) -> HealthResponse:
         """Service health check for primary dependencies.
 
         Parameters: none.
@@ -322,10 +327,23 @@ def create_app() -> FastAPI:
             breaker_state=breaker_states.get("redis", "CLOSED"),
             service_available=getattr(request.app.state, "cache_service", None) is not None,
         )
+        postgres_available = False
+        try:
+            region_pool = getattr(request.app.state, "region_pool", None)
+            if region_pool is not None:
+                async with region_pool.get_db(DEFAULT_REGION_ID) as session:
+                    await session.execute(text("SELECT 1"))
+                postgres_available = True
+        except Exception:
+            LOGGER.warning("postgres_health_probe_failed", exc_info=True)
+
         postgres_status = _dependency_status(
             breaker_state=breaker_states.get("postgres", "CLOSED"),
-            service_available=True,
+            service_available=postgres_available,
         )
+        if not postgres_available:
+            overall_status = "CRITICAL"
+            response.status_code = 503
         return HealthResponse(
             data=HealthData(
                 status="ok" if overall_status == "HEALTHY" else overall_status.lower(),

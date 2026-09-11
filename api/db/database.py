@@ -7,27 +7,23 @@ import os
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from urllib.parse import parse_qsl
-from urllib.parse import urlencode
-from urllib.parse import urlsplit
-from urllib.parse import urlunsplit
+from contextlib import asynccontextmanager
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import Request
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_postgres_open
-from api.infra.postgres_benchmark import instrument_engine
-from api.infra.postgres_benchmark import postgres_benchmark_enabled
-from api.infra.postgres_benchmark import session_factory_owner
+from api.infra.postgres_benchmark import (
+    instrument_engine,
+    postgres_benchmark_enabled,
+    session_factory_owner,
+)
 from api.infra.transport_security import validate_database_transport
 from api.settings import get_settings
-
 
 SESSION_LOGGER = logging.getLogger("memoryos.postgres_session_benchmark")
 
@@ -189,6 +185,7 @@ def build_async_engine(database_url: str | None = None):
         pool_size=int(os.getenv("DB_POOL_SIZE", "20")),
         max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "30")),
         pool_timeout=int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
+        pool_recycle=int(os.getenv("DB_POOL_RECYCLE_SECONDS", "900")),
         pool_pre_ping=True,
         # Supabase's transaction pooler (PgBouncer) can route consecutive
         # requests to different PostgreSQL connections. asyncpg's cached
@@ -208,8 +205,31 @@ def build_async_session_factory(database_url: str | None = None) -> async_sessio
     )
 
 
-engine = build_async_engine()
 SessionLocal = build_async_session_factory()
+
+
+@asynccontextmanager
+async def scoped_async_session_factory(
+    database_url: str | None = None,
+) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    """Create async database resources owned by one short-lived event loop.
+
+    Celery's prefork workers execute synchronous task functions, which commonly
+    bridge into async code with ``asyncio.run``. An asyncpg pool is bound to the
+    event loop that created it, so those tasks must not reuse the API's process
+    global ``SessionLocal`` factory across invocations. The caller owns this
+    scope and the engine is always disposed before that loop is closed.
+    """
+    async_engine = build_async_engine(database_url)
+    sessions = async_sessionmaker(
+        async_engine,
+        expire_on_commit=False,
+        class_=CircuitBreakerAsyncSession,
+    )
+    try:
+        yield sessions
+    finally:
+        await async_engine.dispose()
 
 
 async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
@@ -230,6 +250,10 @@ def build_sync_session_factory(database_url: str | None = None) -> sessionmaker[
         if database_url is not None
         else get_database_url()
     )
-    sync_engine = create_engine(get_sync_database_url(resolved_url), pool_pre_ping=True)
+    sync_engine = create_engine(
+        get_sync_database_url(resolved_url),
+        pool_pre_ping=True,
+        pool_recycle=int(os.getenv("DB_POOL_RECYCLE_SECONDS", "900")),
+    )
     instrument_engine(sync_engine, kind="sync", owner=session_factory_owner())
     return sessionmaker(bind=sync_engine, expire_on_commit=False, class_=CircuitBreakerSyncSession)
