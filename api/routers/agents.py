@@ -71,10 +71,10 @@ def _global_agent_to_data(agent, *, raw_agent_api_key: str | None = None) -> Glo
 @router.get("/global/{agent_id}", response_model=GlobalAgentPublicResponse)
 async def get_global_agent_profile(
     request: Request,
-    agent_id: str,
+    agent_id: uuid.UUID,
     session: DbSession,
 ) -> GlobalAgentPublicResponse:
-    profile = await GlobalAgentService(session=session).get_public_profile(agent_id)
+    profile = await GlobalAgentService(session=session).get_public_profile(str(agent_id))
     if profile is None:
         raise APIError(status_code=404, code="AGN_404", error="global_agent_not_found")
     return GlobalAgentPublicResponse(

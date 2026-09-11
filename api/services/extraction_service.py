@@ -644,16 +644,13 @@ class ExtractionService:
     def _is_affirmative_confirmation(content: str) -> bool:
         normalized = re.sub(r"[^a-z0-9\s']", " ", content.lower())
         normalized = " ".join(normalized.split())
-        return normalized in {
-            "yes",
-            "yes please",
-            "correct",
-            "exactly",
-            "that's right",
-            "that is right",
-            "sounds right",
-            "please remember that",
-        }
+        return bool(
+            re.fullmatch(
+                r"(?:yes|correct|exactly|that's right|that is right|sounds right)"
+                r"(?: please)?(?: remember (?:this|that))?",
+                normalized,
+            )
+        ) or normalized == "please remember that"
 
     @staticmethod
     def _is_question_only(content: str) -> bool:

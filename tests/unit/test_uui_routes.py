@@ -138,6 +138,14 @@ def test_get_global_agent_profile_returns_public_fields(monkeypatch) -> None:
     assert payload["data"]["is_verified"] is True
 
 
+def test_get_global_agent_profile_rejects_malformed_uuid(monkeypatch) -> None:
+    app = _build_test_app()
+    with TestClient(app) as client:
+        response = client.get("/v1/agents/global/{agent_id}")
+
+    assert response.status_code == 422
+
+
 def test_list_uui_grants_returns_memory_stats(monkeypatch) -> None:
     app = _build_test_app()
     user_id = uuid.uuid4()

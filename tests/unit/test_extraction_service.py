@@ -398,7 +398,7 @@ async def test_regular_chat_keeps_assistant_proposal_confirmed_by_user(tmp_path:
         messages=[
             {"role": "user", "content": "Help me choose a response style."},
             {"role": "assistant", "content": "Would you prefer concise step-by-step explanations?"},
-            {"role": "user", "content": "Yes."},
+            {"role": "user", "content": "Exactly. Please remember that."},
         ],
         proxy_user_id="proxy-1",
         tenant_id="tenant-1",
