@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import Request
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -230,6 +230,17 @@ async def scoped_async_session_factory(
         yield sessions
     finally:
         await async_engine.dispose()
+
+
+async def probe_async_session_factory(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Verify database transport without applying request circuit policy."""
+    async_engine = session_factory.kw.get("bind")
+    if async_engine is None:
+        raise RuntimeError("Async session factory has no database engine.")
+    async with async_engine.connect() as connection:
+        await connection.execute(text("SELECT 1"))
 
 
 async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]:

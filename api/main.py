@@ -22,6 +22,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from api.benchmark_runtime_telemetry import BenchmarkRuntimeTelemetry
 from api.benchmark_runtime_telemetry import runtime_telemetry_enabled
 from api.db.cache import CacheService
+from api.db.database import SessionLocal
+from api.db.database import probe_async_session_factory
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
@@ -331,7 +333,9 @@ def create_app() -> FastAPI:
             region_pool = getattr(request.app.state, "region_pool", None)
             if region_pool is not None:
                 await region_pool.probe_postgres(DEFAULT_REGION_ID)
-                postgres_available = True
+            else:
+                await probe_async_session_factory(SessionLocal)
+            postgres_available = True
         except Exception:
             LOGGER.warning("postgres_health_probe_failed", exc_info=True)
 
