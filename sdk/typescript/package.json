@@ -51,7 +51,8 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "test:contract": "npm run build && node --test tests/contract.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepublishOnly": "npm run typecheck && npm run test:contract"
   },
   "devDependencies": {
     "tsup": "^8.3.5",

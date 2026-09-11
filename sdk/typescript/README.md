@@ -124,10 +124,12 @@ console.log(memories.items[0]?.content ?? "No memories found");
 `memoryo-sdk` is a strict, zero-runtime-dependency client for the MemoryOS API.
 
 - Native `fetch` only
-- Works in Node.js 18+ and modern browsers
+- Works in server-side Node.js 18+
 - Built-in retries for `429` and `5xx`
 - Typed inputs, outputs, and errors
 - ESM and CJS bundles
+
+> **Security:** Keep tenant API keys on your server. Do not embed a MemoryOS API key in browser JavaScript or any `NEXT_PUBLIC_*` environment variable.
 
 ## Quickstart
 
