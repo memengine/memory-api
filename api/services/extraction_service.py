@@ -5,16 +5,12 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from api.db.cache import CacheService
-from api.schemas.extraction_schemas import ExtractionResult
-from api.schemas.extraction_schemas import PendingExtractedMemory
+from api.schemas.extraction_schemas import ExtractionResult, PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.llm_service import LLMService
 from api.settings import get_settings
@@ -131,7 +127,11 @@ class ExtractionService:
         in one place.
         """
         resolved_user_id = proxy_user_id or user_id or ""
-        conversation = self._build_conversation_string(messages)
+        indexed_messages = [
+            {**message, "_turn_index": index}
+            for index, message in enumerate(messages)
+        ]
+        conversation = self._build_conversation_string(indexed_messages)
         user_message = self._append_existing_memory_context(
             self._prepend_source_context(conversation, source_context),
             existing_memories or [],
@@ -139,7 +139,7 @@ class ExtractionService:
 
         composition_signals: dict[str, Any] = {}
         composition_prepass_attempted = self._should_run_compositional_pass(
-            messages=messages,
+            messages=indexed_messages,
             conversation=conversation,
             source_context=source_context,
         )
@@ -186,7 +186,11 @@ class ExtractionService:
         tokens_used += int(response.total_tokens or 0)
         provider_used = response.provider_used or provider_used
         await self._record_provider_usage(response.provider_used)
-        kept, pending, filtered_count, nothing_to_extract = self._parse_and_validate_response(response.content)
+        kept, pending, filtered_count, nothing_to_extract = self._parse_and_validate_response(
+            response.content,
+            messages=indexed_messages,
+            source_context=source_context,
+        )
         self._observe_importance_shadow(
             kept=kept,
             pending=pending,
@@ -244,7 +248,9 @@ class ExtractionService:
             return
         try:
             if self._importance_shadow_service is None:
-                from api.services.importance_shadow_service import ImportanceShadowService
+                from api.services.importance_shadow_service import (
+                    ImportanceShadowService,
+                )
 
                 self._importance_shadow_service = ImportanceShadowService(
                     review_dir=self._importance_shadow_review_dir,
@@ -353,12 +359,16 @@ class ExtractionService:
             '      "category": "preference|fact|goal|procedure|relationship|expertise",\n'
             '      "importance_score": float between 1.0 and 10.0,\n'
             '      "confidence": float between 0.0 and 1.0,\n'
+            '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
             '  "nothing_to_extract": false,\n'
             '  "extraction_notes": "optional string"\n'
             "}\n\n"
+            "For normal conversations, evidence_turns is mandatory and must include at least one "
+            "user turn that directly states or confirms the memory. A question from the user or an "
+            "unsupported assistant statement is not evidence.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
@@ -533,6 +543,9 @@ class ExtractionService:
     def _parse_and_validate_response(
         self,
         raw_content: str,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+        source_context: dict[str, Any] | None = None,
     ) -> tuple[list[ExtractedMemory], list[PendingExtractedMemory], int, bool]:
         try:
             data = json.loads(raw_content or "{}")
@@ -557,6 +570,13 @@ class ExtractionService:
             if candidate is None:
                 invalid_count += 1
                 continue
+            if not source_context and not self._has_user_evidence(
+                candidate,
+                messages or [],
+                raw_memory.get("evidence_turns") if isinstance(raw_memory, dict) else None,
+            ):
+                invalid_count += 1
+                continue
             if candidate.confidence >= self._confidence_threshold:
                 kept.append(
                     ExtractedMemory(
@@ -571,6 +591,128 @@ class ExtractionService:
             else:
                 pending.append(candidate)
         return kept, pending, invalid_count, False
+
+    @classmethod
+    def _has_user_evidence(
+        cls,
+        candidate: PendingExtractedMemory,
+        messages: list[dict[str, Any]],
+        evidence_turns: Any,
+    ) -> bool:
+        """Require conversational memories to be grounded in a user's own turn.
+
+        Registered service events bypass this gate because their writer identity,
+        evidence, and authority are validated separately before extraction.
+        """
+        indexed_messages = list(enumerate(messages))
+        evidence_was_provided = isinstance(evidence_turns, list)
+        cited_indexes = cls._valid_evidence_indexes(evidence_turns, len(messages))
+        if evidence_was_provided and not cited_indexes:
+            return False
+        if cited_indexes:
+            indexed_messages = [item for item in indexed_messages if item[0] in cited_indexes]
+
+        user_turns = [
+            (index, str(message.get("content") or "").strip())
+            for index, message in indexed_messages
+            if str(message.get("role") or "user").strip().lower() == "user"
+            and str(message.get("content") or "").strip()
+        ]
+        candidate_tokens = cls._significant_tokens(candidate.content)
+        for index, content in user_turns:
+            if cls._is_affirmative_confirmation(content):
+                if cls._confirmation_supports_candidate(index, messages, candidate_tokens, cited_indexes):
+                    return True
+                continue
+            if cls._is_question_only(content):
+                continue
+            if candidate_tokens & cls._significant_tokens(content):
+                return True
+        return False
+
+    @staticmethod
+    def _valid_evidence_indexes(value: Any, message_count: int) -> set[int]:
+        if not isinstance(value, list):
+            return set()
+        return {
+            index
+            for index in value
+            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < message_count
+        }
+
+    @staticmethod
+    def _is_affirmative_confirmation(content: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9\s']", " ", content.lower())
+        normalized = " ".join(normalized.split())
+        return normalized in {
+            "yes",
+            "yes please",
+            "correct",
+            "exactly",
+            "that's right",
+            "that is right",
+            "sounds right",
+            "please remember that",
+        }
+
+    @staticmethod
+    def _is_question_only(content: str) -> bool:
+        normalized = " ".join(content.lower().split())
+        question_starts = (
+            "am ",
+            "are ",
+            "can ",
+            "could ",
+            "did ",
+            "do ",
+            "does ",
+            "how ",
+            "is ",
+            "should ",
+            "what ",
+            "when ",
+            "where ",
+            "which ",
+            "who ",
+            "why ",
+            "will ",
+            "would ",
+        )
+        return normalized.endswith("?") or normalized.startswith(question_starts)
+
+    @classmethod
+    def _confirmation_supports_candidate(
+        cls,
+        user_index: int,
+        messages: list[dict[str, Any]],
+        candidate_tokens: set[str],
+        cited_indexes: set[int],
+    ) -> bool:
+        for index in range(user_index - 1, -1, -1):
+            message = messages[index]
+            role = str(message.get("role") or "user").strip().lower()
+            content = str(message.get("content") or "").strip()
+            if role == "user":
+                break
+            if role != "assistant" or not content:
+                continue
+            if cited_indexes and index not in cited_indexes:
+                continue
+            return bool(candidate_tokens & cls._significant_tokens(content))
+        return False
+
+    @staticmethod
+    def _significant_tokens(text: str) -> set[str]:
+        stop_words = {
+            "about", "after", "also", "and", "are", "because", "before",
+            "from", "has", "have", "into", "its", "more", "that", "the",
+            "their", "them", "this", "user", "with", "would",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", text.lower())
+            if len(token) >= 3 and token not in stop_words
+        }
 
     def _coerce_memory(self, raw_memory: Any) -> PendingExtractedMemory | None:
         if not isinstance(raw_memory, dict):
@@ -680,11 +822,12 @@ class ExtractionService:
     @staticmethod
     def _messages_to_text(messages: list[dict[str, Any]]) -> str:
         lines: list[str] = []
-        for message in messages:
+        for fallback_index, message in enumerate(messages):
             role = str(message.get("role") or "user").strip().lower()
             content = str(message.get("content") or "").strip()
             if content:
-                lines.append(f"[{role}]: {content}")
+                turn_index = message.get("_turn_index", fallback_index)
+                lines.append(f"[turn {turn_index}][{role}]: {content}")
         return "\n".join(lines)
 
     @staticmethod
@@ -698,7 +841,7 @@ class ExtractionService:
             return max(1, len(text) // 4)
 
 
-__all__ = ["ExtractionError", "ExtractionService", "ExtractionResult", "ParsedExtractionSpec"]
+__all__ = ["ExtractionError", "ExtractionResult", "ExtractionService", "ParsedExtractionSpec"]
 
 
 

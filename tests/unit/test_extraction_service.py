@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from api.services.extraction_service import ExtractionError
-from api.services.extraction_service import ExtractionService
+from api.services.extraction_service import ExtractionError, ExtractionService
 from api.services.llm_service import LLMResponse
 
 
@@ -303,6 +302,110 @@ async def test_explicit_service_event_enables_authoritative_observation_mode(
     assert result.memories_extracted == 1
     assert "AUTHENTICATED SERVICE EVENT MODE" in llm.calls[0]["system_prompt"]
     assert "Service: billing-service" in llm.calls[0]["user_message"]
+
+
+@pytest.mark.asyncio
+async def test_regular_chat_rejects_memory_supported_only_by_assistant(tmp_path: Path) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User prefers clear technical explanations without jargon",
+                        "category": "preference",
+                        "importance_score": 7.0,
+                        "confidence": 0.91,
+                        "evidence_turns": [0, 1],
+                        "reasoning": "The assistant offered this response style.",
+                    }
+                ],
+                "nothing_to_extract": False,
+            }
+        )
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {"role": "user", "content": "How should you explain technical problems to me?"},
+            {"role": "assistant", "content": "I will explain them clearly and avoid jargon."},
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-assistant-only",
+    )
+
+    assert result.memories_extracted == 0
+    assert result.pending_candidates_count == 0
+    assert result.memories_filtered == 1
+
+
+@pytest.mark.asyncio
+async def test_regular_chat_keeps_explicit_user_preference(tmp_path: Path) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User prefers concise step-by-step technical explanations",
+                        "category": "preference",
+                        "importance_score": 8.0,
+                        "confidence": 0.94,
+                        "evidence_turns": [0],
+                        "reasoning": "The user explicitly stated this preference.",
+                    }
+                ],
+                "nothing_to_extract": False,
+            }
+        )
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {"role": "user", "content": "I prefer concise, step-by-step technical explanations."},
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-user-preference",
+    )
+
+    assert result.memories_extracted == 1
+
+
+@pytest.mark.asyncio
+async def test_regular_chat_keeps_assistant_proposal_confirmed_by_user(tmp_path: Path) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User prefers concise step-by-step explanations",
+                        "category": "preference",
+                        "importance_score": 8.0,
+                        "confidence": 0.9,
+                        "evidence_turns": [1, 2],
+                        "reasoning": "The user confirmed the assistant's proposed style.",
+                    }
+                ],
+                "nothing_to_extract": False,
+            }
+        )
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {"role": "user", "content": "Help me choose a response style."},
+            {"role": "assistant", "content": "Would you prefer concise step-by-step explanations?"},
+            {"role": "user", "content": "Yes."},
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-user-confirmation",
+    )
+
+    assert result.memories_extracted == 1
 
 
 def test_regular_chat_prompt_does_not_enable_service_event_mode(tmp_path: Path) -> None:
