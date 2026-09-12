@@ -923,6 +923,24 @@ def run_extraction_pipeline(
             }
 
         stage = "store_memories"
+        # Keep the caller's stable conversation reference alongside the internal
+        # conversation UUID. The UUID remains the relational source key; the
+        # external identifier is immutable provenance that survives extraction,
+        # conflict resolution, and list/retrieve serialization.
+        provenance_snapshot = (
+            build_provenance_snapshot(source_event)
+            if source_event is not None
+            else dict(job_payload.get("evidence_policy") or {})
+        )
+        external_conversation_id = str(
+            job_payload.get("external_conversation_id") or ""
+        ).strip()
+        if external_conversation_id:
+            provenance_snapshot = {
+                **provenance_snapshot,
+                "external_conversation_id": external_conversation_id,
+            }
+
         embedding_service = EmbeddingService(sync_session=session, gemini_client=client)
         resolver = conflict_resolver or ConflictResolver(
             session=session,
@@ -931,11 +949,7 @@ def run_extraction_pipeline(
             client=client,
             default_source_conversation_id=conversation.id,
             default_source_event_id=source_event.id if source_event is not None else None,
-            provenance_snapshot=(
-                build_provenance_snapshot(source_event)
-                if source_event is not None
-                else dict(job_payload.get("evidence_policy") or {}) or None
-            ),
+            provenance_snapshot=provenance_snapshot or None,
             domain_schema=domain_schema_name,
         )
         stored_memories = resolver.check_and_store(

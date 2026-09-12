@@ -85,6 +85,15 @@ class FakeConflictResolver:
         ]
 
 
+class CapturingConflictResolver(FakeConflictResolver):
+    instance: CapturingConflictResolver | None = None
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+        self.provenance_snapshot = kwargs["provenance_snapshot"]
+        CapturingConflictResolver.instance = self
+
+
 def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> None:
     proxy_user = ProxyUser(
         id=uuid.uuid4(),
@@ -173,6 +182,60 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert session.commits == 2
     assert session.rollbacks == 0
     assert session.closed is True
+
+
+def test_external_conversation_id_survives_processing_in_memory_provenance(monkeypatch) -> None:
+    proxy_user = ProxyUser(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        external_user_id="ext-conversation-provenance",
+        external_user_id_hash="hash-conversation-provenance",
+        memory_count=0,
+        metadata_json={},
+        is_blocked=False,
+    )
+    session = FakeSession(proxy_user)
+    backing_user = User(
+        id=uuid.uuid4(),
+        external_id=f"proxy::{proxy_user.id}",
+        email="provenance@example.test",
+        settings={},
+        memory_count=0,
+        is_active=True,
+    )
+    conversation = Conversation(
+        id=uuid.uuid4(),
+        user_id=backing_user.id,
+        message_count=1,
+        processing_status=ConversationProcessingStatus.processing,
+    )
+    CapturingConflictResolver.instance = None
+    monkeypatch.setattr(extraction_tasks, "_ensure_proxy_backing_user", lambda *_args: backing_user)
+    monkeypatch.setattr(extraction_tasks, "_create_source_conversation", lambda *_args, **_kwargs: conversation)
+    monkeypatch.setattr(extraction_tasks, "_refresh_proxy_user_memory_count", lambda *_args: None)
+    monkeypatch.setattr(extraction_tasks, "_invalidate_proxy_user_cache", lambda *_args: None)
+    monkeypatch.setattr(extraction_tasks, "ConflictResolver", CapturingConflictResolver)
+
+    extraction_tasks.run_extraction_pipeline(
+        {
+            "job_id": "job-external-conversation",
+            "tenant_id": str(proxy_user.tenant_id),
+            "proxy_user_id": str(proxy_user.id),
+            "external_conversation_id": "vscode-chat-2026-09-12-01",
+            "messages": [{"role": "user", "content": "I prefer Python"}],
+            "evidence_policy": {"authority_priority": 20, "attestation": "client_asserted"},
+        },
+        session_factory=FakeSessionFactory(session),
+        extractor=FakeExtractor(),
+        scorer=FakeScorer(),
+        qdrant_service=SimpleNamespace(),
+        client=SimpleNamespace(),
+    )
+
+    assert CapturingConflictResolver.instance is not None
+    provenance = CapturingConflictResolver.instance.provenance_snapshot
+    assert provenance["external_conversation_id"] == "vscode-chat-2026-09-12-01"
+    assert provenance["attestation"] == "client_asserted"
 
 
 def test_explicit_clarification_request_is_forwarded_to_conflict_resolver(monkeypatch) -> None:

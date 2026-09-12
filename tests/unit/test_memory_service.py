@@ -163,6 +163,7 @@ async def test_queue_memory_add_dispatches_extraction_task_when_queued() -> None
         idempotency_key=None,
         tenant_id=None,
         external_user_id=None,
+        conversation_id="vscode-chat-2026-09-12-01",
     )
 
     assert result["status"] == "queued"
@@ -172,6 +173,7 @@ async def test_queue_memory_add_dispatches_extraction_task_when_queued() -> None
     assert dispatch_task.calls[0][2]["args"][0]["job_id"] == result["job_id"]
     assert dispatch_task.calls[0][2]["queue"] is None
     assert dispatch_task.calls[0][2]["args"][0]["evidence_policy"]["attestation"] == "legacy_conversation"
+    assert dispatch_task.calls[0][2]["args"][0]["external_conversation_id"] == "vscode-chat-2026-09-12-01"
 
 
 @pytest.mark.asyncio
