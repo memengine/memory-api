@@ -171,6 +171,37 @@ async def test_queue_memory_add_dispatches_extraction_task_when_queued() -> None
     assert dispatch_task.calls[0][0] == "api.tasks.extraction_tasks.process_extraction_job"
     assert dispatch_task.calls[0][2]["args"][0]["job_id"] == result["job_id"]
     assert dispatch_task.calls[0][2]["queue"] is None
+    assert dispatch_task.calls[0][2]["args"][0]["evidence_policy"]["attestation"] == "legacy_conversation"
+
+
+@pytest.mark.asyncio
+async def test_queue_memory_add_marks_explicit_client_assertions() -> None:
+    cache_service = MagicMock()
+    cache_service.get_idempotent_response = AsyncMock(return_value=None)
+    cache_service.set_job_status = AsyncMock()
+    cache_service.set_idempotent_response = AsyncMock()
+    dispatch_task = FakeDispatchTask()
+    service = MemoryService(
+        session=MagicMock(),
+        cache_service=cache_service,
+        qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+        dispatch_task=dispatch_task,
+    )
+
+    await service.queue_memory_add(
+        requested_user_id=None,
+        authenticated_user_id=None,
+        agent_id=None,
+        messages=[{"role": "user", "content": "hello"}],
+        metadata={},
+        idempotency_key=None,
+        evidence_mode="client_assertion",
+    )
+
+    policy = dispatch_task.calls[0][2]["args"][0]["evidence_policy"]
+    assert policy["authority_priority"] == 20
+    assert policy["attestation"] == "client_asserted"
 
 
 @pytest.mark.asyncio

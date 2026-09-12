@@ -184,7 +184,11 @@ class MemoryService:
             "mode": evidence_mode,
             "authority_priority": int(evidence_authority),
             "authority_rules": {"default_priority": int(evidence_authority)},
-            "attestation": "client_asserted",
+            "attestation": (
+                "client_asserted"
+                if evidence_mode == "client_assertion"
+                else "legacy_conversation"
+            ),
         }
         if tenant_id:
             provenance_service = ProvenanceService(self.session)

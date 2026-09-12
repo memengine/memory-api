@@ -362,7 +362,7 @@ class ExtractionService:
             '      "confidence": float between 0.0 and 1.0,\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
             '      "evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal",\n'
-            '      "proposal_turn": "zero-based assistant turn index, required for a confirmed proposal",\n'
+            '      "proposal_turn": 1,\n'
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
@@ -371,7 +371,9 @@ class ExtractionService:
             "}\n\n"
             "For normal conversations, evidence_turns is mandatory and must include at least one "
             "user turn that directly states or confirms the memory. A question from the user or an "
-            "unsupported assistant statement is not evidence.\n\n"
+            "unsupported assistant statement is not evidence. For a confirmation of an assistant "
+            "proposal, set evidence_relation to user_confirmed_assistant_proposal and proposal_turn "
+            "to the cited assistant turn index.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
