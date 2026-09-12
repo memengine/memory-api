@@ -44,6 +44,8 @@ from api.schemas.responses import (
     MemoryDeleteData,
     MemoryDeleteResponse,
     MemoryGetResponse,
+    MemoryJobStatusData,
+    MemoryJobStatusResponse,
     MemoryListResponse,
     MemoryMutationResponse,
     MemoryRetrieveResponse,
@@ -304,6 +306,52 @@ async def memories_for_public_tenant_mcp(
         categories=categories or [],
         agent_id=None,
         external_user_id=_public_tenant_mcp_external_user_id(request),
+    )
+
+
+@router.get("/tenant/jobs/{job_id}", response_model=MemoryJobStatusResponse)
+async def job_status_for_public_tenant_mcp(
+    request: Request,
+    job_id: UUID,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+) -> MemoryJobStatusResponse:
+    """Return status only for an extraction job owned by this MCP profile."""
+    proxy_user = await _public_tenant_mcp_proxy_user(
+        request=request,
+        proxy_user_service=proxy_user_service,
+    )
+    job = await memory_service.get_job_status(job_id=str(job_id))
+    if (
+        str(job.get("tenant_id") or "") != str(request.state.tenant_id)
+        or str(job.get("proxy_user_id") or "") != str(proxy_user.id)
+    ):
+        raise APIError(status_code=404, code="JOB_404", error="job_not_found")
+    return MemoryJobStatusResponse(
+        data=MemoryJobStatusData(
+            job_id=str(job["job_id"]),
+            status=str(job["status"]),
+            memories_created=int(job.get("memories_created", 0)),
+            pending_candidates_buffered=int(job.get("pending_candidates_buffered", 0) or 0),
+            pending_candidates_promoted=int(job.get("pending_candidates_promoted", 0) or 0),
+            attempts=int(job.get("attempts", 0)),
+            created_at=datetime.fromisoformat(job["created_at"]) if job.get("created_at") else None,
+            processing_started_at=datetime.fromisoformat(job["processing_started_at"])
+            if job.get("processing_started_at")
+            else None,
+            queue_name=job.get("queue_name"),
+            error=job.get("error"),
+            error_summary=job.get("error_summary"),
+            queued_at=datetime.fromisoformat(job["queued_at"]) if job.get("queued_at") else None,
+            started_at=datetime.fromisoformat(job["started_at"]) if job.get("started_at") else None,
+            completed_at=datetime.fromisoformat(job["completed_at"]) if job.get("completed_at") else None,
+            dead_lettered_at=datetime.fromisoformat(job["dead_lettered_at"])
+            if job.get("dead_lettered_at")
+            else None,
+            extraction_metadata=job.get("extraction_metadata") or {},
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
     )
 
 
