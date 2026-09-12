@@ -299,6 +299,44 @@ def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None
     assert outbox_rows == []
 
 
+def test_lower_authority_client_assertion_is_quarantined_for_review() -> None:
+    existing = make_existing_memory()
+    existing.metadata_json = {
+        "provenance": {
+            "authority_rules": {"categories": {"expertise": 100}},
+            "attestation": "memoryos_attested",
+        }
+    }
+    session = FakeSession(existing_memory=existing)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing)]
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=qdrant,
+        embedder=lambda _text: [0.1] * 3,
+        client=make_llm_client("UPDATE"),
+        default_source_conversation_id=uuid.uuid4(),
+        provenance_snapshot={
+            "authority_rules": {"default_priority": 20},
+            "attestation": "client_asserted",
+        },
+    )
+
+    stored = resolver.check_and_store(
+        [make_new_memory()],
+        user_id=str(existing.user_id),
+        tenant_id=str(uuid.uuid4()),
+        proxy_user_id=str(existing.proxy_user_id),
+    )
+
+    assert len(stored) == 1
+    assert stored[0].resolution == "CLARIFICATION_PENDING"
+    pending = session.memories[stored[0].id]
+    assert existing.is_archived is False
+    assert pending.is_archived is True
+    assert any(isinstance(item, ClarificationQueue) for item in session.added)
+
+
 def test_ambiguous_same_user_preference_queues_a_self_scoped_clarification() -> None:
     existing = make_existing_memory()
     existing.content = "For dashboard UI, user prefers compact cards."

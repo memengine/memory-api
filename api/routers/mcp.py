@@ -67,6 +67,7 @@ class TenantMCPRememberRequest(BaseModel):
     messages: list[ConversationMessageRequest] = Field(min_length=1)
     metadata: dict = Field(default_factory=dict)
     agent_id: str | None = None
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class TenantMCPContextRequest(BaseModel):
@@ -209,6 +210,8 @@ async def remember_for_public_tenant_mcp(
             messages=payload.messages,
             metadata={**payload.metadata, "source": "public_tenant_mcp"},
             agent_id=payload.agent_id,
+            evidence_mode="client_assertion",
+            conversation_id=payload.conversation_id,
         ),
         memory_service=memory_service,
         proxy_user_service=proxy_user_service,

@@ -932,7 +932,9 @@ def run_extraction_pipeline(
             default_source_conversation_id=conversation.id,
             default_source_event_id=source_event.id if source_event is not None else None,
             provenance_snapshot=(
-                build_provenance_snapshot(source_event) if source_event is not None else None
+                build_provenance_snapshot(source_event)
+                if source_event is not None
+                else dict(job_payload.get("evidence_policy") or {}) or None
             ),
             domain_schema=domain_schema_name,
         )

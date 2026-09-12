@@ -27,6 +27,16 @@ ProcessingStatus = Literal["normal", "delayed"]
 class ConversationMessageRequest(BaseModel):
     role: Literal["user", "assistant", "system"] = "user"
     content: str = Field(min_length=1)
+    external_turn_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_kind: Literal[
+        "direct_user_input",
+        "assistant_output",
+        "tool_output",
+        "fetched_document",
+        "system_instruction",
+        "client_assertion",
+    ] | None = None
+    occurred_at: datetime | None = None
 
     @field_validator("content")
     @classmethod
@@ -57,6 +67,8 @@ class MemoryAddRequest(BaseModel):
     messages: list[ConversationMessageRequest] = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source: MemorySourceRequest | None = None
+    evidence_mode: Literal["conversation_evidence", "client_assertion"] = "conversation_evidence"
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class MemoryRetrieveRequest(BaseModel):

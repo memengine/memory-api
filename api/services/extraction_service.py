@@ -12,6 +12,7 @@ from typing import Any
 from api.db.cache import CacheService
 from api.schemas.extraction_schemas import ExtractionResult, PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
+from api.services.evidence_policy import validate_conversational_evidence
 from api.services.llm_service import LLMService
 from api.settings import get_settings
 
@@ -360,6 +361,8 @@ class ExtractionService:
             '      "importance_score": float between 1.0 and 10.0,\n'
             '      "confidence": float between 0.0 and 1.0,\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
+            '      "evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal",\n'
+            '      "proposal_turn": "zero-based assistant turn index, required for a confirmed proposal",\n'
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
@@ -574,6 +577,8 @@ class ExtractionService:
                 candidate,
                 messages or [],
                 raw_memory.get("evidence_turns") if isinstance(raw_memory, dict) else None,
+                raw_memory.get("evidence_relation") if isinstance(raw_memory, dict) else None,
+                raw_memory.get("proposal_turn") if isinstance(raw_memory, dict) else None,
             ):
                 invalid_count += 1
                 continue
@@ -598,12 +603,29 @@ class ExtractionService:
         candidate: PendingExtractedMemory,
         messages: list[dict[str, Any]],
         evidence_turns: Any,
+        evidence_relation: Any = None,
+        proposal_turn: Any = None,
     ) -> bool:
         """Require conversational memories to be grounded in a user's own turn.
 
         Registered service events bypass this gate because their writer identity,
         evidence, and authority are validated separately before extraction.
         """
+        # Legacy extractors did not return evidence_turns. Preserve direct-user
+        # extraction by validating every canonical turn, but never infer a
+        # proposal binding through this compatibility path.
+        policy_evidence_turns = evidence_turns
+        if not isinstance(policy_evidence_turns, list) and evidence_relation is None:
+            policy_evidence_turns = list(range(len(messages)))
+        policy = validate_conversational_evidence(
+            messages=messages,
+            evidence_turns=policy_evidence_turns,
+            evidence_relation=evidence_relation,
+            proposal_turn=proposal_turn,
+        )
+        if not policy.accepted:
+            return False
+
         indexed_messages = list(enumerate(messages))
         evidence_was_provided = isinstance(evidence_turns, list)
         cited_indexes = cls._valid_evidence_indexes(evidence_turns, len(messages))
@@ -619,11 +641,10 @@ class ExtractionService:
             and str(message.get("content") or "").strip()
         ]
         candidate_tokens = cls._significant_tokens(candidate.content)
+        if policy.proposal_turn_index is not None:
+            proposal_content = str(messages[policy.proposal_turn_index].get("content") or "")
+            return bool(candidate_tokens & cls._significant_tokens(proposal_content))
         for index, content in user_turns:
-            if cls._is_affirmative_confirmation(content):
-                if cls._confirmation_supports_candidate(index, messages, candidate_tokens, cited_indexes):
-                    return True
-                continue
             if cls._is_question_only(content):
                 continue
             if candidate_tokens & cls._significant_tokens(content):

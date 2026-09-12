@@ -385,6 +385,8 @@ async def test_regular_chat_keeps_assistant_proposal_confirmed_by_user(tmp_path:
                         "importance_score": 8.0,
                         "confidence": 0.9,
                         "evidence_turns": [1, 2],
+                        "evidence_relation": "user_confirmed_assistant_proposal",
+                        "proposal_turn": 1,
                         "reasoning": "The user confirmed the assistant's proposed style.",
                     }
                 ],

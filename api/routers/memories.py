@@ -293,6 +293,8 @@ async def add_memories(
         proxy_user_id=str(proxy_user.id),
         api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
         source=payload.source.model_dump(mode="json") if payload.source else None,
+        evidence_mode=payload.evidence_mode,
+        conversation_id=payload.conversation_id,
     )
     queue_ms = (time.perf_counter() - queue_started) * 1000
     if job.get("status") != "queued":

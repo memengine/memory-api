@@ -1203,6 +1203,29 @@ class ConflictResolver:
             and existing_has_authority
             and incoming_priority < existing_priority
         ):
+            if incoming_provenance.get("attestation") == "client_asserted":
+                return ConflictDecision(
+                    action="CLARIFY",
+                    reasoning=(
+                        "A lower-authority client assertion contradicts trusted stored evidence."
+                    ),
+                    decision_evidence=review_evidence(
+                        action="TENANT_REVIEW",
+                        reason_codes=[
+                            "lower_authority_contradiction",
+                            "stored_source_remains_active",
+                            "human_review_required",
+                        ],
+                        explanation=(
+                            "MemoryOS kept the trusted memory active and quarantined the "
+                            "client assertion for review."
+                        ),
+                        details={
+                            "incoming_authority": incoming_priority,
+                            "existing_authority": existing_priority,
+                        },
+                    ),
+                )
             return ConflictDecision(
                 action="REJECT",
                 reasoning=(

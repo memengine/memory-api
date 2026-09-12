@@ -30,6 +30,7 @@ from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.services.embedding_service import EmbeddingResult
 from api.services.embedding_service import EmbeddingService
+from api.services.evidence_policy import authority_for_submission
 from api.services.proxy_user_service import ProxyUserService
 from api.services.provenance_service import ProvenanceService
 from api.services.provenance_service import SOURCE_EVENT_HASH_VERSION
@@ -94,7 +95,7 @@ class MemoryService:
         requested_user_id: str | None,
         authenticated_user_id: str | None,
         agent_id: str | None,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         metadata: dict[str, Any],
         idempotency_key: str | None,
         tenant_id: str | None = None,
@@ -102,6 +103,8 @@ class MemoryService:
         proxy_user_id: str | None = None,
         api_key_id: str | None = None,
         source: dict[str, Any] | None = None,
+        evidence_mode: str = "conversation_evidence",
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         proxy_user = None
         resolved_proxy_user_id = proxy_user_id
@@ -173,6 +176,15 @@ class MemoryService:
             "messages": messages,
             "metadata": metadata,
             "queued_at": datetime.now(UTC).isoformat(),
+        }
+        if conversation_id:
+            job["external_conversation_id"] = conversation_id
+        evidence_authority = authority_for_submission(mode=evidence_mode)
+        job["evidence_policy"] = {
+            "mode": evidence_mode,
+            "authority_priority": int(evidence_authority),
+            "authority_rules": {"default_priority": int(evidence_authority)},
+            "attestation": "client_asserted",
         }
         if tenant_id:
             provenance_service = ProvenanceService(self.session)
