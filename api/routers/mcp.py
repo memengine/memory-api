@@ -7,7 +7,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -69,9 +69,9 @@ _MCP_PROVENANCE_STRING_MAX_CHARS = 160
 class TenantMCPRememberRequest(BaseModel):
     """Conversation content to remember for the authenticated MCP caller."""
 
+    model_config = ConfigDict(extra="forbid")
+
     messages: list[ConversationMessageRequest] = Field(min_length=1)
-    metadata: dict = Field(default_factory=dict)
-    agent_id: str | None = None
     conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
@@ -179,8 +179,6 @@ class McpMemoryExplanation(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     is_archived: bool = False
-    source_conversation_id: str | None = None
-    source_event_id: str | None = None
     provenance_summary: McpProvenanceSummary | None = None
 
 
@@ -363,8 +361,8 @@ async def remember_for_public_tenant_mcp(
         payload=MemoryAddRequest(
             external_user_id=external_user_id,
             messages=payload.messages,
-            metadata={**payload.metadata, "source": "public_tenant_mcp"},
-            agent_id=payload.agent_id,
+            metadata={},
+            agent_id=None,
             evidence_mode="client_assertion",
             conversation_id=payload.conversation_id,
         ),
@@ -373,6 +371,7 @@ async def remember_for_public_tenant_mcp(
         quality_gate_service=quality_gate_service,
         tenant_id=str(request.state.tenant_id),
         idempotency_key=idempotency_key,
+        trusted_submission_kind="mcp_client_assertion",
     )
 
 
@@ -442,7 +441,11 @@ async def session_context_for_public_tenant_mcp(
     )
 
 
-@router.get("/tenant/memories", response_model=McpMemorySummaryListResponse)
+@router.get(
+    "/tenant/memories",
+    response_model=McpMemorySummaryListResponse,
+    response_model_exclude_none=True,
+)
 async def memories_for_public_tenant_mcp(
     request: Request,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
@@ -472,15 +475,25 @@ async def memories_for_public_tenant_mcp(
         summaries.append(summary)
         used_bytes += summary_bytes
 
+    effective_next_cursor = next_cursor
+    if len(summaries) < len(memories) and summaries:
+        # The backend budget stopped this page early. Continue from the last
+        # delivered item so a caller cannot skip records while paging.
+        effective_next_cursor = summaries[-1].id
+
     return McpMemorySummaryListResponse(
         data=summaries,
-        pagination=McpMemoryPagination(next_cursor=next_cursor, limit=limit, total=total),
+        pagination=McpMemoryPagination(next_cursor=effective_next_cursor, limit=limit, total=total),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
 
 
-@router.get("/tenant/jobs/{job_id}", response_model=McpMemoryJobStatusResponse)
+@router.get(
+    "/tenant/jobs/{job_id}",
+    response_model=McpMemoryJobStatusResponse,
+    response_model_exclude_none=True,
+)
 async def job_status_for_public_tenant_mcp(
     request: Request,
     job_id: UUID,
@@ -499,6 +512,7 @@ async def job_status_for_public_tenant_mcp(
     ):
         raise APIError(status_code=404, code="JOB_404", error="job_not_found")
     result_memory_ids = [str(memory_id) for memory_id in list(job.get("result_memory_ids") or [])]
+    has_failure_detail = bool(job.get("error") or job.get("error_summary"))
     return McpMemoryJobStatusResponse(
         data=McpMemoryJobStatusData(
             job_id=str(job["job_id"]),
@@ -513,8 +527,15 @@ async def job_status_for_public_tenant_mcp(
             processing_started_at=datetime.fromisoformat(job["processing_started_at"])
             if job.get("processing_started_at")
             else None,
-            error=job.get("error"),
-            error_summary=job.get("error_summary"),
+            # Extraction diagnostics can contain database/provider internals.
+            # MCP clients only need a safe retry signal; detailed diagnostics
+            # remain in server observability and the standard API contract.
+            error="memory_processing_failed" if has_failure_detail else None,
+            error_summary=(
+                "Memory processing did not complete. Try again later."
+                if has_failure_detail
+                else None
+            ),
             queued_at=datetime.fromisoformat(job["queued_at"]) if job.get("queued_at") else None,
             started_at=datetime.fromisoformat(job["started_at"]) if job.get("started_at") else None,
             completed_at=datetime.fromisoformat(job["completed_at"]) if job.get("completed_at") else None,
@@ -524,7 +545,11 @@ async def job_status_for_public_tenant_mcp(
     )
 
 
-@router.get("/tenant/memories/{memory_id}/why", response_model=McpMemoryExplanationResponse)
+@router.get(
+    "/tenant/memories/{memory_id}/why",
+    response_model=McpMemoryExplanationResponse,
+    response_model_exclude_none=True,
+)
 async def explain_memory_for_public_tenant_mcp(
     request: Request,
     memory_id: str,

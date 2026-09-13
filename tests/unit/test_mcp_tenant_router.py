@@ -13,14 +13,18 @@ from starlette.requests import Request
 from api.errors import APIError
 from api.routers.mcp import (
     TenantMCPClarificationAnswerRequest,
+    TenantMCPRememberRequest,
     TenantMCPSessionContextRequest,
-    _mcp_memory_summary,
     _is_self_scoped_public_clarification,
+    _mcp_memory_explanation,
+    _mcp_memory_summary,
     _public_tenant_mcp_external_user_id,
     job_status_for_public_tenant_mcp,
     memories_for_public_tenant_mcp,
+    remember_for_public_tenant_mcp,
     session_context_for_public_tenant_mcp,
 )
+from api.services.provenance_service import build_provenance_snapshot
 
 
 def _request(*, tenant_id: str = "tenant_a", user_id: str = "user_a", marker: str = "public-v1") -> Request:
@@ -81,6 +85,41 @@ def test_session_context_uses_a_fixed_query_and_server_derived_identity() -> Non
     assert payload.external_user_id == _public_tenant_mcp_external_user_id(request)
     assert payload.query.startswith("Stable user preferences")
     assert payload.context_max_tokens == 180
+
+
+def test_public_mcp_remember_uses_server_owned_assertion_classification() -> None:
+    request = _request()
+    request.state.api_key_id = None
+    payload = TenantMCPRememberRequest(
+        messages=[{"role": "user", "content": "Use UTC incident timestamps."}],
+        conversation_id="opaque-client-reference",
+    )
+    with patch("api.routers.mcp.add_memories", new_callable=AsyncMock, return_value=object()) as add:
+        result = asyncio.run(
+            remember_for_public_tenant_mcp(
+                request=request,
+                response=SimpleNamespace(),
+                payload=payload,
+                memory_service=object(),
+                proxy_user_service=object(),
+                quality_gate_service=object(),
+                idempotency_key="idempotency-1",
+            )
+        )
+
+    assert result is add.return_value
+    forwarded = add.await_args.kwargs["payload"]
+    assert forwarded.metadata == {}
+    assert forwarded.evidence_mode == "client_assertion"
+    assert add.await_args.kwargs["trusted_submission_kind"] == "mcp_client_assertion"
+
+
+def test_public_mcp_remember_rejects_unstructured_metadata() -> None:
+    with pytest.raises(ValueError):
+        TenantMCPRememberRequest(
+            messages=[{"role": "user", "content": "Remember this."}],
+            metadata={"attestation": "memoryos_attested"},
+        )
 
 
 def test_public_mcp_job_status_requires_the_derived_profile_to_own_the_job() -> None:
@@ -153,6 +192,49 @@ def test_mcp_memory_summary_excludes_unbounded_metadata_and_processing() -> None
     assert "payload_hash" not in summary.provenance_summary.model_dump(exclude_none=True)
 
 
+def test_mcp_memory_explanation_does_not_expose_internal_source_ids() -> None:
+    memory = _memory_for_mcp_summary(
+        content="Use an incident timestamp.",
+        provenance={"source_event_id": "event-public", "service": "memoryos-mcp"},
+    )
+
+    explanation = _mcp_memory_explanation(memory)
+
+    assert "source_conversation_id" not in explanation.model_dump(exclude_none=True)
+    assert "source_event_id" not in explanation.model_dump(exclude_none=True)
+    assert explanation.provenance_summary.source_event_id == "event-public"
+
+
+def test_server_owned_mcp_source_event_carries_client_assertion_authority() -> None:
+    now = datetime.now(UTC)
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        source_event_id="job-1",
+        source_service="memoryos-mcp",
+        writer_id=None,
+        writer=SimpleNamespace(authority_rules={"default_priority": 90}),
+        observed_at=now,
+        received_at=now,
+        payload_hash="hash",
+        scope={},
+        evidence_refs=[],
+        processing_metadata={
+            "trusted_evidence_policy": {
+                "attestation": "client_asserted",
+                "authority_priority": 20,
+                "authority_rules": {"default_priority": 20},
+            }
+        },
+    )
+
+    snapshot = build_provenance_snapshot(event)
+
+    assert snapshot["service"] == "memoryos-mcp"
+    assert snapshot["attestation"] == "client_asserted"
+    assert snapshot["authority_priority"] == 20
+    assert snapshot["authority_rules"] == {"default_priority": 20}
+
+
 def test_public_mcp_memory_list_enforces_a_total_inline_payload_budget() -> None:
     request = _request()
     memories = [
@@ -181,6 +263,39 @@ def test_public_mcp_memory_list_enforces_a_total_inline_payload_budget() -> None
     assert len(response.model_dump_json().encode("utf-8")) < 8_000
     assert 1 <= len(response.data) <= 10
     assert all(item.content_truncated for item in response.data)
+
+
+def test_public_mcp_memory_list_preserves_paging_when_the_budget_stops_early() -> None:
+    request = _request()
+    memories = [
+        _memory_for_mcp_summary(
+            content="x" * 10_000,
+            provenance={
+                "attestation": "x" * 10_000,
+                "external_conversation_id": "x" * 10_000,
+                "source_event_id": "x" * 10_000,
+                "service": "x" * 10_000,
+                "writer_id": "x" * 10_000,
+                "observed_at": "x" * 10_000,
+                "received_at": "x" * 10_000,
+            },
+        )
+        for _ in range(10)
+    ]
+    service = SimpleNamespace(list_memories=AsyncMock(return_value=(memories, "backend-next", 20)))
+
+    response = asyncio.run(
+        memories_for_public_tenant_mcp(
+            request=request,
+            memory_service=service,
+            cursor=None,
+            limit=10,
+            categories=None,
+        )
+    )
+
+    assert len(response.data) < len(memories)
+    assert response.pagination.next_cursor == response.data[-1].id
 
 
 @pytest.mark.parametrize(
@@ -216,6 +331,36 @@ def test_public_mcp_job_status_hides_foreign_or_unowned_jobs(
 
     assert error.value.status_code == 404
     assert error.value.code == "JOB_404"
+
+
+def test_public_mcp_job_status_redacts_internal_failure_details() -> None:
+    request = _request()
+    job_id = UUID("9897dc48-6bb3-4d3b-bb16-a23233db2711")
+    service = SimpleNamespace(
+        get_job_status=AsyncMock(
+            return_value={
+                "tenant_id": "tenant_a",
+                "proxy_user_id": "proxy-own",
+                "job_id": str(job_id),
+                "status": "failed",
+                "error": "postgresql://secret@database/private",
+                "error_summary": "Connection refused for internal-host",
+            }
+        )
+    )
+    proxy_user_service = SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(id="proxy-own")))
+
+    response = asyncio.run(
+        job_status_for_public_tenant_mcp(
+            request=request,
+            job_id=job_id,
+            memory_service=service,
+            proxy_user_service=proxy_user_service,
+        )
+    )
+
+    assert response.data.error == "memory_processing_failed"
+    assert "internal-host" not in response.data.error_summary
 
 
 def test_public_clarification_requires_both_conflict_memories_to_be_self_owned() -> None:

@@ -213,6 +213,7 @@ async def add_memories(
     quality_gate_service: Annotated[QualityGateService, Depends(get_quality_gate_service)],
     tenant_id: str = Depends(get_authenticated_tenant_id),
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    trusted_submission_kind: str | None = None,
 ) -> MemoryAddResponse:
     """Queue conversation ingestion for memory extraction.
 
@@ -295,6 +296,7 @@ async def add_memories(
         source=payload.source.model_dump(mode="json") if payload.source else None,
         evidence_mode=payload.evidence_mode,
         conversation_id=payload.conversation_id,
+        trusted_submission_kind=trusted_submission_kind,
     )
     queue_ms = (time.perf_counter() - queue_started) * 1000
     if job.get("status") != "queued":

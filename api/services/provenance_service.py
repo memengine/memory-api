@@ -80,22 +80,36 @@ def source_event_payload_matches(
 
 
 def build_provenance_snapshot(event: MemorySourceEvent) -> dict[str, Any]:
+    processing_metadata = dict(event.processing_metadata or {})
+    trusted_policy = dict(processing_metadata.get("trusted_evidence_policy") or {})
+    trusted_rules = trusted_policy.get("authority_rules")
+    authority_rules = (
+        dict(trusted_rules)
+        if isinstance(trusted_rules, dict)
+        else (
+            dict(event.writer.authority_rules or {})
+            if event.writer is not None
+            else {}
+        )
+    )
     return {
         "source_event_id": str(event.id),
         "event_id": event.source_event_id,
         "service": event.source_service,
         "writer_id": str(event.writer_id) if event.writer_id else None,
-        "authority_rules": (
-            dict(event.writer.authority_rules or {})
-            if event.writer is not None
-            else {}
+        "authority_rules": authority_rules,
+        "attestation": (
+            str(trusted_policy["attestation"])
+            if trusted_policy.get("attestation") is not None
+            else None
         ),
+        "authority_priority": trusted_policy.get("authority_priority"),
         "observed_at": event.observed_at.isoformat(),
         "received_at": event.received_at.isoformat() if event.received_at else None,
         "payload_hash": event.payload_hash,
         "scope": event.scope or {},
         "evidence": event.evidence_refs or [],
-        "processing": event.processing_metadata or {},
+        "processing": processing_metadata,
     }
 
 

@@ -105,6 +105,7 @@ class MemoryService:
         source: dict[str, Any] | None = None,
         evidence_mode: str = "conversation_evidence",
         conversation_id: str | None = None,
+        trusted_submission_kind: str | None = None,
     ) -> dict[str, Any]:
         proxy_user = None
         resolved_proxy_user_id = proxy_user_id
@@ -203,6 +204,22 @@ class MemoryService:
                 api_key_id=api_key_id,
                 job_id=job["job_id"],
             )
+            # This flag is server-only: the public MCP request cannot choose a
+            # service label, attestation, or authority.  The source event is
+            # therefore the authority basis, accurately classified as an MCP
+            # client assertion rather than inheriting the API-key fallback.
+            trusted_evidence_policy: dict[str, Any] | None = None
+            if trusted_submission_kind == "mcp_client_assertion":
+                normalized_source = {
+                    **normalized_source,
+                    "service": "memoryos-mcp",
+                    "event_id": job["job_id"],
+                }
+                trusted_evidence_policy = {
+                    "attestation": "client_asserted",
+                    "authority_priority": int(evidence_authority),
+                    "authority_rules": {"default_priority": int(evidence_authority)},
+                }
             job["source"] = {
                 **normalized_source,
                 "observed_at": normalized_source["observed_at"].isoformat(),
@@ -215,6 +232,8 @@ class MemoryService:
                 "payload_hash_version": SOURCE_EVENT_HASH_VERSION,
                 "explicit": source is not None,
             }
+            if trusted_evidence_policy is not None:
+                job["source"]["trusted_evidence_policy"] = trusted_evidence_policy
         if tenant_id:
             reservation = await self.queue_router.reserve_extraction_slot(
                 tenant_id=tenant_id,
@@ -637,6 +656,11 @@ class MemoryService:
                         "policy_version": "provenance-phase2-v1",
                         "prompt_version": "general-extraction-v1",
                         "payload_hash_version": source.get("payload_hash_version"),
+                        **(
+                            {"trusted_evidence_policy": dict(source["trusted_evidence_policy"])}
+                            if isinstance(source.get("trusted_evidence_policy"), dict)
+                            else {}
+                        ),
                     },
                 )
                 self.session.add(source_event)
