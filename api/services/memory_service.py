@@ -572,6 +572,12 @@ class MemoryService:
     async def get_job_status(self, *, job_id: str) -> dict[str, Any]:
         job_row = await self.session.get(ExtractionJob, uuid.UUID(job_id))
         if job_row is not None:
+            stored_memories = list((job_row.result or {}).get("stored_memories") or [])
+            result_memory_ids = [
+                str(memory["id"])
+                for memory in stored_memories
+                if isinstance(memory, dict) and memory.get("id")
+            ]
             return {
                 "tenant_id": str(job_row.tenant_id),
                 "proxy_user_id": str(job_row.proxy_user_id),
@@ -579,6 +585,7 @@ class MemoryService:
                 "job_id": str(job_row.id),
                 "status": job_row.status.value,
                 "memories_created": int(job_row.memories_created or 0),
+                "result_memory_ids": result_memory_ids,
                 "pending_candidates_buffered": int((job_row.result or {}).get("pending_candidates_buffered", 0) or 0),
                 "pending_candidates_promoted": int((job_row.result or {}).get("pending_candidates_promoted", 0) or 0),
                 "attempts": int(job_row.attempts or 0),

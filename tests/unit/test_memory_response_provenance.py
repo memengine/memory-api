@@ -38,3 +38,19 @@ def test_list_memory_data_returns_external_conversation_id_in_provenance() -> No
         "attestation": "client_asserted",
         "external_conversation_id": "vscode-chat-2026-09-12-01",
     }
+
+
+def test_standard_memory_response_keeps_full_metadata_contract() -> None:
+    now = datetime.now(UTC)
+    metadata = {"processing": {"provider_trace": "sdk-visible-detail"}}
+    memory = SimpleNamespace(
+        id=uuid.uuid4(), content="Full SDK record", category=SimpleNamespace(value="fact"),
+        importance_score=5.0, confidence_score=0.9, created_at=now, updated_at=now,
+        last_accessed_at=None, access_count=0, is_archived=False, agent_id=None,
+        previous_version_id=None, source_conversation_id=None, source_event_id=None,
+        metadata_json=metadata,
+    )
+
+    response = _memory_to_data(memory)
+
+    assert response.metadata == metadata

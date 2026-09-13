@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from api.db.models import Conversation
 from api.db.models import ConversationProcessingStatus
+from api.db.models import MemorySourceEvent
 from api.db.models import ProxyUser
 from api.db.models import User
 from api.services.extractor import ExtractedMemory
@@ -18,10 +20,13 @@ class FakeSession:
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
+        self.source_event = None
 
     def get(self, model, identifier):
         if model is ProxyUser and identifier == self.proxy_user.id:
             return self.proxy_user
+        if model is MemorySourceEvent and self.source_event is not None:
+            return self.source_event
         return None
 
     def add(self, item) -> None:
@@ -236,6 +241,59 @@ def test_external_conversation_id_survives_processing_in_memory_provenance(monke
     provenance = CapturingConflictResolver.instance.provenance_snapshot
     assert provenance["external_conversation_id"] == "vscode-chat-2026-09-12-01"
     assert provenance["attestation"] == "client_asserted"
+
+
+def test_source_event_authority_is_not_overwritten_by_submission_policy(monkeypatch) -> None:
+    proxy_user = ProxyUser(
+        id=uuid.uuid4(), tenant_id=uuid.uuid4(), external_user_id="source-policy-user",
+        external_user_id_hash="source-policy-hash", memory_count=0, metadata_json={}, is_blocked=False,
+    )
+    session = FakeSession(proxy_user)
+    source_event_id = uuid.uuid4()
+    session.source_event = SimpleNamespace(
+        id=source_event_id,
+        source_event_id="registered-event-1",
+        source_service="trusted-service",
+        writer_id=None,
+        writer=SimpleNamespace(authority_rules={"default_priority": 90}),
+        observed_at=datetime.now(UTC),
+        received_at=None,
+        payload_hash="hash",
+        scope={},
+        evidence_refs=[],
+        processing_metadata={},
+    )
+    backing_user = User(
+        id=uuid.uuid4(), external_id=f"proxy::{proxy_user.id}", email="source@example.test",
+        settings={}, memory_count=0, is_active=True,
+    )
+    conversation = Conversation(
+        id=uuid.uuid4(), user_id=backing_user.id, message_count=1,
+        processing_status=ConversationProcessingStatus.processing,
+    )
+    CapturingConflictResolver.instance = None
+    monkeypatch.setattr(extraction_tasks, "_ensure_proxy_backing_user", lambda *_args: backing_user)
+    monkeypatch.setattr(extraction_tasks, "_create_source_conversation", lambda *_args, **_kwargs: conversation)
+    monkeypatch.setattr(extraction_tasks, "_refresh_proxy_user_memory_count", lambda *_args: None)
+    monkeypatch.setattr(extraction_tasks, "_invalidate_proxy_user_cache", lambda *_args: None)
+    monkeypatch.setattr(extraction_tasks, "ConflictResolver", CapturingConflictResolver)
+
+    extraction_tasks.run_extraction_pipeline(
+        {
+            "job_id": "job-source-policy", "tenant_id": str(proxy_user.tenant_id),
+            "proxy_user_id": str(proxy_user.id), "source_event_id": str(source_event_id),
+            "messages": [{"role": "user", "content": "I prefer Python"}],
+            "evidence_policy": {"authority_priority": 20, "attestation": "client_asserted"},
+            "external_conversation_id": "release-check-001",
+        },
+        session_factory=FakeSessionFactory(session), extractor=FakeExtractor(), scorer=FakeScorer(),
+        qdrant_service=SimpleNamespace(), client=SimpleNamespace(),
+    )
+
+    provenance = CapturingConflictResolver.instance.provenance_snapshot
+    assert provenance["authority_rules"] == {"default_priority": 90}
+    assert provenance["submission_evidence_policy"]["attestation"] == "client_asserted"
+    assert provenance["external_conversation_id"] == "release-check-001"
 
 
 def test_explicit_clarification_request_is_forwarded_to_conflict_resolver(monkeypatch) -> None:

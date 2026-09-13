@@ -927,11 +927,18 @@ def run_extraction_pipeline(
         # conversation UUID. The UUID remains the relational source key; the
         # external identifier is immutable provenance that survives extraction,
         # conflict resolution, and list/retrieve serialization.
-        provenance_snapshot = (
-            build_provenance_snapshot(source_event)
-            if source_event is not None
-            else dict(job_payload.get("evidence_policy") or {})
-        )
+        queued_evidence_policy = dict(job_payload.get("evidence_policy") or {})
+        if source_event is not None:
+            # A registered source event remains the authority basis. Preserve
+            # caller policy as separate audit context, never as an override.
+            provenance_snapshot = build_provenance_snapshot(source_event)
+            if queued_evidence_policy:
+                provenance_snapshot = {
+                    **provenance_snapshot,
+                    "submission_evidence_policy": queued_evidence_policy,
+                }
+        else:
+            provenance_snapshot = queued_evidence_policy
         external_conversation_id = str(
             job_payload.get("external_conversation_id") or ""
         ).strip()

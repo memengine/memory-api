@@ -392,6 +392,39 @@ def test_existing_source_event_payload_uses_live_job_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_job_status_derives_result_memory_ids_without_exposing_full_result() -> None:
+    job_id = uuid4()
+    job = ExtractionJob(
+        id=job_id,
+        tenant_id=uuid4(),
+        proxy_user_id=uuid4(),
+        external_user_id="customer-1",
+        status=ExtractionJobStatus.completed,
+        payload={},
+        result={
+            "stored_memories": [
+                {"id": str(uuid4()), "content": "private payload"},
+                {"id": str(uuid4()), "content": "another private payload"},
+            ],
+            "extraction_metadata": {"large_trace": "x" * 10_000},
+        },
+    )
+    session = MagicMock()
+    session.get = AsyncMock(return_value=job)
+    service = MemoryService(
+        session=session,
+        cache_service=MagicMock(),
+        qdrant_service=MagicMock(),
+        quota_manager=MagicMock(),
+    )
+
+    result = await service.get_job_status(job_id=str(job_id))
+
+    assert result["result_memory_ids"] == [item["id"] for item in job.result["stored_memories"]]
+    assert "stored_memories" not in result
+
+
+@pytest.mark.asyncio
 async def test_list_memories_applies_cursor_in_database() -> None:
     tenant_id = str(uuid4())
     created_at = datetime.now(UTC)

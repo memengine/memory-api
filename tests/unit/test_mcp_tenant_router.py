@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -13,9 +14,11 @@ from api.errors import APIError
 from api.routers.mcp import (
     TenantMCPClarificationAnswerRequest,
     TenantMCPSessionContextRequest,
+    _mcp_memory_summary,
     _is_self_scoped_public_clarification,
     _public_tenant_mcp_external_user_id,
     job_status_for_public_tenant_mcp,
+    memories_for_public_tenant_mcp,
     session_context_for_public_tenant_mcp,
 )
 
@@ -92,6 +95,7 @@ def test_public_mcp_job_status_requires_the_derived_profile_to_own_the_job() -> 
                 "job_id": str(job_id),
                 "status": "completed",
                 "memories_created": 1,
+                "result_memory_ids": ["memory-created-by-job"],
             }
         )
     )
@@ -108,6 +112,75 @@ def test_public_mcp_job_status_requires_the_derived_profile_to_own_the_job() -> 
 
     assert response.data.job_id == str(job_id)
     assert response.data.memories_created == 1
+    assert response.data.result_memory_ids == ["memory-created-by-job"]
+
+
+def _memory_for_mcp_summary(*, content: str, provenance: dict[str, object]) -> SimpleNamespace:
+    now = datetime.now(UTC)
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        category=SimpleNamespace(value="preference"),
+        content=content,
+        created_at=now,
+        updated_at=now,
+        is_archived=False,
+        importance_score=5.0,
+        confidence_score=0.8,
+        source_conversation_id=uuid.uuid4(),
+        source_event_id=uuid.uuid4(),
+        metadata_json={"provenance": provenance, "unbounded": "x" * 50_000},
+    )
+
+
+def test_mcp_memory_summary_excludes_unbounded_metadata_and_processing() -> None:
+    memory = _memory_for_mcp_summary(
+        content="x" * 500,
+        provenance={
+            "attestation": "client_asserted",
+            "external_conversation_id": "release-check-001",
+            "processing": {"extraction_metadata": "x" * 50_000},
+            "payload_hash": "sensitive-internal-value",
+        },
+    )
+
+    summary = _mcp_memory_summary(memory)
+
+    assert len(summary.content_preview) == 241
+    assert summary.content_truncated is True
+    assert summary.provenance_summary is not None
+    assert summary.provenance_summary.attestation == "client_asserted"
+    assert "processing" not in summary.provenance_summary.model_dump(exclude_none=True)
+    assert "payload_hash" not in summary.provenance_summary.model_dump(exclude_none=True)
+
+
+def test_public_mcp_memory_list_enforces_a_total_inline_payload_budget() -> None:
+    request = _request()
+    memories = [
+        _memory_for_mcp_summary(
+            content="x" * 10_000,
+            provenance={
+                "attestation": "client_asserted",
+                "external_conversation_id": "conversation-" + ("x" * 10_000),
+                "processing": {"raw": "x" * 50_000},
+            },
+        )
+        for _ in range(10)
+    ]
+    service = SimpleNamespace(list_memories=AsyncMock(return_value=(memories, None, 10)))
+
+    response = asyncio.run(
+        memories_for_public_tenant_mcp(
+            request=request,
+            memory_service=service,
+            cursor=None,
+            limit=10,
+            categories=None,
+        )
+    )
+
+    assert len(response.model_dump_json().encode("utf-8")) < 8_000
+    assert 1 <= len(response.data) <= 10
+    assert all(item.content_truncated for item in response.data)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -16,6 +17,7 @@ from api.db.models import (
     ClarificationQueueStatus,
     CrossUserConflict,
     CrossUserConflictStatus,
+    Memory,
 )
 from api.dependencies import (
     DbSession,
@@ -31,7 +33,6 @@ from api.routers.common import get_request_id, utc_now
 from api.routers.memories import (
     _memory_to_data,
     add_memories,
-    list_memories,
     retrieve_memories,
 )
 from api.schemas.requests import (
@@ -43,10 +44,6 @@ from api.schemas.responses import (
     MemoryAddResponse,
     MemoryDeleteData,
     MemoryDeleteResponse,
-    MemoryGetResponse,
-    MemoryJobStatusData,
-    MemoryJobStatusResponse,
-    MemoryListResponse,
     MemoryMutationResponse,
     MemoryRetrieveResponse,
 )
@@ -61,6 +58,12 @@ from api.services.retriever import RetrieverService
 from api.services.uui_service import UUIService
 
 router = APIRouter(prefix="/v1/mcp", tags=["mcp"])
+
+_MCP_MEMORY_LIST_MAX_ITEMS = 10
+_MCP_MEMORY_PREVIEW_MAX_CHARS = 240
+_MCP_MEMORY_EXPLANATION_MAX_CHARS = 2_000
+_MCP_MEMORY_LIST_MAX_BYTES = 7_000
+_MCP_PROVENANCE_STRING_MAX_CHARS = 160
 
 
 class TenantMCPRememberRequest(BaseModel):
@@ -129,11 +132,161 @@ class TenantMCPClarificationAnswerResponse(BaseModel):
     timestamp: datetime
 
 
+class McpProvenanceSummary(BaseModel):
+    """Bounded provenance facts safe to present in an MCP tool result."""
+
+    attestation: str | None = None
+    authority_priority: int | None = None
+    external_conversation_id: str | None = None
+    source_event_id: str | None = None
+    service: str | None = None
+    writer_id: str | None = None
+    observed_at: str | None = None
+    received_at: str | None = None
+
+
+class McpMemorySummary(BaseModel):
+    id: str
+    category: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    is_archived: bool = False
+    content_preview: str
+    content_truncated: bool = False
+    provenance_summary: McpProvenanceSummary | None = None
+
+
+class McpMemoryPagination(BaseModel):
+    next_cursor: str | None = None
+    limit: int
+    total: int
+
+
+class McpMemorySummaryListResponse(BaseModel):
+    data: list[McpMemorySummary]
+    pagination: McpMemoryPagination
+    request_id: str
+    timestamp: datetime
+
+
+class McpMemoryExplanation(BaseModel):
+    id: str
+    category: str
+    content: str
+    content_truncated: bool = False
+    importance_score: float
+    confidence_score: float
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    is_archived: bool = False
+    source_conversation_id: str | None = None
+    source_event_id: str | None = None
+    provenance_summary: McpProvenanceSummary | None = None
+
+
+class McpMemoryExplanationResponse(BaseModel):
+    data: McpMemoryExplanation
+    request_id: str
+    timestamp: datetime
+
+
+class McpMemoryJobStatusData(BaseModel):
+    job_id: str
+    status: str
+    memories_created: int = 0
+    result_memory_ids: list[str] = Field(default_factory=list, max_length=_MCP_MEMORY_LIST_MAX_ITEMS)
+    result_memory_ids_truncated: bool = False
+    pending_candidates_buffered: int = 0
+    pending_candidates_promoted: int = 0
+    attempts: int = 0
+    created_at: datetime | None = None
+    processing_started_at: datetime | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
+    error_summary: str | None = None
+
+
+class McpMemoryJobStatusResponse(BaseModel):
+    data: McpMemoryJobStatusData
+    request_id: str
+    timestamp: datetime
+
+
 _SESSION_CONTEXT_QUERY = (
     "Stable user preferences, long-lived working style, active goals, important decisions, "
     "and unresolved clarifications relevant across an assistant chat session."
 )
 _SESSION_CONTEXT_LIMIT = 6
+
+
+def _bounded_text(value: object, *, max_chars: int) -> tuple[str, bool]:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text, False
+    return f"{text[:max_chars]}…", True
+
+
+def _bounded_provenance_summary(memory: Memory) -> McpProvenanceSummary | None:
+    provenance = dict((memory.metadata_json or {}).get("provenance") or {})
+    if not provenance:
+        return None
+
+    def text_value(name: str) -> str | None:
+        value = provenance.get(name)
+        if value is None:
+            return None
+        return _bounded_text(value, max_chars=_MCP_PROVENANCE_STRING_MAX_CHARS)[0]
+
+    authority_priority = provenance.get("authority_priority")
+    return McpProvenanceSummary(
+        attestation=text_value("attestation"),
+        authority_priority=(
+            int(authority_priority)
+            if isinstance(authority_priority, int | float | str)
+            and str(authority_priority).lstrip("-").isdigit()
+            else None
+        ),
+        external_conversation_id=text_value("external_conversation_id"),
+        source_event_id=text_value("source_event_id"),
+        service=text_value("service"),
+        writer_id=text_value("writer_id"),
+        observed_at=text_value("observed_at"),
+        received_at=text_value("received_at"),
+    )
+
+
+def _mcp_memory_summary(memory: Memory) -> McpMemorySummary:
+    preview, truncated = _bounded_text(memory.content, max_chars=_MCP_MEMORY_PREVIEW_MAX_CHARS)
+    return McpMemorySummary(
+        id=str(memory.id),
+        category=memory.category.value,
+        created_at=memory.created_at,
+        updated_at=memory.updated_at,
+        is_archived=bool(memory.is_archived),
+        content_preview=preview,
+        content_truncated=truncated,
+        provenance_summary=_bounded_provenance_summary(memory),
+    )
+
+
+def _mcp_memory_explanation(memory: Memory) -> McpMemoryExplanation:
+    content, truncated = _bounded_text(memory.content, max_chars=_MCP_MEMORY_EXPLANATION_MAX_CHARS)
+    return McpMemoryExplanation(
+        id=str(memory.id),
+        category=memory.category.value,
+        content=content,
+        content_truncated=truncated,
+        importance_score=float(memory.importance_score),
+        confidence_score=float(memory.confidence_score),
+        created_at=memory.created_at,
+        updated_at=memory.updated_at,
+        is_archived=bool(memory.is_archived),
+        source_conversation_id=str(memory.source_conversation_id) if memory.source_conversation_id else None,
+        source_event_id=str(memory.source_event_id) if memory.source_event_id else None,
+        provenance_summary=_bounded_provenance_summary(memory),
+    )
 
 
 def _public_tenant_mcp_external_user_id(request: Request) -> str:
@@ -289,33 +442,51 @@ async def session_context_for_public_tenant_mcp(
     )
 
 
-@router.get("/tenant/memories", response_model=MemoryListResponse)
+@router.get("/tenant/memories", response_model=McpMemorySummaryListResponse)
 async def memories_for_public_tenant_mcp(
     request: Request,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
     cursor: Annotated[str | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    limit: Annotated[int, Query(ge=1, le=_MCP_MEMORY_LIST_MAX_ITEMS)] = 10,
     categories: Annotated[list[str] | None, Query()] = None,
-) -> MemoryListResponse:
-    """List only memories owned by the authenticated public MCP caller."""
-    return await list_memories(
-        request=request,
-        memory_service=memory_service,
+) -> McpMemorySummaryListResponse:
+    """Return a bounded browse index for only the authenticated MCP caller."""
+    memories, next_cursor, total = await memory_service.list_memories(
+        requested_user_id=None,
+        authenticated_user_id=None,
+        tenant_id=str(request.state.tenant_id),
         cursor=cursor,
         limit=limit,
         categories=categories or [],
         agent_id=None,
         external_user_id=_public_tenant_mcp_external_user_id(request),
     )
+    summaries: list[McpMemorySummary] = []
+    used_bytes = 0
+    for memory in memories:
+        summary = _mcp_memory_summary(memory)
+        summary_bytes = len(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False).encode("utf-8"))
+        if summaries and used_bytes + summary_bytes > _MCP_MEMORY_LIST_MAX_BYTES:
+            next_cursor = str(summaries[-1].id)
+            break
+        summaries.append(summary)
+        used_bytes += summary_bytes
+
+    return McpMemorySummaryListResponse(
+        data=summaries,
+        pagination=McpMemoryPagination(next_cursor=next_cursor, limit=limit, total=total),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
 
 
-@router.get("/tenant/jobs/{job_id}", response_model=MemoryJobStatusResponse)
+@router.get("/tenant/jobs/{job_id}", response_model=McpMemoryJobStatusResponse)
 async def job_status_for_public_tenant_mcp(
     request: Request,
     job_id: UUID,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
     proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
-) -> MemoryJobStatusResponse:
+) -> McpMemoryJobStatusResponse:
     """Return status only for an extraction job owned by this MCP profile."""
     proxy_user = await _public_tenant_mcp_proxy_user(
         request=request,
@@ -327,11 +498,14 @@ async def job_status_for_public_tenant_mcp(
         or str(job.get("proxy_user_id") or "") != str(proxy_user.id)
     ):
         raise APIError(status_code=404, code="JOB_404", error="job_not_found")
-    return MemoryJobStatusResponse(
-        data=MemoryJobStatusData(
+    result_memory_ids = [str(memory_id) for memory_id in list(job.get("result_memory_ids") or [])]
+    return McpMemoryJobStatusResponse(
+        data=McpMemoryJobStatusData(
             job_id=str(job["job_id"]),
             status=str(job["status"]),
             memories_created=int(job.get("memories_created", 0)),
+            result_memory_ids=result_memory_ids[:_MCP_MEMORY_LIST_MAX_ITEMS],
+            result_memory_ids_truncated=len(result_memory_ids) > _MCP_MEMORY_LIST_MAX_ITEMS,
             pending_candidates_buffered=int(job.get("pending_candidates_buffered", 0) or 0),
             pending_candidates_promoted=int(job.get("pending_candidates_promoted", 0) or 0),
             attempts=int(job.get("attempts", 0)),
@@ -339,28 +513,23 @@ async def job_status_for_public_tenant_mcp(
             processing_started_at=datetime.fromisoformat(job["processing_started_at"])
             if job.get("processing_started_at")
             else None,
-            queue_name=job.get("queue_name"),
             error=job.get("error"),
             error_summary=job.get("error_summary"),
             queued_at=datetime.fromisoformat(job["queued_at"]) if job.get("queued_at") else None,
             started_at=datetime.fromisoformat(job["started_at"]) if job.get("started_at") else None,
             completed_at=datetime.fromisoformat(job["completed_at"]) if job.get("completed_at") else None,
-            dead_lettered_at=datetime.fromisoformat(job["dead_lettered_at"])
-            if job.get("dead_lettered_at")
-            else None,
-            extraction_metadata=job.get("extraction_metadata") or {},
         ),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
 
 
-@router.get("/tenant/memories/{memory_id}/why", response_model=MemoryGetResponse)
+@router.get("/tenant/memories/{memory_id}/why", response_model=McpMemoryExplanationResponse)
 async def explain_memory_for_public_tenant_mcp(
     request: Request,
     memory_id: str,
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
-) -> MemoryGetResponse:
+) -> McpMemoryExplanationResponse:
     """Return self-owned memory provenance for an in-chat explanation."""
     external_user_id = _public_tenant_mcp_external_user_id(request)
     memory = await memory_service.get_memory(
@@ -369,7 +538,11 @@ async def explain_memory_for_public_tenant_mcp(
         tenant_id=str(request.state.tenant_id),
         external_user_id=external_user_id,
     )
-    return MemoryGetResponse(data=_memory_to_data(memory), request_id=get_request_id(request), timestamp=utc_now())
+    return McpMemoryExplanationResponse(
+        data=_mcp_memory_explanation(memory),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
 
 
 @router.post("/tenant/memories/{memory_id}/correct", response_model=MemoryMutationResponse)
