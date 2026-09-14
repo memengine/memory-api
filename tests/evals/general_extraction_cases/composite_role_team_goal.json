@@ -28,19 +28,25 @@
       "content": "User leads the integrations pod.",
       "category": "fact",
       "confidence": 0.88,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     },
     {
       "content": "User's team owns Slack and webhook integrations.",
       "category": "fact",
       "confidence": 0.87,
-      "importance_score": 5.0
+      "importance_score": 5.0,
+      "evidence_turns": [2],
+      "evidence_relation": "direct_user_statement"
     },
     {
       "content": "User needs to reduce onboarding drop-off before the next board review.",
       "category": "goal",
       "confidence": 0.86,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [4],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

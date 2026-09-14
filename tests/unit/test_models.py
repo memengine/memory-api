@@ -23,6 +23,8 @@ def test_expected_tables_are_registered() -> None:
         "api_keys",
         "audit_logs",
         "backfill_jobs",
+        "billing_subscriptions",
+        "billing_webhook_events",
         "call_quality_log",
         "clarification_queue",
         "conversations",

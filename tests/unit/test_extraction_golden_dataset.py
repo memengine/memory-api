@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from api.services.extraction_eval_harness import GoldenExpectedMemory
-from api.services.extraction_eval_harness import compare_expected_memories
-from api.services.extraction_eval_harness import load_golden_extraction_cases
+from api.services.extraction_eval_harness import (
+    GoldenExpectedMemory,
+    compare_expected_memories,
+    load_golden_extraction_cases,
+)
 from api.services.extraction_eval_runner import run_golden_extraction_baseline
 from api.services.extraction_service import DEFAULT_CONFIDENCE_THRESHOLD
-
 
 GOLDEN_CASES_DIR = Path(__file__).resolve().parents[1] / "evals" / "general_extraction_cases"
 
@@ -77,6 +78,8 @@ def test_compare_expected_memories_reports_pass_and_failures() -> None:
             category="preference",
             confidence=0.92,
             importance_score=7.5,
+            evidence_turns=(0,),
+            evidence_relation="direct_user_statement",
         )
     ]
     actual = [

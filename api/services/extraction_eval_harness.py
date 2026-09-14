@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 ALLOWED_GOLDEN_CASE_TYPES = {
     "positive",
     "negative",
@@ -29,6 +28,8 @@ class GoldenExpectedMemory:
     category: str
     confidence: float
     importance_score: float
+    evidence_turns: tuple[int, ...]
+    evidence_relation: str
 
 
 @dataclass(frozen=True)
@@ -157,11 +158,24 @@ def _parse_expected_memory(raw: Any, *, source_path: Path) -> GoldenExpectedMemo
         field="importance_score",
         source_path=source_path,
     )
+    evidence_turns = raw.get("evidence_turns")
+    if not isinstance(evidence_turns, list) or not evidence_turns:
+        raise ValueError(f"{source_path}: expected memory evidence_turns must be a non-empty list")
+    parsed_turns: list[int] = []
+    for turn in evidence_turns:
+        if not isinstance(turn, int) or isinstance(turn, bool) or turn < 0:
+            raise ValueError(f"{source_path}: expected memory evidence_turns must contain non-negative integers")
+        parsed_turns.append(turn)
+    evidence_relation = str(raw.get("evidence_relation") or "").strip()
+    if evidence_relation not in {"direct_user_statement", "user_confirmed_assistant_proposal"}:
+        raise ValueError(f"{source_path}: invalid expected evidence_relation {evidence_relation!r}")
     return GoldenExpectedMemory(
         content=content,
         category=category,
         confidence=confidence,
         importance_score=importance,
+        evidence_turns=tuple(parsed_turns),
+        evidence_relation=evidence_relation,
     )
 
 

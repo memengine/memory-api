@@ -73,6 +73,10 @@ class HostHeartbeat:
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="scale-host-heartbeat", daemon=True)
+        # Keep even a short benchmark run observable. Without this baseline a
+        # fast failure or shutdown can finish before the first timed sample,
+        # producing an invalid empty heartbeat artifact.
+        self.samples += 1
         self._thread.start()
 
     def stop(self) -> None:

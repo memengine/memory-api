@@ -16,7 +16,9 @@
       "content": "User is considering applying for data roles later, but has not committed yet.",
       "category": "goal",
       "confidence": 0.58,
-      "importance_score": 3.0
+      "importance_score": 3.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

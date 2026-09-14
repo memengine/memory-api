@@ -16,13 +16,17 @@
       "content": "User is a product manager at a B2B SaaS startup.",
       "category": "fact",
       "confidence": 0.91,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     },
     {
       "content": "User works mostly on onboarding and activation.",
       "category": "fact",
       "confidence": 0.86,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

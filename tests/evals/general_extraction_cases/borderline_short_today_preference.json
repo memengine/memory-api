@@ -16,7 +16,9 @@
       "content": "User may prefer short replies, but this may only apply today.",
       "category": "preference",
       "confidence": 0.55,
-      "importance_score": 1.0
+      "importance_score": 1.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

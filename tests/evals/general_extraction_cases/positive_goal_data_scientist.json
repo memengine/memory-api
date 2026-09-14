@@ -16,7 +16,9 @@
       "content": "User wants to become a data scientist at Google within the next year.",
       "category": "goal",
       "confidence": 0.94,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

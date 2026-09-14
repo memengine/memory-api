@@ -64,7 +64,7 @@ def test_pipeline_failure_rolls_back_memory_transaction_and_marks_conversation_f
     monkeypatch.setattr(extraction_tasks, "_create_source_conversation", lambda *_args, **_kwargs: conversation)
     monkeypatch.setattr(extraction_tasks, "_persist_pending_extraction_candidates", lambda *_args, **_kwargs: (0, []))
 
-    with pytest.raises(RuntimeError, match="injected persistence failure"):
+    with pytest.raises(extraction_tasks.ExtractionPipelineError) as error:
         extraction_tasks.run_extraction_pipeline(
             {
                 "job_id": str(uuid.uuid4()), "tenant_id": str(proxy.tenant_id),
@@ -76,6 +76,10 @@ def test_pipeline_failure_rolls_back_memory_transaction_and_marks_conversation_f
             qdrant_service=SimpleNamespace(), conflict_resolver=FailingResolver(), client=SimpleNamespace(),
         )
 
+
+    assert error.value.stage == "store_memories"
+    assert isinstance(error.value.cause, RuntimeError)
+    assert str(error.value.cause) == "injected persistence failure"
     assert session.rollbacks == 1
     assert session.commits == 2
     assert conversation.processing_status == ConversationProcessingStatus.failed

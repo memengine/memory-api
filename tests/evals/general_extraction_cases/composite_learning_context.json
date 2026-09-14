@@ -28,19 +28,25 @@
       "content": "User is in class 12.",
       "category": "fact",
       "confidence": 0.9,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     },
     {
       "content": "User is weak in organic chemistry mechanisms.",
       "category": "expertise",
       "confidence": 0.86,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [2],
+      "evidence_relation": "direct_user_statement"
     },
     {
       "content": "User's board exam starts in 34 days.",
       "category": "goal",
       "confidence": 0.84,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [4],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

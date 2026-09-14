@@ -16,13 +16,17 @@
       "content": "User is comfortable with FastAPI and SQLAlchemy.",
       "category": "expertise",
       "confidence": 0.9,
-      "importance_score": 7.0
+      "importance_score": 7.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     },
     {
       "content": "User is still learning async Python patterns.",
       "category": "expertise",
       "confidence": 0.86,
-      "importance_score": 5.0
+      "importance_score": 5.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

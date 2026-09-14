@@ -126,6 +126,50 @@ async def test_extract_filters_and_returns_result(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_extract_keeps_declarative_preference_that_starts_with_when(tmp_path: Path) -> None:
+    service = ExtractionService(
+        llm_service=FakeLLMService(
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "content": "User prefers concise Python-first coding examples.",
+                            "category": "preference",
+                            "importance_score": 7.0,
+                            "confidence": 0.92,
+                            "evidence_turns": [0],
+                            "evidence_relation": "direct_user_statement",
+                            "reasoning": "The user directly stated a durable format preference.",
+                        }
+                    ],
+                    "nothing_to_extract": False,
+                }
+            )
+        ),
+        spec_path=_spec(tmp_path),
+    )
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "user",
+                "content": "When you explain coding topics to me, I prefer concise Python-first examples.",
+            }
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-1",
+    )
+
+    assert result.memories_extracted == 1
+    assert result.memories_to_store[0].category == "preference"
+
+
+def test_question_only_guard_still_rejects_unpunctuated_question() -> None:
+    assert ExtractionService._is_question_only("When should I deploy the API") is True
+
+
+@pytest.mark.asyncio
 async def test_extract_nothing_to_extract(tmp_path: Path) -> None:
     service = ExtractionService(
         llm_service=FakeLLMService(

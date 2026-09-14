@@ -16,7 +16,9 @@
       "content": "User may switch to Hindi for hard concepts while generally using English.",
       "category": "preference",
       "confidence": 0.6,
-      "importance_score": 3.0
+      "importance_score": 3.0,
+      "evidence_turns": [0],
+      "evidence_relation": "direct_user_statement"
     }
   ],
   "expected_nothing_to_extract": false,

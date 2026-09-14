@@ -678,6 +678,15 @@ class ExtractionService:
     @staticmethod
     def _is_question_only(content: str) -> bool:
         normalized = " ".join(content.lower().split())
+        if normalized.endswith("?"):
+            return True
+
+        # A leading "when" can introduce a durable declarative preference
+        # ("When you explain code, I prefer examples"), not only a question.
+        # Do not discard it before the evidence gate has a chance to validate
+        # the user's actual statement.
+        if re.match(r"^when\s+(?:should|do|does|did|can|could|will|would|is|are|was|were|have|has)\b", normalized):
+            return True
         question_starts = (
             "am ",
             "are ",
@@ -690,7 +699,6 @@ class ExtractionService:
             "is ",
             "should ",
             "what ",
-            "when ",
             "where ",
             "which ",
             "who ",
@@ -698,7 +706,7 @@ class ExtractionService:
             "will ",
             "would ",
         )
-        return normalized.endswith("?") or normalized.startswith(question_starts)
+        return normalized.startswith(question_starts)
 
     @classmethod
     def _confirmation_supports_candidate(

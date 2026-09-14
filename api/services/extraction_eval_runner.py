@@ -5,14 +5,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from api.services.extraction_eval_harness import GoldenComparison
-from api.services.extraction_eval_harness import GoldenExtractionCase
-from api.services.extraction_eval_harness import GoldenExpectedMemory
-from api.services.extraction_eval_harness import compare_expected_memories
-from api.services.extraction_service import DEFAULT_CONFIDENCE_THRESHOLD
-from api.services.extraction_service import ExtractionService
+from api.services.extraction_eval_harness import (
+    GoldenComparison,
+    GoldenExpectedMemory,
+    GoldenExtractionCase,
+    compare_expected_memories,
+)
+from api.services.extraction_service import (
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    ExtractionService,
+)
 from api.services.llm_service import LLMResponse
-
 
 MIN_STORED_IMPORTANCE = 2.0
 
@@ -158,6 +161,8 @@ def _expected_llm_payload(case: GoldenExtractionCase) -> str:
                     "category": memory.category,
                     "importance_score": memory.importance_score,
                     "confidence": memory.confidence,
+                    "evidence_turns": list(memory.evidence_turns),
+                    "evidence_relation": memory.evidence_relation,
                     "reasoning": "Golden expected memory.",
                 }
                 for memory in case.expected_memories

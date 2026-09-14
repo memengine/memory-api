@@ -128,7 +128,7 @@ def test_apply_plan_limits_sets_all_columns(monkeypatch) -> None:
     deleted_keys = []
     monkeypatch.setattr(
         plan_limits_module,
-        "_invalidate_plan_cache",
+        "invalidate_plan_cache",
         lambda tenant_id: deleted_keys.append(tenant_id),
     )
     session = FakeBudgetSession()
@@ -162,7 +162,7 @@ def test_apply_plan_limits_sets_all_columns(monkeypatch) -> None:
 
 
 def test_apply_plan_limits_idempotent(monkeypatch) -> None:
-    monkeypatch.setattr(plan_limits_module, "_invalidate_plan_cache", lambda tenant_id: None)
+    monkeypatch.setattr(plan_limits_module, "invalidate_plan_cache", lambda tenant_id: None)
     session = FakeBudgetSession()
     budget = make_budget()
     session.add(budget)
@@ -194,7 +194,7 @@ def test_apply_plan_limits_idempotent(monkeypatch) -> None:
 
 
 def test_new_tenant_gets_starter_limits(monkeypatch) -> None:
-    monkeypatch.setattr(plan_limits_module, "_invalidate_plan_cache", lambda tenant_id: None)
+    monkeypatch.setattr(plan_limits_module, "invalidate_plan_cache", lambda tenant_id: None)
     session = FakeBudgetSession()
 
     tenant, raw_api_key = create_tenant_with_api_key(
