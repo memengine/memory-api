@@ -86,6 +86,15 @@ jobs:
 
       - name: Run blocking FAST benchmark regression gate
         env:
+          DATABASE_URL: postgresql+asyncpg://memoryos:testpassword@localhost:5432/memoryos_test
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/2
+          ADMIN_SECRET: test-secret-32-chars-minimum-xx
+          SECRET_KEY: ci-secret-key
+          OPENAI_API_KEY: test-key-for-unit-tests
+          GEMINI_API_KEY: test-key-for-unit-tests
+          LLM_PROVIDER_ORDER: openai,gemini
           MEMORYOS_HOLDOUT_APPROVAL: ""
         run: python -m benchmarks.internal.orchestrator --tier fast
 
