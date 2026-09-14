@@ -22,6 +22,7 @@ htmlcov/
 artifacts/
 benchmarks/public/data/
 benchmarks/public/results/
+benchmarks/internal/datasets/extraction/holdout/*.jsonl
 *.egg-info/
 dist/
 build/

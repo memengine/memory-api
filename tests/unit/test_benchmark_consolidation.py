@@ -25,10 +25,15 @@ def test_manifest_registers_tiered_suites_without_routine_holdout() -> None:
     assert all(not suite["provider_calls"] for suite in suites if suite["tier"] == "fast")
 
 
-def test_manifest_inventory_paths_exist_without_loading_dataset_contents() -> None:
+def test_manifest_inventory_validates_routine_paths_and_sealed_holdout() -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     for suite in manifest["suites"]:
-        assert (ROOT / suite["dataset"]).exists()
+        if suite["tier"] == "holdout":
+            assert suite["classification"] == "holdout"
+            assert suite["runner"] is None
+            assert suite["component_status"] == "sealed-manual-only"
+        else:
+            assert (ROOT / suite["dataset"]).exists()
         if suite["baseline"]:
             assert (ROOT / suite["baseline"]).exists()
     for baseline in manifest["reference_baselines"]:

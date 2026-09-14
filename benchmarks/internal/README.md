@@ -3,7 +3,7 @@
 This framework is for private correctness and regression testing only. It must not be used for public or marketing benchmark claims.
 
 - `datasets/extraction/development`: visible cases used while developing the evaluator.
-- `datasets/extraction/holdout`: locked cases; never copy them into production prompts or extraction specifications.
+- `datasets/extraction/holdout`: locked cases; never copy them into production prompts or extraction specifications. Only the directory marker is tracked; the real `.jsonl` pack is ignored, provisioned only for an approved manual run, and must never be committed.
 - `schema`: versioned case and result contracts.
 - `baselines`: reviewed regression floors. Deterministic expected-output baselines are contract checks, not model-quality claims.
 
