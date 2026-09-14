@@ -163,6 +163,18 @@ async def test_extract_keeps_declarative_preference_that_starts_with_when(tmp_pa
 
     assert result.memories_extracted == 1
     assert result.memories_to_store[0].category == "preference"
+    evidence = result.memories_to_store[0].validated_evidence
+    assert evidence["citation_mode"] == "model_cited"
+    assert evidence["turn_indexes"] == [0]
+    assert evidence["user_turn_indexes"] == [0]
+    assert evidence["relation"] == "direct_user_statement"
+    assert evidence["authority"] == {"level": 20, "label": "client_assertion"}
+    assert evidence["validation"] == {"accepted": True, "reason": "direct_user_statement"}
+    assert evidence["extraction"]["provider"] == "test"
+    assert evidence["extraction"]["model"] == "fake"
+    assert result.extraction_metadata["prompt_context"]["existing_memory_context_tokens"] == 0
+    assert result.extraction_metadata["primary_pass"]["total_tokens"] == 18
+    assert result.extraction_metadata["compositional_pass_metrics"]["attempted"] is False
 
 
 def test_question_only_guard_still_rejects_unpunctuated_question() -> None:

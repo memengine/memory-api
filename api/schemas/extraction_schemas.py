@@ -15,6 +15,7 @@ class PendingExtractedMemory:
     confidence: float
     reasoning: str
     candidate_reason: str = "confidence_below_store_threshold"
+    validated_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

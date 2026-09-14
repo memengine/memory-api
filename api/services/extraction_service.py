@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,9 +134,16 @@ class ExtractionService:
             for index, message in enumerate(messages)
         ]
         conversation = self._build_conversation_string(indexed_messages)
+        base_user_message = self._prepend_source_context(conversation, source_context)
         user_message = self._append_existing_memory_context(
-            self._prepend_source_context(conversation, source_context),
+            base_user_message,
             existing_memories or [],
+        )
+        prompt_context_metrics = self._prompt_context_metrics(
+            conversation=conversation,
+            before_existing_context=base_user_message,
+            after_existing_context=user_message,
+            existing_memories=existing_memories or [],
         )
 
         composition_signals: dict[str, Any] = {}
@@ -145,6 +153,7 @@ class ExtractionService:
             source_context=source_context,
         )
         composition_prepass_error: str | None = None
+        composition_response: Any | None = None
         tokens_used = 0
         provider_used: str | None = None
         if composition_prepass_attempted:
@@ -174,16 +183,21 @@ class ExtractionService:
                         "error": str(exc),
                     },
                 )
+        primary_system_prompt = self._build_system_prompt(
+            source_context=source_context,
+            has_composition_signals=bool(composition_signals),
+        )
+        prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(user_message)
+        prompt_context_metrics["primary_system_prompt_tokens"] = self._count_tokens(primary_system_prompt)
+        primary_started = time.perf_counter()
         response = await self.llm_service.complete(
-            system_prompt=self._build_system_prompt(
-                source_context=source_context,
-                has_composition_signals=bool(composition_signals),
-            ),
+            system_prompt=primary_system_prompt,
             user_message=user_message,
             temperature=0.1,
             max_tokens=1500,
             response_format="json",
         )
+        primary_wall_latency_ms = int((time.perf_counter() - primary_started) * 1000)
         tokens_used += int(response.total_tokens or 0)
         provider_used = response.provider_used or provider_used
         await self._record_provider_usage(response.provider_used)
@@ -191,6 +205,12 @@ class ExtractionService:
             response.content,
             messages=indexed_messages,
             source_context=source_context,
+            evidence_context={
+                "provider": response.provider_used,
+                "model": response.model_used,
+                "extracted_at": datetime.now(UTC).isoformat(),
+                "extractor_version": "structured-evidence-v1",
+            },
         )
         self._observe_importance_shadow(
             kept=kept,
@@ -227,6 +247,28 @@ class ExtractionService:
             memories_to_store=kept,
             pending_candidates=pending,
             extraction_metadata={
+                "prompt_context": prompt_context_metrics,
+                "primary_pass": {
+                    "provider": response.provider_used,
+                    "model": response.model_used,
+                    "input_tokens": int(response.input_tokens or 0),
+                    "output_tokens": int(response.output_tokens or 0),
+                    "total_tokens": int(response.total_tokens or 0),
+                    "latency_ms": int(response.latency_ms or primary_wall_latency_ms),
+                    "wall_latency_ms": primary_wall_latency_ms,
+                },
+                "compositional_pass_metrics": {
+                    "attempted": composition_prepass_attempted,
+                    "completed": composition_response is not None,
+                    "used": bool(composition_signals),
+                    "provider": getattr(composition_response, "provider_used", None),
+                    "model": getattr(composition_response, "model_used", None),
+                    "input_tokens": int(getattr(composition_response, "input_tokens", 0) or 0),
+                    "output_tokens": int(getattr(composition_response, "output_tokens", 0) or 0),
+                    "total_tokens": int(getattr(composition_response, "total_tokens", 0) or 0),
+                    "latency_ms": int(getattr(composition_response, "latency_ms", 0) or 0),
+                    "error": composition_prepass_error,
+                },
                 "compositional_pass_attempted": composition_prepass_attempted,
                 "compositional_pass_used": bool(composition_signals),
                 "compositional_entities": len(composition_signals.get("entities") or []),
@@ -545,12 +587,41 @@ class ExtractionService:
                 lines.append(f"- [{category}] {content}")
         return "\n".join(lines)
 
+    def _prompt_context_metrics(
+        self,
+        *,
+        conversation: str,
+        before_existing_context: str,
+        after_existing_context: str,
+        existing_memories: list[Any],
+    ) -> dict[str, int]:
+        ranked = sorted(
+            existing_memories,
+            key=lambda memory: float(getattr(memory, "importance_score", 0.0) or 0.0),
+            reverse=True,
+        )[:MAX_EXISTING_MEMORIES]
+        included = sum(
+            bool(str(getattr(memory, "content", "") or "").strip())
+            for memory in ranked
+        )
+        before_tokens = self._count_tokens(before_existing_context)
+        after_tokens = self._count_tokens(after_existing_context)
+        return {
+            "conversation_tokens": self._count_tokens(conversation),
+            "before_existing_memory_context_tokens": before_tokens,
+            "after_existing_memory_context_tokens": after_tokens,
+            "existing_memory_context_tokens": max(0, after_tokens - before_tokens),
+            "existing_memories_available": len(existing_memories),
+            "existing_memories_included": included,
+        }
+
     def _parse_and_validate_response(
         self,
         raw_content: str,
         *,
         messages: list[dict[str, Any]] | None = None,
         source_context: dict[str, Any] | None = None,
+        evidence_context: dict[str, Any] | None = None,
     ) -> tuple[list[ExtractedMemory], list[PendingExtractedMemory], int, bool]:
         try:
             data = json.loads(raw_content or "{}")
@@ -572,18 +643,23 @@ class ExtractionService:
         invalid_count = 0
         for raw_memory in raw_memories:
             candidate = self._coerce_memory(raw_memory)
+            validated_evidence: dict[str, Any] = {}
             if candidate is None:
                 invalid_count += 1
                 continue
-            if not source_context and not self._has_user_evidence(
-                candidate,
-                messages or [],
-                raw_memory.get("evidence_turns") if isinstance(raw_memory, dict) else None,
-                raw_memory.get("evidence_relation") if isinstance(raw_memory, dict) else None,
-                raw_memory.get("proposal_turn") if isinstance(raw_memory, dict) else None,
-            ):
-                invalid_count += 1
-                continue
+            if not source_context:
+                validated_evidence = self._validated_user_evidence(
+                    candidate,
+                    messages or [],
+                    raw_memory.get("evidence_turns") if isinstance(raw_memory, dict) else None,
+                    raw_memory.get("evidence_relation") if isinstance(raw_memory, dict) else None,
+                    raw_memory.get("proposal_turn") if isinstance(raw_memory, dict) else None,
+                    evidence_context=evidence_context,
+                )
+                if not validated_evidence:
+                    invalid_count += 1
+                    continue
+                candidate.validated_evidence = validated_evidence
             if candidate.confidence >= self._confidence_threshold:
                 kept.append(
                     ExtractedMemory(
@@ -593,6 +669,7 @@ class ExtractionService:
                         confidence=candidate.confidence,
                         expiry="permanent",
                         reasoning=candidate.reasoning,
+                        validated_evidence=validated_evidence,
                     )
                 )
             else:
@@ -608,10 +685,32 @@ class ExtractionService:
         evidence_relation: Any = None,
         proposal_turn: Any = None,
     ) -> bool:
+        return bool(
+            cls._validated_user_evidence(
+                candidate,
+                messages,
+                evidence_turns,
+                evidence_relation,
+                proposal_turn,
+            )
+        )
+
+    @classmethod
+    def _validated_user_evidence(
+        cls,
+        candidate: PendingExtractedMemory,
+        messages: list[dict[str, Any]],
+        evidence_turns: Any,
+        evidence_relation: Any = None,
+        proposal_turn: Any = None,
+        *,
+        evidence_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Require conversational memories to be grounded in a user's own turn.
 
-        Registered service events bypass this gate because their writer identity,
-        evidence, and authority are validated separately before extraction.
+        The returned record is assembled only from the server-validated policy
+        result and server-observed model metadata. It never trusts a model's
+        assertion of authority or a caller-supplied provenance payload.
         """
         # Legacy extractors did not return evidence_turns. Preserve direct-user
         # extraction by validating every canonical turn, but never infer a
@@ -626,13 +725,13 @@ class ExtractionService:
             proposal_turn=proposal_turn,
         )
         if not policy.accepted:
-            return False
+            return {}
 
         indexed_messages = list(enumerate(messages))
         evidence_was_provided = isinstance(evidence_turns, list)
         cited_indexes = cls._valid_evidence_indexes(evidence_turns, len(messages))
         if evidence_was_provided and not cited_indexes:
-            return False
+            return {}
         if cited_indexes:
             indexed_messages = [item for item in indexed_messages if item[0] in cited_indexes]
 
@@ -645,13 +744,38 @@ class ExtractionService:
         candidate_tokens = cls._significant_tokens(candidate.content)
         if policy.proposal_turn_index is not None:
             proposal_content = str(messages[policy.proposal_turn_index].get("content") or "")
-            return bool(candidate_tokens & cls._significant_tokens(proposal_content))
-        for index, content in user_turns:
-            if cls._is_question_only(content):
-                continue
-            if candidate_tokens & cls._significant_tokens(content):
-                return True
-        return False
+            supported = bool(candidate_tokens & cls._significant_tokens(proposal_content))
+        else:
+            supported = any(
+                not cls._is_question_only(content)
+                and bool(candidate_tokens & cls._significant_tokens(content))
+                for _index, content in user_turns
+            )
+        if not supported:
+            return {}
+
+        normalized_context = {
+            key: value
+            for key, value in dict(evidence_context or {}).items()
+            if value is not None
+        }
+        return {
+            "schema_version": 1,
+            "citation_mode": "model_cited" if evidence_was_provided else "legacy_compatibility",
+            "turn_indexes": sorted(cited_indexes) if evidence_was_provided else list(policy.user_turn_indexes),
+            "user_turn_indexes": list(policy.user_turn_indexes),
+            "relation": str(evidence_relation or "direct_user_statement"),
+            "proposal_turn_index": policy.proposal_turn_index,
+            "authority": {
+                "level": int(policy.authority),
+                "label": policy.authority.name.lower(),
+            },
+            "validation": {
+                "accepted": True,
+                "reason": policy.reason,
+            },
+            "extraction": normalized_context,
+        }
 
     @staticmethod
     def _valid_evidence_indexes(value: Any, message_count: int) -> set[int]:
