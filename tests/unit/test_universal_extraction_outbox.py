@@ -181,3 +181,104 @@ def test_midflight_revocation_rolls_back_all_staged_writes(monkeypatch) -> None:
     assert session.rollbacks == 1
     assert session.commits == 0
     assert session.grant_checks == 2
+
+
+def test_opt_in_modern_shadow_does_not_change_universal_write_path(monkeypatch) -> None:
+    user = UniversalUser(
+        id=uuid.uuid4(), email="user@example.test", uui_token="uui_shadow",
+        memory_count=0, is_active=True,
+    )
+    agent_id = uuid.uuid4()
+    grant = PermissionGrant(
+        id=uuid.uuid4(), user_uui_id=user.id, agent_id=agent_id,
+        categories_allowed=["preference"], access_type="read_write", is_active=True,
+    )
+    session = FakeSession(user, grant)
+
+    class ShadowObserver:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def observe(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "schema_version": 1,
+                "status": "completed",
+                "active_write_path_unchanged": True,
+                "comparison": {"legacy_memory_count": len(kwargs["legacy_memories"])},
+            }
+
+    observer = ShadowObserver()
+    monkeypatch.setattr(
+        universal_extraction_tasks, "EmbeddingService", lambda sync_session: FakeEmbedder(),
+    )
+    monkeypatch.setattr(
+        universal_extraction_tasks.VersionService,
+        "record_universal_version_sync",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    result = universal_extraction_tasks.run_universal_extraction_pipeline(
+        {
+            "job_id": str(uuid.uuid4()), "user_uui_id": str(user.id),
+            "agent_id": str(agent_id),
+            "messages": [{"role": "user", "content": "Keep answers concise"}],
+        },
+        session_factory=lambda: session,
+        extractor=FakeExtractor(),
+        scorer=FakeScorer(),
+        modern_shadow_service=observer,
+        universal_extraction_shadow_enabled=True,
+    )
+
+    assert result["status"] == "processed"
+    assert result["memories_created"] == 1
+    assert result["modern_extraction_shadow"]["active_write_path_unchanged"] is True
+    assert observer.calls[0]["legacy_memories"][0].content == "User prefers concise answers"
+    assert session.commits == 1
+    assert session.rollbacks == 0
+
+
+def test_failing_shadow_observer_is_fail_open_for_universal_write(monkeypatch) -> None:
+    user = UniversalUser(
+        id=uuid.uuid4(), email="user@example.test", uui_token="uui_shadow_failure",
+        memory_count=0, is_active=True,
+    )
+    agent_id = uuid.uuid4()
+    grant = PermissionGrant(
+        id=uuid.uuid4(), user_uui_id=user.id, agent_id=agent_id,
+        categories_allowed=["preference"], access_type="read_write", is_active=True,
+    )
+    session = FakeSession(user, grant)
+
+    class FailingObserver:
+        def observe(self, **_kwargs):
+            raise RuntimeError("shadow unavailable")
+
+    monkeypatch.setattr(
+        universal_extraction_tasks, "EmbeddingService", lambda sync_session: FakeEmbedder(),
+    )
+    monkeypatch.setattr(
+        universal_extraction_tasks.VersionService,
+        "record_universal_version_sync",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    result = universal_extraction_tasks.run_universal_extraction_pipeline(
+        {
+            "job_id": str(uuid.uuid4()), "user_uui_id": str(user.id),
+            "agent_id": str(agent_id),
+            "messages": [{"role": "user", "content": "Keep answers concise"}],
+        },
+        session_factory=lambda: session,
+        extractor=FakeExtractor(),
+        scorer=FakeScorer(),
+        modern_shadow_service=FailingObserver(),
+        universal_extraction_shadow_enabled=True,
+    )
+
+    assert result["status"] == "processed"
+    assert result["memories_created"] == 1
+    assert result["modern_extraction_shadow"]["status"] == "failed"
+    assert result["modern_extraction_shadow"]["active_write_path_unchanged"] is True
+    assert session.commits == 1
+    assert session.rollbacks == 0

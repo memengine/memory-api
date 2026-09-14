@@ -92,7 +92,7 @@
       "name": "extraction-provider", "version": "cleaned-v1", "tier": "provider", "classification": "development",
       "dataset": "benchmarks/internal/datasets/extraction/development/development_v1.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.live_provider", "--output", "{output}"],
       "services": ["llm-provider"], "required_env_any": ["OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"], "provider_calls": true, "mode": "provider-backed", "baseline": "benchmarks/internal/baselines/post-extraction-evidence-development.json",
-      "result": "{output}", "acceptance": {"config.holdout_loaded": {"equals": false}, "aggregate.safety.forbidden_leak_count": {"max": 0}}, "component_status": "production-active extraction and attribution"
+      "result": "{output}", "acceptance": {"config.holdout_loaded": {"equals": false}, "aggregate.safety.forbidden_leak_count": {"max": 0}}, "component_status": "production-active structured extraction with validated evidence"
     },
     {
       "name": "retrieval-live-vector", "version": "1.0", "tier": "provider", "classification": "development",

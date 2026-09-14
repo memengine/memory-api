@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import traceback
 import uuid
 from datetime import UTC
@@ -24,14 +25,17 @@ from api.infra.protected_storage import encrypt_universal_text_for_dual_write
 from api.services.embedding_service import EmbeddingService
 from api.services.extractor import ExtractionService
 from api.services.importance_scorer import ImportanceScorer
+from api.services.universal_extraction_shadow_service import UniversalExtractionShadowService
 from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
 from api.services.vector_outbox import enqueue_vector_upsert
 from api.services.version_service import VersionService
 from api.services.uui_service import ALLOWED_MEMORY_CATEGORIES
+from api.settings import get_settings
 
 
 UNIVERSAL_EXTRACTION_TASK_NAME = "api.tasks.universal_extraction_tasks.extract_universal_memory"
 UNIVERSAL_COLLECTION_NAME = "universal_memories"
+LOGGER = logging.getLogger(__name__)
 
 
 def build_universal_session_factory() -> sessionmaker[Session]:
@@ -104,6 +108,8 @@ def run_universal_extraction_pipeline(
     extractor: ExtractionService | None = None,
     scorer: ImportanceScorer | None = None,
     qdrant_service: Any | None = None,
+    modern_shadow_service: Any | None = None,
+    universal_extraction_shadow_enabled: bool | None = None,
 ) -> dict[str, Any]:
     user_uui_id = str(job_payload.get("user_uui_id") or "").strip()
     agent_id = str(job_payload.get("agent_id") or "").strip()
@@ -155,6 +161,32 @@ def run_universal_extraction_pipeline(
                 "idempotent_replay": True,
             }
         extracted_memories = extractor.extract(messages=messages, user_id=user_uui_id)
+        shadow_enabled = (
+            get_settings().universal_extraction_shadow_enabled
+            if universal_extraction_shadow_enabled is None
+            else bool(universal_extraction_shadow_enabled)
+        )
+        modern_shadow = None
+        if shadow_enabled:
+            try:
+                observer = modern_shadow_service or UniversalExtractionShadowService()
+                modern_shadow = observer.observe(
+                    messages=messages,
+                    legacy_memories=extracted_memories,
+                    user_uui_id=user_uui_id,
+                    job_id=event_id,
+                )
+            except Exception as exc:
+                modern_shadow = {
+                    "schema_version": 1,
+                    "status": "failed",
+                    "active_write_path_unchanged": True,
+                    "error_type": exc.__class__.__name__,
+                }
+                LOGGER.warning("universal_extraction_shadow_failed", extra={
+                    "event": "universal_extraction_shadow_failed", "job_id": event_id,
+                    "error_type": exc.__class__.__name__,
+                })
         allowed_categories = {
             category for category in (grant.categories_allowed or []) if category in ALLOWED_MEMORY_CATEGORIES
         }
@@ -266,6 +298,7 @@ def run_universal_extraction_pipeline(
             **job_payload,
             "status": "processed",
             "memories_created": stored_count,
+            **({"modern_extraction_shadow": modern_shadow} if modern_shadow is not None else {}),
         }
     except Exception:
         session.rollback()

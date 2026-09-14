@@ -74,7 +74,19 @@ def load_development_cases() -> list[ExtractionCase]:
 
 
 async def run_live_development_evaluation() -> dict[str, Any]:
-    cases = load_development_cases()
+    return await run_live_case_evaluation(
+        load_development_cases(),
+        mode="live-provider-development-only",
+        holdout_loaded=False,
+    )
+
+
+async def run_live_case_evaluation(
+    cases: list[ExtractionCase],
+    *,
+    mode: str,
+    holdout_loaded: bool,
+) -> dict[str, Any]:
     recorder = RecordingLLMService(LLMService())
     extraction = ExtractionService(
         llm_service=recorder,
@@ -158,8 +170,8 @@ async def run_live_development_evaluation() -> dict[str, Any]:
         cases,
         metrics,
         config={
-            "mode": "live-provider-development-only",
-            "holdout_loaded": False,
+            "mode": mode,
+            "holdout_loaded": holdout_loaded,
             "production_extraction_path": "api.services.extraction_service.ExtractionService",
             "pricing_rates_usd_per_1m_tokens": {
                 f"{provider}/{model}": {
