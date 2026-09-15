@@ -16,6 +16,14 @@ MemoryCategory = Literal[
 ]
 
 MessageRole = Literal["user", "assistant", "system"]
+MessageSourceKind = Literal[
+    "direct_user_input",
+    "assistant_output",
+    "tool_output",
+    "fetched_document",
+    "system_instruction",
+    "client_assertion",
+]
 QuotaMode = Literal["FULL", "PASSTHROUGH", "DEGRADED_RETRIEVE", "BLOCKED"]
 CircuitStatus = Literal["HEALTHY", "DEGRADED", "CRITICAL"]
 ProcessingStatus = Literal["normal", "delayed"]
@@ -31,7 +39,10 @@ RetrievalFeedbackOutcome = Literal[
 
 class ConversationMessage(BaseModel):
     role: MessageRole
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=16_000)
+    external_turn_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_kind: MessageSourceKind | None = None
+    occurred_at: datetime | None = None
 
     @field_validator("content")
     @classmethod
@@ -85,7 +96,7 @@ class MemorySource(BaseModel):
 class AddRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     agent_id: str | None = None
-    messages: list[ConversationMessage] = Field(min_length=1)
+    messages: list[ConversationMessage] = Field(min_length=1, max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source: MemorySource | None = None
 

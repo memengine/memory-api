@@ -19,6 +19,9 @@ from api.tasks.lifecycle_tasks import TEMPORAL_VALIDITY_BEAT_SCHEDULE
 from api.tasks.vector_sync_tasks import VECTOR_SYNC_TASK_BEAT_SCHEDULE
 from api.tasks.watchdog_tasks import WATCHDOG_BEAT_SCHEDULE
 
+EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
+
+
 CELERY_IMPORTS = (
     "api.tasks.decay_tasks",
     "api.tasks.edtech_tasks",
@@ -71,6 +74,17 @@ def create_celery_app() -> Celery:
         enable_utc=True,
         timezone="UTC",
         task_track_started=True,
+        # Model calls occupy a worker process for seconds. One prefetched job
+        # prevents a slow tenant from being hidden in a worker-local backlog.
+        worker_prefetch_multiplier=1,
+        task_annotations={
+            EXTRACTION_TASK_NAME: {
+                "acks_late": True,
+                "reject_on_worker_lost": True,
+                "soft_time_limit": 105,
+                "time_limit": 120,
+            },
+        },
         task_default_queue="celery",
         task_routes={
             REEMBED_TASK_NAME: {"queue": "reembedding"},

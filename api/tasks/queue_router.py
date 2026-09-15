@@ -164,24 +164,10 @@ class QueueRouter:
                     await pipe.reset()
                 except Exception:
                     pass
-                current_depth = await self._safe_int_get(depth_key)
-                if current_depth >= queue_limit:
-                    return None
-                try:
-                    await self.cache_service.client.incr(depth_key)
-                    await self.cache_service.client.expire(depth_key, PLAN_CACHE_TTL_SECONDS * 2)
-                    await self.cache_service.client.zadd(jobs_key, {member: now_score})
-                    await self.cache_service.client.expire(jobs_key, PLAN_CACHE_TTL_SECONDS * 2)
-                    await self.cache_service.client.hincrby(tenant_breakdown_key, tenant_id, 1)
-                    await self.cache_service.client.expire(tenant_breakdown_key, PLAN_CACHE_TTL_SECONDS * 2)
-                    return QueueReservation(
-                        tenant_id=tenant_id,
-                        queue_name=queue_name,
-                        plan_tier=plan_tier,
-                        queue_limit=queue_limit,
-                    )
-                except Exception:
-                    return None
+                # A non-atomic increment fallback can admit jobs beyond the
+                # tenant cap under concurrent load. Fail closed instead; the
+                # caller can retry without exceeding the tenant limit.
+                return None
 
     async def release_extraction_slot(self, *, tenant_id: str, queue_name: str, job_id: str) -> None:
         member = _queue_job_member(tenant_id=tenant_id, job_id=job_id)

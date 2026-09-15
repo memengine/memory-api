@@ -1,5 +1,5 @@
 import type { AddResult, ConversationMessage, MemoryItem, RetrieveResult } from "./index";
-import { AuthError, MemoryOSError, NotFoundError, RateLimitError } from "./index";
+import { AuthError, MemoryOSError, NotFoundError, RateLimitError, toApiConversationMessages } from "./index";
 
 export interface UniversalRetrieveResult extends RetrieveResult {
   categoriesAvailable: string[];
@@ -148,7 +148,7 @@ export class UniversalMemoryOS {
   ): Promise<AddResult> {
     const response = await this.requestResponse("POST", "/v1/universal/memories/add", {
       body: JSON.stringify({
-        messages,
+        messages: toApiConversationMessages(messages),
         metadata: metadata ?? {},
         ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
       }),

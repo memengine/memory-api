@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -154,6 +155,9 @@ async def test_extract_keeps_declarative_preference_that_starts_with_when(tmp_pa
             {
                 "role": "user",
                 "content": "When you explain coding topics to me, I prefer concise Python-first examples.",
+                "turn_id": "external:turn-100",
+                "external_turn_id": "turn-100",
+                "turn_content_sha256": "a" * 64,
             }
         ],
         proxy_user_id="proxy-1",
@@ -168,6 +172,17 @@ async def test_extract_keeps_declarative_preference_that_starts_with_when(tmp_pa
     assert evidence["turn_indexes"] == [0]
     assert evidence["user_turn_indexes"] == [0]
     assert evidence["relation"] == "direct_user_statement"
+    assert evidence["turn_references"] == [
+        {
+            "turn_index": 0,
+            "turn_id": "external:turn-100",
+            "external_turn_id": "turn-100",
+            "content_sha256": "a" * 64,
+            "role": "user",
+            "source_kind": "",
+        }
+    ]
+    assert evidence["proposal_turn_id"] is None
     assert evidence["authority"] == {"level": 20, "label": "client_assertion"}
     assert evidence["validation"] == {"accepted": True, "reason": "direct_user_statement"}
     assert evidence["extraction"]["provider"] == "test"
@@ -175,6 +190,56 @@ async def test_extract_keeps_declarative_preference_that_starts_with_when(tmp_pa
     assert result.extraction_metadata["prompt_context"]["existing_memory_context_tokens"] == 0
     assert result.extraction_metadata["primary_pass"]["total_tokens"] == 18
     assert result.extraction_metadata["compositional_pass_metrics"]["attempted"] is False
+
+
+def test_existing_memory_context_is_token_bounded(tmp_path: Path) -> None:
+    service = ExtractionService(llm_service=FakeLLMService('{"memories":[]}'), spec_path=_spec(tmp_path))
+    memories = [
+        SimpleNamespace(content="detail " * 80, category="fact", importance_score=20 - index)
+        for index in range(20)
+    ]
+
+    rendered = service._append_existing_memory_context("[turn 0][user]: hello", memories)
+    metrics = service._prompt_context_metrics(
+        conversation="[turn 0][user]: hello",
+        before_existing_context="[turn 0][user]: hello",
+        after_existing_context=rendered,
+        existing_memories=memories,
+    )
+
+    memory_lines = [line for line in rendered.splitlines() if line.startswith("- [")]
+    assert service._count_tokens("\n".join(memory_lines)) <= 1200
+    assert 0 < len(memory_lines) < len(memories)
+    assert metrics["existing_memories_included"] == len(memory_lines)
+    assert metrics["existing_memory_context_budget_tokens"] == 1200
+
+
+def test_single_oversized_turn_is_hard_token_bounded(tmp_path: Path) -> None:
+    service = ExtractionService(llm_service=FakeLLMService('{"memories":[]}'), spec_path=_spec(tmp_path))
+
+    conversation = service._build_conversation_string(
+        [{"role": "user", "content": "durable detail " * 6_000, "_turn_index": 0}]
+    )
+
+    assert conversation.startswith("[turn 0][user]:")
+    assert service._count_tokens(conversation) <= 5_000
+
+
+def test_composition_hints_are_token_bounded(tmp_path: Path) -> None:
+    service = ExtractionService(llm_service=FakeLLMService('{"memories":[]}'), spec_path=_spec(tmp_path))
+    signals = {
+        "entities": [
+            {"name": f"project-{index}", "type": "project", "evidence": "evidence " * 200}
+            for index in range(12)
+        ],
+        "relationships": [],
+    }
+
+    rendered = service._append_composition_context("[turn 0][user]: hello", signals)
+    hint_text = rendered.split("\n\n", 1)[1]
+
+    assert service._count_tokens(hint_text) <= 800
+    assert "[turn 0][user]: hello" in rendered
 
 
 def test_question_only_guard_still_rejects_unpunctuated_question() -> None:

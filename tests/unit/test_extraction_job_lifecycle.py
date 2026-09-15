@@ -100,6 +100,12 @@ async def test_queue_memory_add_persists_extraction_job_row() -> None:
     assert extraction_job.queue_name == "starter-extraction"
     assert extraction_job.external_user_id == "external_user_123"
     assert extraction_job.max_attempts == 3
+    dispatched = service.dispatch_task.calls[0][2]["args"][0]
+    assert dispatched == {
+        "job_id": result["job_id"],
+        "queue_name": "starter-extraction",
+        "_payload_reference": "extraction_job",
+    }
     session.commit.assert_awaited()
 
 
@@ -138,6 +144,64 @@ async def test_successful_dispatch_persists_broker_task_identity() -> None:
     session.execute.assert_awaited_once()
     assert session.commit.await_count == 2
     session.rollback.assert_not_awaited()
+
+
+def test_worker_loads_compact_tenant_payload_before_processing(monkeypatch) -> None:
+    full_payload = {
+        "job_id": "77777777-7777-7777-7777-777777777777",
+        "tenant_id": "tenant-1",
+        "proxy_user_id": "proxy-1",
+        "queue_name": "starter-extraction",
+        "messages": [{"role": "user", "content": "private transcript"}],
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(extraction_tasks, "_set_db_job_processing", lambda **_kwargs: 0)
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_load_referenced_job_payload",
+        lambda job_id: {**full_payload, "job_id": job_id},
+    )
+    monkeypatch.setattr(extraction_tasks, "_wait_for_development_crash_barrier", lambda **_kwargs: False)
+    monkeypatch.setattr(extraction_tasks, "_set_job_status", lambda _job_id, payload: captured.setdefault("status", payload))
+    monkeypatch.setattr(extraction_tasks, "_set_db_job_completed", lambda **_kwargs: None)
+
+    def fake_pipeline(payload):
+        captured["pipeline_payload"] = payload
+        return {**payload, "status": "processed", "memories_created": 0}
+
+    monkeypatch.setattr(extraction_tasks, "run_extraction_pipeline", fake_pipeline)
+
+    result = extraction_tasks._process_extraction_job(
+        {
+            "job_id": full_payload["job_id"],
+            "queue_name": "starter-extraction",
+            "_payload_reference": "extraction_job",
+        },
+        celery_task_id="test-task-1",
+    )
+
+    assert captured["pipeline_payload"] == full_payload
+    assert result["status"] == "processed"
+
+
+def test_worker_status_snapshot_excludes_transcript_and_memory_content() -> None:
+    snapshot = extraction_tasks._job_status_snapshot(
+        {
+            "job_id": "job-1",
+            "tenant_id": "tenant-1",
+            "proxy_user_id": "proxy-1",
+            "status": "processed",
+            "messages": [{"role": "user", "content": "private transcript"}],
+            "metadata": {"private": "data"},
+            "stored_memories": [{"id": "memory-1", "content": "private memory"}],
+        }
+    )
+
+    assert snapshot["result_memory_ids"] == ["memory-1"]
+    assert "messages" not in snapshot
+    assert "metadata" not in snapshot
+    assert "stored_memories" not in snapshot
 
 
 class FakeQuery:
@@ -249,6 +313,7 @@ def test_watchdog_requeues_stale_processing_job_only_once(monkeypatch) -> None:
             {
                 "job_id": "33333333-3333-3333-3333-333333333333",
                 "queue_name": "starter-extraction",
+                "_payload_reference": "extraction_job",
             }
         ],
         queue="starter-extraction",
@@ -282,6 +347,7 @@ def test_watchdog_recovers_stranded_queued_job_once_on_original_queue(monkeypatc
         args=[{
             "job_id": "55555555-5555-5555-5555-555555555555",
             "queue_name": "growth-extraction",
+            "_payload_reference": "extraction_job",
         }],
         queue="growth-extraction",
         task_id=queued_job.celery_task_id,

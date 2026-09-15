@@ -13,6 +13,14 @@ from api.tasks.queue_router import QueueRouter
 from api.tasks.queue_router import STARTER_QUEUE
 
 
+class FailingReservationPipeline:
+    async def watch(self, *_args):
+        raise RuntimeError("redis transaction unavailable")
+
+    async def reset(self):
+        return None
+
+
 class FakeScalarResult:
     def __init__(self, value) -> None:
         self.value = value
@@ -24,6 +32,21 @@ class FakeScalarResult:
 class FakeCacheService:
     def __init__(self) -> None:
         self.client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+
+@pytest.mark.asyncio
+async def test_reserve_extraction_slot_fails_closed_when_atomic_reservation_is_unavailable(monkeypatch) -> None:
+    tenant_id = str(uuid.uuid4())
+    cache_service = FakeCacheService()
+    session = MagicMock()
+    router = QueueRouter(session=session, cache_service=cache_service)
+    await cache_service.client.set(f"tenant:{tenant_id}:plan", "starter", ex=PLAN_CACHE_TTL_SECONDS)
+    monkeypatch.setattr(cache_service.client, "pipeline", lambda: FailingReservationPipeline())
+
+    reservation = await router.reserve_extraction_slot(tenant_id=tenant_id, job_id="job-fail-closed")
+
+    assert reservation is None
+    assert await cache_service.client.get(f"tenant_queue_depth:{tenant_id}:starter-extraction") is None
 
 
 @pytest.mark.asyncio

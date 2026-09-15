@@ -1,6 +1,6 @@
 {
   "name": "memoryo-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Zero-runtime-dependency TypeScript SDK for governed, traceable AI memory with MemoryOS.",
   "license": "MIT",
   "author": {

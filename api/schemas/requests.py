@@ -26,7 +26,7 @@ ProcessingStatus = Literal["normal", "delayed"]
 
 class ConversationMessageRequest(BaseModel):
     role: Literal["user", "assistant", "system"] = "user"
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=16_000)
     external_turn_id: str | None = Field(default=None, min_length=1, max_length=255)
     source_kind: Literal[
         "direct_user_input",
@@ -64,7 +64,10 @@ class MemorySourceRequest(BaseModel):
 class MemoryAddRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     agent_id: str | None = None
-    messages: list[ConversationMessageRequest] = Field(min_length=1)
+    messages: list[ConversationMessageRequest] = Field(
+        min_length=1,
+        max_length=64,
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     source: MemorySourceRequest | None = None
     evidence_mode: Literal["conversation_evidence", "client_assertion"] = "conversation_evidence"

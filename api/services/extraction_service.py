@@ -29,6 +29,8 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.65
 DEFAULT_PENDING_CONFIDENCE_THRESHOLD = 0.45
 MAX_CONVERSATION_TOKENS = 5000
 MAX_EXISTING_MEMORIES = 20
+MAX_COMPOSITION_HINT_TOKENS = 800
+MAX_EXISTING_MEMORY_CONTEXT_TOKENS = 1200
 COMPOSITIONAL_MIN_MESSAGES = 4
 COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
@@ -170,7 +172,12 @@ class ExtractionService:
                 await self._record_provider_usage(composition_response.provider_used)
                 composition_signals = self._parse_composition_response(composition_response.content)
                 if composition_signals:
+                    before_composition = user_message
                     user_message = self._append_composition_context(user_message, composition_signals)
+                    prompt_context_metrics["composition_hint_tokens"] = max(
+                        0,
+                        self._count_tokens(user_message) - self._count_tokens(before_composition),
+                    )
             except Exception as exc:  # pragma: no cover - defensive fail-open path.
                 composition_prepass_error = exc.__class__.__name__
                 LOGGER.warning(
@@ -188,6 +195,8 @@ class ExtractionService:
             has_composition_signals=bool(composition_signals),
         )
         prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(user_message)
+        prompt_context_metrics.setdefault("composition_hint_tokens", 0)
+        prompt_context_metrics["composition_hint_budget_tokens"] = MAX_COMPOSITION_HINT_TOKENS
         prompt_context_metrics["primary_system_prompt_tokens"] = self._count_tokens(primary_system_prompt)
         primary_started = time.perf_counter()
         response = await self.llm_service.complete(
@@ -510,9 +519,7 @@ class ExtractionService:
 
     @staticmethod
     def _append_composition_context(user_message: str, signals: dict[str, Any]) -> str:
-        lines = [
-            user_message,
-            "",
+        hint_lines = [
             "Compositional extraction hints from pass 1 (use only if supported by transcript):",
         ]
         for entity in signals.get("entities") or []:
@@ -520,7 +527,7 @@ class ExtractionService:
             entity_type = str(entity.get("type") or "other").strip()
             evidence = str(entity.get("evidence") or "").strip()
             if name:
-                lines.append(f"- entity: {name} ({entity_type}) evidence: {evidence[:160]}")
+                hint_lines.append(f"- entity: {name} ({entity_type}) evidence: {evidence[:160]}")
         for relation in signals.get("relationships") or []:
             subject = str(relation.get("subject") or "").strip()
             predicate = str(relation.get("relation") or "").strip()
@@ -528,11 +535,15 @@ class ExtractionService:
             confidence = relation.get("confidence", "")
             evidence = str(relation.get("evidence") or "").strip()
             if subject and predicate and obj:
-                lines.append(
+                hint_lines.append(
                     f"- relationship: {subject} --{predicate}--> {obj} "
                     f"confidence: {confidence} evidence: {evidence[:160]}"
                 )
-        return "\n".join(lines)
+        hints = ExtractionService._truncate_to_token_budget(
+            "\n".join(hint_lines),
+            MAX_COMPOSITION_HINT_TOKENS,
+        )
+        return f"{user_message}\n\n{hints}"
     @staticmethod
     def _prepend_source_context(
         conversation: str,
@@ -565,7 +576,7 @@ class ExtractionService:
         while retained and len(retained) > 6 and self._count_tokens(text) > MAX_CONVERSATION_TOKENS:
             retained.pop(0)
             text = self._messages_to_text(retained)
-        return text
+        return self._truncate_to_token_budget(text, MAX_CONVERSATION_TOKENS)
 
     def _append_existing_memory_context(self, conversation: str, existing_memories: list[Any]) -> str:
         if not existing_memories:
@@ -580,11 +591,17 @@ class ExtractionService:
             "",
             "Existing memories for this user (for context - do not re-extract these):",
         ]
+        used_tokens = 0
         for memory in ranked:
             category = getattr(getattr(memory, "category", ""), "value", getattr(memory, "category", "unknown"))
             content = str(getattr(memory, "content", "")).strip()
             if content:
-                lines.append(f"- [{category}] {content}")
+                line = f"- [{category}] {content}"
+                line_tokens = self._count_tokens(line)
+                if used_tokens + line_tokens > MAX_EXISTING_MEMORY_CONTEXT_TOKENS:
+                    break
+                lines.append(line)
+                used_tokens += line_tokens
         return "\n".join(lines)
 
     def _prompt_context_metrics(
@@ -600,16 +617,25 @@ class ExtractionService:
             key=lambda memory: float(getattr(memory, "importance_score", 0.0) or 0.0),
             reverse=True,
         )[:MAX_EXISTING_MEMORIES]
-        included = sum(
-            bool(str(getattr(memory, "content", "") or "").strip())
-            for memory in ranked
-        )
+        included = 0
+        used_tokens = 0
+        for memory in ranked:
+            content = str(getattr(memory, "content", "") or "").strip()
+            if not content:
+                continue
+            category = getattr(getattr(memory, "category", ""), "value", getattr(memory, "category", "unknown"))
+            line_tokens = self._count_tokens(f"- [{category}] {content}")
+            if used_tokens + line_tokens > MAX_EXISTING_MEMORY_CONTEXT_TOKENS:
+                break
+            used_tokens += line_tokens
+            included += 1
         before_tokens = self._count_tokens(before_existing_context)
         after_tokens = self._count_tokens(after_existing_context)
         return {
             "conversation_tokens": self._count_tokens(conversation),
             "before_existing_memory_context_tokens": before_tokens,
             "after_existing_memory_context_tokens": after_tokens,
+            "existing_memory_context_budget_tokens": MAX_EXISTING_MEMORY_CONTEXT_TOKENS,
             "existing_memory_context_tokens": max(0, after_tokens - before_tokens),
             "existing_memories_available": len(existing_memories),
             "existing_memories_included": included,
@@ -766,6 +792,22 @@ class ExtractionService:
             "user_turn_indexes": list(policy.user_turn_indexes),
             "relation": str(evidence_relation or "direct_user_statement"),
             "proposal_turn_index": policy.proposal_turn_index,
+            "turn_references": [
+                {
+                    "turn_index": index,
+                    "turn_id": str(messages[index].get("turn_id") or f"legacy-index:{index}"),
+                    "external_turn_id": messages[index].get("external_turn_id"),
+                    "content_sha256": messages[index].get("turn_content_sha256"),
+                    "role": str(messages[index].get("role") or "").lower(),
+                    "source_kind": str(messages[index].get("source_kind") or "").lower(),
+                }
+                for index in sorted(cited_indexes) if evidence_was_provided
+            ],
+            "proposal_turn_id": (
+                str(messages[policy.proposal_turn_index].get("turn_id") or f"legacy-index:{policy.proposal_turn_index}")
+                if policy.proposal_turn_index is not None
+                else None
+            ),
             "authority": {
                 "level": int(policy.authority),
                 "label": policy.authority.name.lower(),
@@ -992,6 +1034,21 @@ class ExtractionService:
         except Exception:
             return max(1, len(text) // 4)
 
+
+    @staticmethod
+    def _truncate_to_token_budget(text: str, budget: int) -> str:
+        """Enforce an input ceiling even when one retained turn is very large."""
+
+        if budget <= 0:
+            return ""
+        try:
+            if tiktoken is None:
+                raise RuntimeError("tiktoken unavailable")
+            encoding = tiktoken.get_encoding("cl100k_base")
+            tokens = encoding.encode(text)
+            return text if len(tokens) <= budget else encoding.decode(tokens[:budget])
+        except Exception:
+            return text[: budget * 4]
 
 __all__ = ["ExtractionError", "ExtractionResult", "ExtractionService", "ParsedExtractionSpec"]
 

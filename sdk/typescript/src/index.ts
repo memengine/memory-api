@@ -8,6 +8,14 @@
 
 export type MessageRole = "user" | "assistant" | "system";
 
+export type MessageSourceKind =
+  | "direct_user_input"
+  | "assistant_output"
+  | "tool_output"
+  | "fetched_document"
+  | "system_instruction"
+  | "client_assertion";
+
 export type RetrievalFeedbackOutcome =
   | "used_successfully"
   | "used_partially"
@@ -19,6 +27,9 @@ export type RetrievalFeedbackOutcome =
 export interface ConversationMessage {
   role: MessageRole;
   content: string;
+  externalTurnId?: string;
+  sourceKind?: MessageSourceKind;
+  occurredAt?: string;
 }
 
 export interface EvidenceReference {
@@ -511,16 +522,35 @@ export function createMemorySource(service: string, options: MemorySourceOptions
   };
 }
 
-function ensureMessages(messages: ConversationMessage[]): ConversationMessage[] {
+export function toApiConversationMessages(messages: ConversationMessage[]): Array<Record<string, unknown>> {
   if (messages.length === 0) {
     throw new Error("messages must not be empty.");
+  }
+  if (messages.length > 64) {
+    throw new Error("messages must contain at most 64 items.");
   }
   return messages.map((message) => {
     const content = message.content.trim();
     if (!content) {
       throw new Error("message content must not be empty.");
     }
-    return { role: message.role, content };
+    if (content.length > 16_000) {
+      throw new Error("message content must contain at most 16000 characters.");
+    }
+    const externalTurnId = message.externalTurnId?.trim();
+    if (externalTurnId !== undefined && !externalTurnId) {
+      throw new Error("externalTurnId must not be empty when provided.");
+    }
+    if (externalTurnId && externalTurnId.length > 255) {
+      throw new Error("externalTurnId must contain at most 255 characters.");
+    }
+    return {
+      role: message.role,
+      content,
+      ...(externalTurnId ? { external_turn_id: externalTurnId } : {}),
+      ...(message.sourceKind ? { source_kind: message.sourceKind } : {}),
+      ...(message.occurredAt ? { occurred_at: message.occurredAt } : {}),
+    };
   });
 }
 
@@ -693,7 +723,7 @@ export class MemoryOS {
   ): Promise<AddResult> {
     const payload: AddRequest = {
       externalUserId,
-      messages: ensureMessages(messages),
+      messages,
       ...(agentId ? { agentId } : {}),
       ...(metadata ? { metadata } : {}),
       ...(source ? { source } : {}),
@@ -703,7 +733,7 @@ export class MemoryOS {
       body: JSON.stringify({
         external_user_id: payload.externalUserId,
         ...(payload.agentId ? { agent_id: payload.agentId } : {}),
-        messages: payload.messages,
+        messages: toApiConversationMessages(payload.messages),
         metadata: payload.metadata ?? {},
         ...(payload.source
           ? {

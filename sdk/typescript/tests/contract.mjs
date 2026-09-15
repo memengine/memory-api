@@ -17,7 +17,13 @@ test("add forwards Idempotency-Key without adding it to the body", async () => {
   const client = new MemoryOS("mem_test", MemoryOS.DEFAULT_BASE_URL, 30_000, fetchImpl);
 
   await client.add(
-    [{ role: "user", content: "I prefer concise answers." }],
+    [{
+      role: "user",
+      content: "I prefer concise answers.",
+      externalTurnId: "chat-884:turn-12",
+      sourceKind: "direct_user_input",
+      occurredAt: "2026-09-15T10:00:00Z",
+    }],
     "customer-123",
     undefined,
     undefined,
@@ -28,6 +34,13 @@ test("add forwards Idempotency-Key without adding it to the body", async () => {
   assert.equal(MemoryOS.DEFAULT_BASE_URL, "https://api.memoryo.dev");
   assert.equal(captured.init.headers["Idempotency-Key"], "event-123");
   assert.equal("idempotency_key" in JSON.parse(captured.init.body), false);
+  assert.deepEqual(JSON.parse(captured.init.body).messages, [{
+    role: "user",
+    content: "I prefer concise answers.",
+    external_turn_id: "chat-884:turn-12",
+    source_kind: "direct_user_input",
+    occurred_at: "2026-09-15T10:00:00Z",
+  }]);
 });
 
 test("get sends asOf and preserves clarificationQuestion", async () => {
@@ -136,9 +149,16 @@ test("universal client preserves provenance and sends supported options", async 
   };
   const client = new UniversalMemoryOS("agent-key", "uui-token", undefined, 30_000, fetchImpl);
 
-  await client.add([{ role: "user", content: "Remember this." }], {}, "universal-event-123");
-  assert.equal(JSON.parse(captured.init.body).idempotency_key, "universal-event-123");
+  await client.add([{ role: "user", content: "Remember this.", externalTurnId: "chat-884:turn-13", sourceKind: "direct_user_input" }], {}, "universal-event-123");
+  const addBody = JSON.parse(captured.init.body);
+  assert.equal(addBody.idempotency_key, "universal-event-123");
   const result = await client.get("preferences", 5, { format: "json", contextMaxTokens: 900 });
+  assert.deepEqual(addBody.messages, [{
+    role: "user",
+    content: "Remember this.",
+    external_turn_id: "chat-884:turn-13",
+    source_kind: "direct_user_input",
+  }]);
   const body = JSON.parse(captured.init.body);
   assert.equal(body.format, "json");
   assert.equal(body.context_max_tokens, 900);

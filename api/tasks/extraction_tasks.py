@@ -116,13 +116,33 @@ def _raise_missing_redis_url() -> str:
     raise RuntimeError("REDIS_URL is required.")
 
 
+def _job_status_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "tenant_id", "proxy_user_id", "external_user_id", "job_id", "status",
+        "memories_created", "pending_candidates_buffered", "pending_candidates_promoted",
+        "attempts", "max_attempts", "queue_name", "plan_tier", "error", "error_type",
+        "queued_at", "created_at", "processing_started_at", "started_at", "completed_at",
+        "dead_lettered_at", "extraction_metadata",
+    )
+    snapshot = {field: payload[field] for field in fields if field in payload}
+    stored_memories = list(payload.get("stored_memories") or [])
+    if stored_memories:
+        snapshot["result_memory_ids"] = [
+            str(memory["id"])
+            for memory in stored_memories
+            if isinstance(memory, dict) and memory.get("id")
+        ]
+    return snapshot
+
+
 def _set_job_status(job_id: str, payload: dict[str, Any]) -> None:
+    snapshot = _job_status_snapshot(payload)
     client = _redis_client()
     breaker = CircuitBreakerRegistry.get_instance().redis_cb
     breaker.call_sync(
         client.set,
         _job_status_key(job_id),
-        json.dumps(payload, default=str),
+        json.dumps(snapshot, default=str),
         ex=JOB_TTL_SECONDS,
         fallback=lambda: on_redis_open(None),
     )
@@ -222,6 +242,40 @@ def _upsert_dead_letter_job(session: Session, *, job: ExtractionJob, error: str,
     dead_letter.error = error
     dead_letter.error_type = error_type
     session.add(dead_letter)
+
+
+def _load_referenced_job_payload(job_id: str) -> dict[str, Any]:
+    """Load the authoritative tenant job after a compact broker dispatch."""
+
+    session_factory = build_extraction_session_factory()
+    session = session_factory()
+    try:
+        job = session.get(ExtractionJob, uuid.UUID(job_id))
+        if job is None:
+            raise ExtractionPipelineError(
+                stage="load_referenced_payload",
+                cause=LookupError("extraction_job_not_found"),
+            )
+        payload = dict(job.payload or {})
+        if not payload:
+            raise ExtractionPipelineError(
+                stage="load_referenced_payload",
+                cause=ValueError("extraction_job_payload_missing"),
+            )
+        payload["job_id"] = str(job.id)
+        return payload
+    finally:
+        session.close()
+
+
+def _compact_task_payload(job_payload: dict[str, Any]) -> dict[str, Any]:
+    if job_payload.get("tenant_id") and job_payload.get("proxy_user_id"):
+        return {
+            "job_id": str(job_payload["job_id"]),
+            "queue_name": job_payload.get("queue_name"),
+            "_payload_reference": "extraction_job",
+        }
+    return job_payload
 
 
 def _set_db_job_processing(*, job_id: str, celery_task_id: str | None) -> int | None:
@@ -1036,16 +1090,24 @@ def run_extraction_pipeline(
         session.close()
 
 
-@shared_task(bind=True, name=EXTRACTION_TASK_NAME, max_retries=3, default_retry_delay=2)
-def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
-    job_id = str(job_payload.get("job_id"))
-    attempts = _set_db_job_processing(job_id=job_id, celery_task_id=self.request.id)
+def _process_extraction_job(
+    job_payload: dict[str, Any],
+    *,
+    celery_task_id: str | None,
+) -> dict[str, Any]:
+    dispatched_payload = dict(job_payload)
+    job_id = str(dispatched_payload.get("job_id"))
+    attempts = _set_db_job_processing(job_id=job_id, celery_task_id=celery_task_id)
     if attempts is None:
         return {
             "job_id": job_id,
             "status": "duplicate_ignored",
             "memories_created": 0,
         }
+    if dispatched_payload.get("_payload_reference") == "extraction_job":
+        job_payload = _load_referenced_job_payload(job_id)
+        if dispatched_payload.get("queue_name"):
+            job_payload["queue_name"] = dispatched_payload["queue_name"]
     _wait_for_development_crash_barrier(job_id=job_id, job_payload=job_payload)
     processing_payload = {
         **job_payload,
@@ -1096,7 +1158,7 @@ def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
         countdown = 60 * attempts
         try:
             process_extraction_job.apply_async(
-                args=[retry_payload],
+                args=[_compact_task_payload(retry_payload)],
                 queue=job_payload.get("queue_name"),
                 countdown=countdown,
             )
@@ -1129,6 +1191,12 @@ def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
         )
         failed_payload["_retain_queue_slot"] = True
         return failed_payload
+
+
+
+@shared_task(bind=True, name=EXTRACTION_TASK_NAME, max_retries=3, default_retry_delay=2)
+def process_extraction_job(self, job_payload: dict[str, Any]) -> dict[str, Any]:
+    return _process_extraction_job(job_payload, celery_task_id=self.request.id)
 
 
 @task_postrun.connect

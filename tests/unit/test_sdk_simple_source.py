@@ -27,9 +27,35 @@ def test_add_request_simple_mode_omits_source() -> None:
     assert payload["external_user_id"] == "user_123"
 
 
+
+def test_conversation_message_preserves_evidence_fields() -> None:
+    occurred_at = datetime(2026, 9, 15, 10, 0, tzinfo=UTC)
+    request = AddRequest(
+        external_user_id="user_123",
+        messages=[
+            ConversationMessage(
+                role="user",
+                content="I prefer one-line diagnoses first.",
+                external_turn_id="chat-884:turn-12",
+                source_kind="direct_user_input",
+                occurred_at=occurred_at,
+            )
+        ],
+    )
+
+    payload = request.model_dump(mode="json", exclude_none=True)
+
+    assert payload["messages"] == [{
+        "role": "user",
+        "content": "I prefer one-line diagnoses first.",
+        "external_turn_id": "chat-884:turn-12",
+        "source_kind": "direct_user_input",
+        "occurred_at": "2026-09-15T10:00:00Z",
+    }]
+
+
 def test_memory_source_for_service_generates_safe_defaults() -> None:
     source = MemorySource.for_service("billing-service")
-
     assert source.service == "billing-service"
     assert source.event_id.startswith("sdk-")
     assert source.observed_at.tzinfo is not None

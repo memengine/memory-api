@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from datetime import UTC
@@ -52,6 +53,64 @@ EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
 DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
 DispatchTask = Callable[[str, list[Any]], Awaitable[Any] | Any]
 LOGGER = logging.getLogger("memoryos.memory_service")
+
+
+def _turn_id_for_job(*, job_id: str, index: int, message: dict[str, Any]) -> str:
+    """Return the durable identifier recorded for a transcript turn."""
+
+    external_turn_id = str(message.get("external_turn_id") or "").strip()
+    if external_turn_id:
+        return f"external:{external_turn_id}"
+    return f"job:{job_id}:turn:{index}"
+
+
+def _prepare_transcript_turns(*, job_id: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve supplied turn IDs and mint retry-stable IDs for legacy callers."""
+
+    prepared: list[dict[str, Any]] = []
+    for index, original in enumerate(messages):
+        message = dict(original)
+        message["turn_id"] = _turn_id_for_job(job_id=job_id, index=index, message=message)
+        # The memory provenance stores this digest rather than duplicating
+        # raw customer text for every cited turn.
+        message["turn_content_sha256"] = hashlib.sha256(
+            str(message.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        prepared.append(message)
+    return prepared
+
+
+def _compact_task_payload(job: dict[str, Any]) -> dict[str, Any]:
+    """Avoid copying committed tenant transcripts through broker messages."""
+
+    if job.get("tenant_id") and job.get("proxy_user_id"):
+        return {
+            "job_id": str(job["job_id"]),
+            "queue_name": job.get("queue_name"),
+            "_payload_reference": "extraction_job",
+        }
+    return job
+
+
+def _job_status_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    """Keep transient status records small and free of transcript content."""
+
+    fields = (
+        "tenant_id", "proxy_user_id", "external_user_id", "job_id", "status",
+        "memories_created", "pending_candidates_buffered", "pending_candidates_promoted",
+        "attempts", "max_attempts", "queue_name", "plan_tier", "error", "error_type",
+        "queued_at", "created_at", "processing_started_at", "started_at", "completed_at",
+        "dead_lettered_at", "extraction_metadata",
+    )
+    snapshot = {field: job[field] for field in fields if field in job}
+    stored_memories = list(job.get("stored_memories") or [])
+    if stored_memories:
+        snapshot["result_memory_ids"] = [
+            str(memory["id"])
+            for memory in stored_memories
+            if isinstance(memory, dict) and memory.get("id")
+        ]
+    return snapshot
 
 
 class MemoryService:
@@ -165,8 +224,9 @@ class MemoryService:
             if cached_job is not None:
                 return cached_job
 
+        job_id = str(uuid.uuid4())
         job = {
-            "job_id": str(uuid.uuid4()),
+            "job_id": job_id,
             "status": "queued",
             "memories_created": 0,
             "proxy_user_id": resolved_proxy_user_id,
@@ -174,7 +234,7 @@ class MemoryService:
             "external_user_id": external_user_id,
             "agent_id": agent_id,
             "message_count": len(messages),
-            "messages": messages,
+            "messages": _prepare_transcript_turns(job_id=job_id, messages=messages),
             "metadata": metadata,
             "queued_at": datetime.now(UTC).isoformat(),
         }
@@ -256,11 +316,11 @@ class MemoryService:
                     job_id=job["job_id"],
                 )
             return persisted_job
-        await self.cache_service.set_job_status(job["job_id"], job, ttl=3600)
+        await self.cache_service.set_job_status(job["job_id"], _job_status_snapshot(job), ttl=3600)
         if idempotency_key:
             await self.cache_service.set_idempotent_response(
                 idempotency_key,
-                job,
+                _job_status_snapshot(job),
                 ttl=86400,
                 scope=idempotency_scope,
                 operation="memory_add",
@@ -281,7 +341,7 @@ class MemoryService:
                     queue_name=str(job["queue_name"]),
                     job_id=job["job_id"],
                 )
-            await self.cache_service.set_job_status(job["job_id"], job, ttl=3600)
+            await self.cache_service.set_job_status(job["job_id"], _job_status_snapshot(job), ttl=3600)
         return job
 
     async def list_memories(
@@ -861,7 +921,7 @@ class MemoryService:
             dispatched = await asyncio.to_thread(
                 self.dispatch_task,
                 EXTRACTION_TASK_NAME,
-                args=[job],
+                args=[_compact_task_payload(job)],
                 queue=queue_name,
             )
             if dispatched is not None and hasattr(dispatched, "__await__"):

@@ -40,3 +40,9 @@ def test_celery_app_registers_decay_schedule() -> None:
     assert watchdog_schedule["task"] == WATCHDOG_TASK_NAME
     assert app.conf.task_default_queue == "celery"
     assert app.conf.task_routes[REEMBED_TASK_NAME]["queue"] == "reembedding"
+    assert app.conf.worker_prefetch_multiplier == 1
+    extraction = app.conf.task_annotations["api.tasks.extraction_tasks.process_extraction_job"]
+    assert extraction["acks_late"] is True
+    assert extraction["reject_on_worker_lost"] is True
+    assert extraction["soft_time_limit"] == 105
+    assert extraction["time_limit"] == 120
