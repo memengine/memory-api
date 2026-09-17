@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from api.errors import APIError
 from api.services.memory_service import MemoryService
+from api.services.proposal_window_service import ProposalWindowService
 
 
 @pytest.mark.asyncio
@@ -58,8 +60,8 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
                         id, tenant_id, proxy_user_id, extraction_job_id, conversation_scope_id,
                         turn_id, role, source_kind, content_sha256
                     ) VALUES (
-                        :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:chat-26b',
-                        'external:turn-1', 'assistant', 'assistant_output', :content_sha256
+                        :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:raw-chat',
+                        'external:raw-turn-1', 'assistant', 'assistant_output', :content_sha256
                     )
                 """),
                 {
@@ -74,10 +76,12 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
                 text("""
                     INSERT INTO memory_proposals (
                         id, tenant_id, proxy_user_id, extraction_job_id, conversation_scope_id,
-                        assistant_turn_id, assistant_content_sha256, status, expires_at
+                        proposal_group_id, proposal_ordinal, assistant_turn_id,
+                        assistant_content_sha256, status, expires_at
                     ) VALUES (
-                        :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:chat-26b',
-                        'external:turn-1', :content_sha256, 'active', NOW() + INTERVAL '1 hour'
+                        :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:raw-chat',
+                        'seed-group', 1, 'external:raw-turn-1', :content_sha256,
+                        'active', NOW() + INTERVAL '1 hour'
                     )
                 """),
                 {
@@ -97,8 +101,8 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
                             id, tenant_id, proxy_user_id, extraction_job_id, conversation_scope_id,
                             turn_id, role, content_sha256
                         ) VALUES (
-                            :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:chat-26b',
-                            'external:turn-1', 'assistant', :content_sha256
+                            :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:raw-chat',
+                            'external:raw-turn-1', 'assistant', :content_sha256
                         )
                     """),
                     {
@@ -116,10 +120,12 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
                     text("""
                         INSERT INTO memory_proposals (
                             id, tenant_id, proxy_user_id, extraction_job_id, conversation_scope_id,
-                            assistant_turn_id, assistant_content_sha256, status, expires_at
+                            proposal_group_id, proposal_ordinal, assistant_turn_id,
+                            assistant_content_sha256, status, expires_at
                         ) VALUES (
-                            :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:chat-26b',
-                            'external:turn-1', :content_sha256, 'active', NOW() + INTERVAL '1 hour'
+                            :id, :tenant_id, :proxy_user_id, :extraction_job_id, 'external:raw-chat',
+                            'different-group', 1, 'external:raw-turn-1', :content_sha256,
+                            'active', NOW() + INTERVAL '1 hour'
                         )
                     """),
                     {
@@ -161,6 +167,53 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
                 {"id": uuid.UUID(job["job_id"])},
             )).scalar_one()
             assert payload["proposal_ids"] == result["proposal_ids"]
+            next_job_id = uuid.uuid4()
+            next_job = {
+                **job,
+                "job_id": str(next_job_id),
+                "messages": [
+                    {
+                        **job["messages"][0],
+                        "turn_id": "external:turn-2",
+                        "content": "first choice",
+                        "turn_content_sha256": hashlib.sha256(b"first choice").hexdigest(),
+                    },
+                    {
+                        **job["messages"][0],
+                        "turn_id": "external:turn-3",
+                        "content": "second choice",
+                        "turn_content_sha256": hashlib.sha256(b"second choice").hexdigest(),
+                    },
+                ],
+            }
+            next_result, _ = await service._create_extraction_job(next_job)
+            assert len(next_result["proposal_ids"]) == 2
+            windows = ProposalWindowService(session)
+            active = await windows.active_group(
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                conversation_scope_id="external:chat-26b",
+            )
+            assert [item.ordinal for item in active] == [1, 2]
+            target = await windows.resolve_explicit_target(
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                conversation_scope_id="external:chat-26b",
+                ordinal=2,
+            )
+            assert target.tenant_id == tenant_id
+            assert target.proxy_user_id == proxy_user_id
+            assert target.conversation_scope_id == "external:chat-26b"
+            await windows.mark_resolved(target=target, status="accepted")
+            with pytest.raises(APIError) as already_resolved:
+                await windows.mark_resolved(target=target, status="accepted")
+            assert already_resolved.value.error == "proposal_already_resolved"
+            await session.commit()
+            assert await windows.active_group(
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                conversation_scope_id="external:chat-26b",
+            ) == []
             service = MemoryService(
                 session=session, cache_service=MagicMock(),
                 qdrant_service=MagicMock(), quota_manager=MagicMock(),
@@ -177,6 +230,12 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
             other_chat = {**job, "job_id": str(uuid.uuid4()), "external_conversation_id": "other-chat"}
             other_result, _ = await service._create_extraction_job(other_chat)
             assert other_result["proposal_ids"] != result["proposal_ids"]
+            assert await windows.active_group(
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                conversation_scope_id="external:other-chat",
+                now=datetime.now(UTC) + timedelta(hours=2),
+            ) == []
             other_user = uuid.uuid4()
             await session.execute(text(
                 "INSERT INTO proxy_users (id, tenant_id, external_user_id, external_user_id_hash) "

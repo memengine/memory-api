@@ -23,6 +23,7 @@ def test_evidence_and_proposal_models_have_scope_integrity_constraints() -> None
 
     assert "uq_conversation_evidence_turn_scope" in evidence_constraints
     assert "uq_memory_proposals_assistant_turn" in proposal_constraints
+    assert "uq_memory_proposals_group_ordinal" in proposal_constraints
     assert "ck_memory_proposals_status" in proposal_constraints
     assert "ix_conversation_evidence_turns_scope_created" in evidence_indexes
     assert "ix_memory_proposals_active_scope" in proposal_indexes

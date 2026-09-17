@@ -84,6 +84,23 @@ jobs:
           LLM_PROVIDER_ORDER: openai,gemini
         run: pytest tests/unit/ -v --tb=short
 
+      - name: Run pre-Phase 3A integration gates
+        env:
+          DATABASE_URL: postgresql+asyncpg://memoryos:testpassword@localhost:5432/memoryos_test
+          REDIS_URL: redis://localhost:6379/15
+          PHASE26B_TEST_REDIS_URL: redis://localhost:6379/15
+          ADMIN_SECRET: test-secret-32-chars-minimum-xx
+          SECRET_KEY: ci-secret-key
+          OPENAI_API_KEY: test-key-for-unit-tests
+          GEMINI_API_KEY: test-key-for-unit-tests
+          LLM_PROVIDER_ORDER: openai,gemini
+        run: >-
+          pytest
+          tests/integration/test_phase26b_evidence_ledger_postgres.py
+          tests/integration/test_phase26b_provider_leases.py
+          tests/integration/test_phase26b_queue_capacity_redis.py
+          -v --tb=short
+
       - name: Run blocking FAST benchmark regression gate
         env:
           DATABASE_URL: postgresql+asyncpg://memoryos:testpassword@localhost:5432/memoryos_test

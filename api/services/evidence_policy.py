@@ -49,6 +49,8 @@ def validate_conversational_evidence(
     evidence_turns: Any,
     evidence_relation: Any,
     proposal_turn: Any,
+    visible_turn_indexes: set[int] | None = None,
+    proposal_confirmation_enabled: bool = False,
 ) -> EvidenceDecision:
     """Verify model citations against typed roles, ordering, and proposal scope."""
 
@@ -67,6 +69,8 @@ def validate_conversational_evidence(
     )
     if len(indexes) != len(evidence_turns):
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "invalid_evidence_turn")
+    if visible_turn_indexes is not None and any(index not in visible_turn_indexes for index in indexes):
+        return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "evidence_not_visible_to_model")
 
     user_indexes = tuple(
         index
@@ -87,12 +91,18 @@ def validate_conversational_evidence(
         )
     if relation != "user_confirmed_assistant_proposal":
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "unsupported_relation")
+    if not proposal_confirmation_enabled:
+        return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "semantic_confirmation_not_enabled")
     if not isinstance(proposal_turn, int) or isinstance(proposal_turn, bool):
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "missing_proposal_turn")
     if proposal_turn not in indexes or not 0 <= proposal_turn < len(messages):
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "uncited_proposal_turn")
     if _canonical_role(messages[proposal_turn]) != "assistant":
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "proposal_not_assistant")
+    if _source_kind(messages[proposal_turn]) != "assistant_output":
+        return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "proposal_not_assistant_output")
+    if not bool(messages[proposal_turn].get("is_memory_proposal")):
+        return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "proposal_not_registered")
     if any(user_index <= proposal_turn for user_index in user_indexes):
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "confirmation_precedes_proposal")
     if max(user_indexes) - proposal_turn > 12:

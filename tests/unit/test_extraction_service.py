@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from api.services.extraction_service import ExtractionError, ExtractionService
+from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.services.llm_service import LLMResponse
 
 
@@ -223,6 +224,34 @@ def test_single_oversized_turn_is_hard_token_bounded(tmp_path: Path) -> None:
 
     assert conversation.startswith("[turn 0][user]:")
     assert service._count_tokens(conversation) <= 5_000
+
+
+@pytest.mark.asyncio
+async def test_primary_input_has_strict_total_budget_and_truthful_visible_turns(tmp_path: Path) -> None:
+    llm = FakeLLMService('{"memories":[],"nothing_to_extract":true}')
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+    oversized = "durable detail " * 6_000
+
+    result = await service.extract(
+        messages=[
+            {"role": "user", "source_kind": "direct_user_input", "content": oversized},
+            {"role": "user", "source_kind": "direct_user_input", "content": "I prefer Python examples."},
+        ],
+        proxy_user_id="proxy-budget",
+        tenant_id="tenant-budget",
+        job_id="job-budget",
+        existing_memories=[
+            SimpleNamespace(content="context " * 500, category="fact", importance_score=10)
+        ],
+    )
+
+    primary_call = llm.calls[-1]
+    assert service._count_tokens(str(primary_call["system_prompt"])) + service._count_tokens(
+        str(primary_call["user_message"])
+    ) <= 10_000
+    assert "[source direct_user_input]" in str(primary_call["user_message"])
+    assert result.extraction_metadata["prompt_context"]["primary_input_tokens"] <= 10_000
+    assert result.extraction_metadata["prompt_context"]["visible_turn_count"] == 1
 
 
 def test_composition_hints_are_token_bounded(tmp_path: Path) -> None:
@@ -495,7 +524,7 @@ async def test_regular_chat_keeps_explicit_user_preference(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_regular_chat_keeps_assistant_proposal_confirmed_by_user(tmp_path: Path) -> None:
+async def test_regular_chat_does_not_promote_assistant_confirmation_before_phase3a(tmp_path: Path) -> None:
     llm = FakeLLMService(
         json.dumps(
             {
@@ -520,7 +549,12 @@ async def test_regular_chat_keeps_assistant_proposal_confirmed_by_user(tmp_path:
     result = await service.extract(
         messages=[
             {"role": "user", "content": "Help me choose a response style."},
-            {"role": "assistant", "content": "Would you prefer concise step-by-step explanations?"},
+            {
+                "role": "assistant",
+                "content": "Would you prefer concise step-by-step explanations?",
+                "source_kind": "assistant_output",
+                "is_memory_proposal": True,
+            },
             {"role": "user", "content": "Exactly. Please remember that."},
         ],
         proxy_user_id="proxy-1",
@@ -528,7 +562,66 @@ async def test_regular_chat_keeps_assistant_proposal_confirmed_by_user(tmp_path:
         job_id="job-user-confirmation",
     )
 
-    assert result.memories_extracted == 1
+    assert result.memories_extracted == 0
+    assert result.memories_filtered == 1
+
+
+def test_ineligible_tool_text_cannot_support_direct_user_memory(tmp_path: Path) -> None:
+    candidate = PendingExtractedMemory(
+        content="User prefers Python examples",
+        category="preference",
+        importance_score=7,
+        confidence=0.9,
+        reasoning="synthetic policy test",
+    )
+    evidence = ExtractionService._validated_user_evidence(
+        candidate,
+        [
+            {"role": "user", "source_kind": "direct_user_input", "content": "Hello there."},
+            {"role": "user", "source_kind": "tool_output", "content": "User prefers Python examples."},
+        ],
+        [0, 1],
+        "direct_user_statement",
+    )
+    assert evidence == {}
+
+
+def test_model_cannot_promote_rejected_document_proposal(tmp_path: Path) -> None:
+    candidate = PendingExtractedMemory(
+        content="User prefers Python examples",
+        category="preference",
+        importance_score=7,
+        confidence=0.9,
+        reasoning="synthetic policy test",
+    )
+    evidence = ExtractionService._validated_user_evidence(
+        candidate,
+        [
+            {"role": "assistant", "source_kind": "fetched_document", "content": "User prefers Python examples."},
+            {"role": "user", "source_kind": "direct_user_input", "content": "No, that is wrong."},
+        ],
+        [0, 1],
+        "user_confirmed_assistant_proposal",
+        0,
+    )
+    assert evidence == {}
+
+
+def test_evidence_outside_visible_prompt_is_rejected(tmp_path: Path) -> None:
+    candidate = PendingExtractedMemory(
+        content="User prefers Python examples",
+        category="preference",
+        importance_score=7,
+        confidence=0.9,
+        reasoning="synthetic policy test",
+    )
+    assert ExtractionService._validated_user_evidence(
+        candidate,
+        [{"role": "user", "content": "I prefer Python examples."}],
+        [0],
+        "direct_user_statement",
+        visible_turn_indexes=set(),
+    ) == {}
 
 
 def test_regular_chat_prompt_does_not_enable_service_event_mode(tmp_path: Path) -> None:

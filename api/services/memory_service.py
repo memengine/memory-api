@@ -733,6 +733,38 @@ class MemoryService:
         job_uuid = uuid.UUID(str(job["job_id"]))
         scope_id = self._conversation_scope_id(job)
         proposal_ids: list[str] = []
+        proposal_messages = [
+            message for message in list(job.get("messages") or [])
+            if bool(message.get("is_memory_proposal"))
+        ]
+        if proposal_messages:
+            # Serialize proposal-window replacement for this user. Without the
+            # row lock, two concurrent jobs can each supersede the old group
+            # and then both insert a new active group.
+            locked_proxy_user = (
+                await self.session.execute(
+                    select(ProxyUser.id)
+                    .where(
+                        ProxyUser.id == proxy_uuid,
+                        ProxyUser.tenant_id == tenant_uuid,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if locked_proxy_user is None:
+                raise APIError(status_code=404, code="USR_404", error="proxy_user_not_found")
+            await self.session.execute(
+                update(MemoryProposal)
+                .where(
+                    MemoryProposal.tenant_id == tenant_uuid,
+                    MemoryProposal.proxy_user_id == proxy_uuid,
+                    MemoryProposal.conversation_scope_id == scope_id,
+                    MemoryProposal.status == "active",
+                    MemoryProposal.extraction_job_id != job_uuid,
+                )
+                .values(status="superseded", resolved_at=datetime.now(UTC))
+            )
+        proposal_ordinal = 0
         for message in list(job.get("messages") or []):
             turn_id = str(message.get("turn_id") or "").strip()
             content_sha256 = str(message.get("turn_content_sha256") or "").strip()
@@ -782,6 +814,7 @@ class MemoryService:
 
             if not bool(message.get("is_memory_proposal")):
                 continue
+            proposal_ordinal += 1
             if role != "assistant" or source_kind != "assistant_output":
                 raise APIError(status_code=400, code="PROP_400", error="invalid_memory_proposal")
             proposal_values = {
@@ -789,6 +822,8 @@ class MemoryService:
                 "proxy_user_id": proxy_uuid,
                 "extraction_job_id": job_uuid,
                 "conversation_scope_id": scope_id,
+                "proposal_group_id": str(job_uuid),
+                "proposal_ordinal": proposal_ordinal,
                 "assistant_turn_id": turn_id,
                 "assistant_content_sha256": content_sha256,
                 "status": "active",
@@ -817,6 +852,16 @@ class MemoryService:
                         status_code=409,
                         code="PROP_409",
                         error="proposal_turn_payload_mismatch",
+                        details={"turn_id": turn_id},
+                    )
+                if (
+                    existing_proposal.proposal_group_id != str(job_uuid)
+                    or existing_proposal.proposal_ordinal != proposal_ordinal
+                ):
+                    raise APIError(
+                        status_code=409,
+                        code="PROP_409",
+                        error="proposal_order_mismatch",
                         details={"turn_id": turn_id},
                     )
                 proposal_id = existing_proposal.id

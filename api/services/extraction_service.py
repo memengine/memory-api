@@ -31,6 +31,7 @@ MAX_CONVERSATION_TOKENS = 5000
 MAX_EXISTING_MEMORIES = 20
 MAX_COMPOSITION_HINT_TOKENS = 800
 MAX_EXISTING_MEMORY_CONTEXT_TOKENS = 1200
+MAX_PRIMARY_INPUT_TOKENS = 10_000
 COMPOSITIONAL_MIN_MESSAGES = 4
 COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
@@ -135,7 +136,7 @@ class ExtractionService:
             {**message, "_turn_index": index}
             for index, message in enumerate(messages)
         ]
-        conversation = self._build_conversation_string(indexed_messages)
+        conversation, visible_turn_indexes = self._build_conversation_context(indexed_messages)
         base_user_message = self._prepend_source_context(conversation, source_context)
         user_message = self._append_existing_memory_context(
             base_user_message,
@@ -194,10 +195,26 @@ class ExtractionService:
             source_context=source_context,
             has_composition_signals=bool(composition_signals),
         )
+        primary_system_tokens = self._count_tokens(primary_system_prompt)
+        user_budget = max(0, MAX_PRIMARY_INPUT_TOKENS - primary_system_tokens)
+        user_message = self._truncate_to_token_budget(user_message, user_budget)
+        # Optional context is appended after the transcript and can be safely
+        # truncated. A transcript turn is citable only when its complete,
+        # indexed rendering survived the final total-input budget.
+        visible_turn_indexes = {
+            int(message.get("_turn_index", index))
+            for index, message in enumerate(indexed_messages)
+            if self._messages_to_text([message]) in user_message
+        }
         prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(user_message)
         prompt_context_metrics.setdefault("composition_hint_tokens", 0)
         prompt_context_metrics["composition_hint_budget_tokens"] = MAX_COMPOSITION_HINT_TOKENS
-        prompt_context_metrics["primary_system_prompt_tokens"] = self._count_tokens(primary_system_prompt)
+        prompt_context_metrics["primary_system_prompt_tokens"] = primary_system_tokens
+        prompt_context_metrics["primary_input_budget_tokens"] = MAX_PRIMARY_INPUT_TOKENS
+        prompt_context_metrics["primary_input_tokens"] = (
+            primary_system_tokens + prompt_context_metrics["primary_user_message_tokens"]
+        )
+        prompt_context_metrics["visible_turn_count"] = len(visible_turn_indexes)
         primary_started = time.perf_counter()
         response = await self.llm_service.complete(
             system_prompt=primary_system_prompt,
@@ -213,6 +230,7 @@ class ExtractionService:
         kept, pending, filtered_count, nothing_to_extract = self._parse_and_validate_response(
             response.content,
             messages=indexed_messages,
+            visible_turn_indexes=visible_turn_indexes,
             source_context=source_context,
             evidence_context={
                 "provider": response.provider_used,
@@ -561,22 +579,29 @@ class ExtractionService:
             f"{conversation}"
         )
 
-    def _build_conversation_string(self, messages: list[dict[str, Any]]) -> str:
+    def _build_conversation_context(self, messages: list[dict[str, Any]]) -> tuple[str, set[int]]:
         retained: list[dict[str, Any]] = []
         for message in reversed(messages):
-            retained.insert(0, message)
-            if len(retained) >= 6 and self._count_tokens(self._messages_to_text(retained)) > MAX_CONVERSATION_TOKENS:
-                retained.pop(0)
+            candidate = [message, *retained]
+            if self._count_tokens(self._messages_to_text(candidate)) > MAX_CONVERSATION_TOKENS:
+                if retained:
+                    break
+                continue
+            retained = candidate
+            if self._count_tokens(self._messages_to_text(retained)) >= MAX_CONVERSATION_TOKENS:
                 break
 
-        if not retained:
-            retained = messages[-6:]
-
         text = self._messages_to_text(retained)
-        while retained and len(retained) > 6 and self._count_tokens(text) > MAX_CONVERSATION_TOKENS:
-            retained.pop(0)
-            text = self._messages_to_text(retained)
-        return self._truncate_to_token_budget(text, MAX_CONVERSATION_TOKENS)
+        visible = {int(message.get("_turn_index", index)) for index, message in enumerate(retained)}
+        if not text and messages:
+            text = self._truncate_to_token_budget(
+                self._messages_to_text([messages[-1]]),
+                MAX_CONVERSATION_TOKENS,
+            )
+        return text, visible
+
+    def _build_conversation_string(self, messages: list[dict[str, Any]]) -> str:
+        return self._build_conversation_context(messages)[0]
 
     def _append_existing_memory_context(self, conversation: str, existing_memories: list[Any]) -> str:
         if not existing_memories:
@@ -646,6 +671,7 @@ class ExtractionService:
         raw_content: str,
         *,
         messages: list[dict[str, Any]] | None = None,
+        visible_turn_indexes: set[int] | None = None,
         source_context: dict[str, Any] | None = None,
         evidence_context: dict[str, Any] | None = None,
     ) -> tuple[list[ExtractedMemory], list[PendingExtractedMemory], int, bool]:
@@ -681,6 +707,7 @@ class ExtractionService:
                     raw_memory.get("evidence_relation") if isinstance(raw_memory, dict) else None,
                     raw_memory.get("proposal_turn") if isinstance(raw_memory, dict) else None,
                     evidence_context=evidence_context,
+                    visible_turn_indexes=visible_turn_indexes,
                 )
                 if not validated_evidence:
                     invalid_count += 1
@@ -731,6 +758,7 @@ class ExtractionService:
         proposal_turn: Any = None,
         *,
         evidence_context: dict[str, Any] | None = None,
+        visible_turn_indexes: set[int] | None = None,
     ) -> dict[str, Any]:
         """Require conversational memories to be grounded in a user's own turn.
 
@@ -749,11 +777,16 @@ class ExtractionService:
             evidence_turns=policy_evidence_turns,
             evidence_relation=evidence_relation,
             proposal_turn=proposal_turn,
+            visible_turn_indexes=visible_turn_indexes,
         )
         if not policy.accepted:
             return {}
 
-        indexed_messages = list(enumerate(messages))
+        indexed_messages = [
+            (index, message)
+            for index, message in enumerate(messages)
+            if visible_turn_indexes is None or index in visible_turn_indexes
+        ]
         evidence_was_provided = isinstance(evidence_turns, list)
         cited_indexes = cls._valid_evidence_indexes(evidence_turns, len(messages))
         if evidence_was_provided and not cited_indexes:
@@ -761,11 +794,11 @@ class ExtractionService:
         if cited_indexes:
             indexed_messages = [item for item in indexed_messages if item[0] in cited_indexes]
 
+        eligible_user_indexes = set(policy.user_turn_indexes)
         user_turns = [
             (index, str(message.get("content") or "").strip())
             for index, message in indexed_messages
-            if str(message.get("role") or "user").strip().lower() == "user"
-            and str(message.get("content") or "").strip()
+            if index in eligible_user_indexes and str(message.get("content") or "").strip()
         ]
         candidate_tokens = cls._significant_tokens(candidate.content)
         if policy.proposal_turn_index is not None:
@@ -830,18 +863,6 @@ class ExtractionService:
         }
 
     @staticmethod
-    def _is_affirmative_confirmation(content: str) -> bool:
-        normalized = re.sub(r"[^a-z0-9\s']", " ", content.lower())
-        normalized = " ".join(normalized.split())
-        return bool(
-            re.fullmatch(
-                r"(?:yes|correct|exactly|that's right|that is right|sounds right)"
-                r"(?: please)?(?: remember (?:this|that))?",
-                normalized,
-            )
-        ) or normalized == "please remember that"
-
-    @staticmethod
     def _is_question_only(content: str) -> bool:
         normalized = " ".join(content.lower().split())
         if normalized.endswith("?"):
@@ -873,27 +894,6 @@ class ExtractionService:
             "would ",
         )
         return normalized.startswith(question_starts)
-
-    @classmethod
-    def _confirmation_supports_candidate(
-        cls,
-        user_index: int,
-        messages: list[dict[str, Any]],
-        candidate_tokens: set[str],
-        cited_indexes: set[int],
-    ) -> bool:
-        for index in range(user_index - 1, -1, -1):
-            message = messages[index]
-            role = str(message.get("role") or "user").strip().lower()
-            content = str(message.get("content") or "").strip()
-            if role == "user":
-                break
-            if role != "assistant" or not content:
-                continue
-            if cited_indexes and index not in cited_indexes:
-                continue
-            return bool(candidate_tokens & cls._significant_tokens(content))
-        return False
 
     @staticmethod
     def _significant_tokens(text: str) -> set[str]:
@@ -1021,7 +1021,9 @@ class ExtractionService:
             content = str(message.get("content") or "").strip()
             if content:
                 turn_index = message.get("_turn_index", fallback_index)
-                lines.append(f"[turn {turn_index}][{role}]: {content}")
+                source_kind = str(message.get("source_kind") or "").strip().lower()
+                source_label = f"[source {source_kind}]" if source_kind else ""
+                lines.append(f"[turn {turn_index}][{role}]{source_label}: {content}")
         return "\n".join(lines)
 
     @staticmethod

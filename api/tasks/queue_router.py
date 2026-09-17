@@ -23,12 +23,49 @@ from api.services.webhook_event_service import WEBHOOK_EVENT_TASK_NAME
 
 
 PLAN_CACHE_TTL_SECONDS = 300
+QUEUE_RESERVATION_TTL_SECONDS = 14_400
 QUEUE_DEPTH_CACHE_TTL_SECONDS = 15
 FREE_QUEUE = "free-extraction"
 STARTER_QUEUE = "starter-extraction"
 GROWTH_QUEUE = "growth-extraction"
 SCALE_QUEUE = "scale-extraction"
 ENTERPRISE_QUEUE = "enterprise-extraction"
+
+RESERVE_EXTRACTION_SLOT_SCRIPT = """
+if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
+  return 2
+end
+redis.call('HINCRBY', KEYS[4], 'attempted', 1)
+redis.call('EXPIRE', KEYS[4], 172800)
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local limit = tonumber(ARGV[3])
+if current >= limit then
+  redis.call('HINCRBY', KEYS[4], 'full', 1)
+  return 0
+end
+redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+redis.call('ZADD', KEYS[2], ARGV[5], ARGV[1])
+redis.call('EXPIRE', KEYS[2], ARGV[4])
+redis.call('HINCRBY', KEYS[3], ARGV[2], 1)
+redis.call('EXPIRE', KEYS[3], ARGV[4])
+return 1
+"""
+
+RELEASE_EXTRACTION_SLOT_SCRIPT = """
+if redis.call('ZREM', KEYS[2], ARGV[1]) == 0 then
+  return 0
+end
+local depth = redis.call('DECR', KEYS[1])
+if depth <= 0 then
+  redis.call('DEL', KEYS[1])
+end
+local tenant_depth = redis.call('HINCRBY', KEYS[3], ARGV[2], -1)
+if tenant_depth <= 0 then
+  redis.call('HDEL', KEYS[3], ARGV[2])
+end
+return 1
+"""
 BACKGROUND_QUEUE = "celery"
 REEMBEDDING_QUEUE = "reembedding"
 DEAD_LETTER_QUEUE = "dead-letter"
@@ -108,6 +145,11 @@ def _queue_tenant_breakdown_key(queue_name: str) -> str:
     return f"queue_depth:{queue_name}:tenant_breakdown"
 
 
+def _queue_admission_metrics_key(queue_name: str) -> str:
+    utc_day = time.strftime("%Y%m%d", time.gmtime())
+    return f"queue_admission:{queue_name}:{utc_day}"
+
+
 def _queue_job_member(*, tenant_id: str, job_id: str) -> str:
     return f"{tenant_id}:{job_id}"
 
@@ -133,57 +175,51 @@ class QueueRouter:
         depth_key = _tenant_queue_depth_key(tenant_id, queue_name)
         jobs_key = _queue_jobs_key(queue_name)
         tenant_breakdown_key = _queue_tenant_breakdown_key(queue_name)
+        admission_metrics_key = _queue_admission_metrics_key(queue_name)
         member = _queue_job_member(tenant_id=tenant_id, job_id=job_id)
         now_score = float(time.time())
 
-        pipe = self.cache_service.client.pipeline()
-        while True:
-            try:
-                await pipe.watch(depth_key)
-                current_depth_raw = await pipe.get(depth_key)
-                current_depth = int(current_depth_raw or 0)
-                if current_depth >= queue_limit:
-                    await pipe.reset()
-                    return None
-                pipe.multi()
-                pipe.incr(depth_key)
-                pipe.expire(depth_key, PLAN_CACHE_TTL_SECONDS * 2)
-                pipe.zadd(jobs_key, {member: now_score})
-                pipe.expire(jobs_key, PLAN_CACHE_TTL_SECONDS * 2)
-                pipe.hincrby(tenant_breakdown_key, tenant_id, 1)
-                pipe.expire(tenant_breakdown_key, PLAN_CACHE_TTL_SECONDS * 2)
-                await pipe.execute()
-                return QueueReservation(
-                    tenant_id=tenant_id,
-                    queue_name=queue_name,
-                    plan_tier=plan_tier,
-                    queue_limit=queue_limit,
-                )
-            except Exception:
-                try:
-                    await pipe.reset()
-                except Exception:
-                    pass
-                # A non-atomic increment fallback can admit jobs beyond the
-                # tenant cap under concurrent load. Fail closed instead; the
-                # caller can retry without exceeding the tenant limit.
-                return None
+        try:
+            result = await self.cache_service.client.eval(
+                RESERVE_EXTRACTION_SLOT_SCRIPT,
+                4,
+                depth_key,
+                jobs_key,
+                tenant_breakdown_key,
+                admission_metrics_key,
+                member,
+                tenant_id,
+                queue_limit,
+                QUEUE_RESERVATION_TTL_SECONDS,
+                now_score,
+            )
+        except Exception:
+            # Never replace the atomic operation with a non-atomic fallback.
+            return None
+        if int(result or 0) == 0:
+            return None
+        return QueueReservation(
+            tenant_id=tenant_id,
+            queue_name=queue_name,
+            plan_tier=plan_tier,
+            queue_limit=queue_limit,
+        )
 
     async def release_extraction_slot(self, *, tenant_id: str, queue_name: str, job_id: str) -> None:
         member = _queue_job_member(tenant_id=tenant_id, job_id=job_id)
+        depth_key = _tenant_queue_depth_key(tenant_id, queue_name)
+        breakdown_key = _queue_tenant_breakdown_key(queue_name)
+        jobs_key = _queue_jobs_key(queue_name)
         try:
-            await self.cache_service.client.decr(_tenant_queue_depth_key(tenant_id, queue_name))
-            current_depth = await self._safe_int_get(_tenant_queue_depth_key(tenant_id, queue_name))
-            if current_depth <= 0:
-                await self.cache_service.client.delete(_tenant_queue_depth_key(tenant_id, queue_name))
-            tenant_depth = await self.cache_service.client.hincrby(
-                _queue_tenant_breakdown_key(queue_name),
+            await self.cache_service.client.eval(
+                RELEASE_EXTRACTION_SLOT_SCRIPT,
+                3,
+                depth_key,
+                jobs_key,
+                breakdown_key,
+                member,
                 tenant_id,
-                -1,
             )
-            if int(tenant_depth) <= 0:
-                await self.cache_service.client.hdel(_queue_tenant_breakdown_key(queue_name), tenant_id)
-            await self.cache_service.client.zrem(_queue_jobs_key(queue_name), member)
         except Exception:
             return None
 
@@ -203,14 +239,29 @@ class QueueRouter:
                 breakdown = await self.cache_service.client.hgetall(_queue_tenant_breakdown_key(queue_name))
             except Exception:
                 breakdown = {}
+            try:
+                admission = await self.cache_service.client.hgetall(
+                    _queue_admission_metrics_key(queue_name)
+                )
+            except Exception:
+                admission = {}
             oldest_age_seconds = None
             if oldest:
                 oldest_score = float(oldest[0][1])
                 oldest_age_seconds = max(0, int(now - oldest_score))
+            admission_attempts = int(admission.get("attempted", 0) or 0)
+            queue_full_count = int(admission.get("full", 0) or 0)
             snapshot[queue_name] = {
                 "length": int(length or 0),
                 "oldest_job_age_seconds": oldest_age_seconds,
                 "tenant_breakdown": {tenant_id: int(count) for tenant_id, count in breakdown.items()},
+                "admission_attempts_utc_day": admission_attempts,
+                "queue_full_utc_day": queue_full_count,
+                "queue_full_rate_pct": (
+                    round((queue_full_count / admission_attempts) * 100, 2)
+                    if admission_attempts
+                    else 0.0
+                ),
             }
         return snapshot
 
@@ -261,13 +312,15 @@ def release_extraction_slot_sync(*, tenant_id: str | None, queue_name: str | Non
     jobs_key = _queue_jobs_key(queue_name)
 
     try:
-        current_depth = client.decr(depth_key)
-        if int(current_depth) <= 0:
-            client.delete(depth_key)
-        tenant_depth = client.hincrby(breakdown_key, tenant_id, -1)
-        if int(tenant_depth) <= 0:
-            client.hdel(breakdown_key, tenant_id)
-        client.zrem(jobs_key, member)
+        client.eval(
+            RELEASE_EXTRACTION_SLOT_SCRIPT,
+            3,
+            depth_key,
+            jobs_key,
+            breakdown_key,
+            member,
+            tenant_id,
+        )
     except Exception:
         return
 

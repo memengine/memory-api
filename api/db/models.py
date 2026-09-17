@@ -2931,6 +2931,10 @@ class MemoryProposal(Base):
             "tenant_id", "proxy_user_id", "conversation_scope_id", "assistant_turn_id",
             name="uq_memory_proposals_assistant_turn",
         ),
+        UniqueConstraint(
+            "tenant_id", "proxy_user_id", "conversation_scope_id", "proposal_group_id", "proposal_ordinal",
+            name="uq_memory_proposals_group_ordinal",
+        ),
         Index(
             "ix_memory_proposals_active_scope",
             "tenant_id", "proxy_user_id", "conversation_scope_id", "status", "expires_at",
@@ -2950,6 +2954,8 @@ class MemoryProposal(Base):
         UUID(as_uuid=True), ForeignKey("extraction_jobs.id", ondelete="CASCADE"), nullable=False
     )
     conversation_scope_id: Mapped[str] = mapped_column(String(320), nullable=False)
+    proposal_group_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    proposal_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     assistant_turn_id: Mapped[str] = mapped_column(String(300), nullable=False)
     assistant_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
