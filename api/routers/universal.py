@@ -23,6 +23,7 @@ from api.dependencies import get_cache_service
 from api.dependencies import get_context_builder
 from api.dependencies import get_qdrant_service
 from api.dependencies import get_quality_gate_service
+from api.errors import APIError
 from api.db.cache import CacheService
 from api.db.models import PermissionGrant
 from api.db.models import UniversalMemory
@@ -285,6 +286,13 @@ async def add_universal_memories(
                 "code": "UAT_002",
                 "request_id": get_request_id(request),
             },
+        )
+
+    if any(message.is_memory_proposal for message in payload.messages):
+        raise APIError(
+            status_code=400,
+            code="PROP_400",
+            error="proposal_tracking_not_supported_for_universal",
         )
 
     idempotency_scope = f"universal:{agent.id}:{user.id}"

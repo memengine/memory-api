@@ -4,11 +4,29 @@ from functools import lru_cache
 
 from pydantic import AliasChoices
 from pydantic import Field
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    @field_validator("llm_provider_concurrency_limits")
+    @classmethod
+    def validate_provider_limits(cls, value: str) -> str:
+        seen: set[str] = set()
+        if not value.strip():
+            return ""
+        for item in value.split(","):
+            name, separator, raw = item.strip().partition("=")
+            name = name.strip().lower()
+            if (
+                not separator or name not in {"openai", "anthropic", "gemini"}
+                or name in seen or not raw.strip().isdigit() or int(raw.strip()) < 1
+            ):
+                raise ValueError("Provider limits must be unique provider=positive_integer entries.")
+            seen.add(name)
+        return value
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -38,6 +56,8 @@ class Settings(BaseSettings):
     anthropic_model: str = Field(default="claude-haiku-4-5-20251001", alias="ANTHROPIC_MODEL")
     anthropic_timeout_seconds: int = Field(default=30, alias="ANTHROPIC_TIMEOUT_SECONDS")
     llm_provider_order: str = Field(default="openai", alias="LLM_PROVIDER_ORDER")
+    llm_provider_concurrency_limits: str = Field(default="", alias="LLM_PROVIDER_CONCURRENCY_LIMITS")
+    llm_provider_slot_ttl_seconds: int = Field(default=120, ge=15, le=900, alias="LLM_PROVIDER_SLOT_TTL_SECONDS")
     local_embedding_endpoint: str = Field(default="", alias="LOCAL_EMBEDDING_ENDPOINT")
     embedding_provider: str = Field(default="openai", alias="EMBEDDING_PROVIDER")
     extraction_model: str = Field(default="", alias="EXTRACTION_MODEL")

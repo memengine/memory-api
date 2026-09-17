@@ -91,9 +91,9 @@ class UniversalMemory:
             "/v1/universal/memories/add",
             json={
                 "messages": [
-                    item.model_dump(mode="json")
+                    item.model_dump(mode="json", exclude_defaults=True)
                     if isinstance(item, ConversationMessage)
-                    else ConversationMessage.model_validate(item).model_dump(mode="json")
+                    else ConversationMessage.model_validate(item).model_dump(mode="json", exclude_defaults=True)
                     for item in messages
                 ],
                 "metadata": metadata or {},

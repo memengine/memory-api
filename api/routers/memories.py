@@ -235,6 +235,7 @@ async def add_memories(
                 budget_remaining_pct=cached_job.get("budget_remaining_pct"),
                 processing_eta_seconds=cached_job.get("processing_eta_seconds"),
                 processing_status=cached_job.get("processing_status") or "normal",
+                proposal_ids=[str(item) for item in cached_job.get("proposal_ids", [])],
                 request_id=get_request_id(request),
                 timestamp=utc_now(),
             )
@@ -339,6 +340,7 @@ async def add_memories(
         ),
         processing_eta_seconds=processing_eta_seconds,
         processing_status=processing_status,
+        proposal_ids=[str(item) for item in job.get("proposal_ids", [])],
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
@@ -749,6 +751,12 @@ async def get_memory_job_status(
             completed_at=datetime.fromisoformat(job["completed_at"]) if job.get("completed_at") else None,
             dead_lettered_at=datetime.fromisoformat(job["dead_lettered_at"]) if job.get("dead_lettered_at") else None,
             extraction_metadata=job.get("extraction_metadata") or {},
+            proposal_ids=[str(item) for item in job.get("proposal_ids", [])],
+            operational_metrics={
+                str(key): int(value)
+                for key, value in (job.get("operational_metrics") or {}).items()
+                if isinstance(value, int | float)
+            },
         ),
         request_id=get_request_id(request),
         timestamp=utc_now(),

@@ -173,6 +173,7 @@ export class UniversalMemoryOS {
       processingStatus: payload.processing_status ?? processingStatusFromHeaders(response.headers),
       circuitStatus: circuitStatusFromHeaders(response.headers),
       nothingToExtract: false,
+      proposalIds: [],
       get wasStored() {
         return payload.status === "queued";
       },

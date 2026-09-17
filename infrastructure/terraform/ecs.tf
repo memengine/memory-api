@@ -183,6 +183,8 @@ locals {
     { name = "CLERK_JWT_AUDIENCES", value = var.clerk_jwt_audiences },
     { name = "MEMORYOS_MCP_CLERK_AUDIENCE", value = var.mcp_clerk_audience },
     { name = "LLM_PROVIDER_ORDER", value = var.llm_provider_order },
+    { name = "LLM_PROVIDER_CONCURRENCY_LIMITS", value = var.llm_provider_concurrency_limits },
+    { name = "LLM_PROVIDER_SLOT_TTL_SECONDS", value = tostring(var.llm_provider_slot_ttl_seconds) },
     { name = "OPENAI_MODEL", value = var.openai_model },
     { name = "OPENAI_TIMEOUT_SECONDS", value = tostring(var.openai_timeout_seconds) },
     { name = "EXTRACTION_MODEL", value = var.extraction_model },

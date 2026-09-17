@@ -172,3 +172,64 @@ async def test_all_providers_failed_reports_tried_providers():
 
     assert exc_info.value.providers_tried == ["gemini", "openai", "anthropic"]
     assert len(exc_info.value.errors) == 3
+
+def test_provider_state_client_has_bounded_network_waits(monkeypatch):
+    from unittest.mock import MagicMock
+    factory = MagicMock()
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/15")
+    monkeypatch.setattr(llm_service_module.redis.Redis, "from_url", factory)
+    get_settings.cache_clear()
+    try:
+        assert llm_service_module._build_state_client() is factory.return_value
+        options = factory.call_args.kwargs
+        assert options["socket_connect_timeout"] == 1.0
+        assert options["socket_timeout"] == 1.0
+    finally:
+        get_settings.cache_clear()
+
+
+class FakeProviderSlotStore:
+    def __init__(self) -> None:
+        self.slots: dict[str, set[str]] = {}
+
+    def eval(self, script: str, _key_count: int, key: str, *args) -> int:
+        slots = self.slots.setdefault(key, set())
+        if "ZADD" in script:
+            limit = int(args[0])
+            if len(slots) >= limit:
+                return 0
+            slots.add(args[2])
+            return 1
+        existed = args[0] in slots
+        slots.discard(args[0])
+        return int(existed)
+
+
+@pytest.mark.asyncio
+async def test_provider_concurrency_slots_are_shared_and_released(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER_CONCURRENCY_LIMITS", "gemini=2")
+    get_settings.cache_clear()
+    service = ScriptedLLMService(
+        {
+            LLMProvider.GEMINI: ['{"ok": true}'],
+            LLMProvider.OPENAI: ['{"unused": true}'],
+            LLMProvider.ANTHROPIC: ['{"unused": true}'],
+        }
+    )
+    store = FakeProviderSlotStore()
+    service._state_client = store
+
+    assert service._provider_concurrency_limit(LLMProvider.GEMINI) == 2
+    assert service._provider_concurrency_limit(LLMProvider.OPENAI) == 0
+    first = await service._acquire_provider_slot(LLMProvider.GEMINI)
+    second = await service._acquire_provider_slot(LLMProvider.GEMINI)
+    assert first and second and first != second
+    assert await service._acquire_provider_slot(LLMProvider.GEMINI) is None
+
+    await service._release_provider_slot(LLMProvider.GEMINI, first)
+
+    replacement = await service._acquire_provider_slot(LLMProvider.GEMINI)
+    assert replacement
+    # A duplicate or expired release must never release another request's slot.
+    await service._release_provider_slot(LLMProvider.GEMINI, first)
+    assert await service._acquire_provider_slot(LLMProvider.GEMINI) is None

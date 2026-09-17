@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -13,6 +14,8 @@ from typing import Any
 
 import httpx
 import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 from api.infra.circuit_breaker import CircuitBreaker
 from api.settings import get_settings
@@ -78,7 +81,13 @@ def _build_state_client() -> redis.Redis | None:
     if not redis_url:
         return None
     try:
-        return redis.Redis.from_url(redis_url, decode_responses=True)
+        return redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+            retry=Retry(NoBackoff(), 0),
+        )
     except Exception:
         return None
 
@@ -116,6 +125,84 @@ class LLMService:
         if require_provider and not self._available_providers and not benchmark_provider_enabled():
             raise RuntimeError("No LLM providers configured. Set at least one provider API key.")
 
+    def _provider_concurrency_limit(self, provider: LLMProvider) -> int:
+        """Return a configured global cap for one provider, or zero when disabled."""
+
+        limits: dict[str, int] = {}
+        for item in str(self.settings.llm_provider_concurrency_limits or "").split(","):
+            name, separator, raw_limit = item.strip().partition("=")
+            if not separator:
+                continue
+            try:
+                parsed = int(raw_limit.strip())
+            except ValueError:
+                continue
+            if parsed > 0:
+                limits[name.strip().lower()] = parsed
+        return limits.get(provider.value, 0)
+
+    async def _acquire_provider_slot(self, provider: LLMProvider) -> str | None:
+        limit = self._provider_concurrency_limit(provider)
+        if limit <= 0:
+            return ""
+        if self._state_client is None:
+            LOGGER.error(
+                "llm_provider_slot_store_unavailable",
+                extra={"event": "llm_provider_slot_store_unavailable", "provider": provider.value},
+            )
+            return None
+        token = uuid.uuid4().hex
+        config = self._config_for(provider)
+        # The lease must outlive the bounded provider call, including cleanup.
+        ttl = max(int(self.settings.llm_provider_slot_ttl_seconds),
+                  (config.timeout_seconds if config else 30) + 15)
+        script = (
+            "local t = redis.call('TIME'); "
+            "local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000); "
+            "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now); "
+            "if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0; end; "
+            "redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]) * 1000, ARGV[3]); "
+            "local latest = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES'); "
+            "redis.call('PEXPIREAT', KEYS[1], math.ceil(tonumber(latest[2]))); "
+            "return 1"
+        )
+        try:
+            acquired = await asyncio.to_thread(
+                self._state_client.eval,
+                script,
+                1,
+                f"llm_provider_leases:v1:{provider.value}",
+                limit,
+                ttl,
+                token,
+            )
+            return token if int(acquired or 0) else None
+        except Exception as exc:
+            LOGGER.error(
+                "llm_provider_slot_acquire_failed",
+                extra={"event": "llm_provider_slot_acquire_failed", "provider": provider.value, "error": str(exc)},
+            )
+            return None
+
+    async def _release_provider_slot(self, provider: LLMProvider, token: str) -> None:
+        if not token or self._state_client is None:
+            return
+        script = (
+            "return redis.call('ZREM', KEYS[1], ARGV[1])"
+        )
+        try:
+            await asyncio.to_thread(
+                self._state_client.eval,
+                script,
+                1,
+                f"llm_provider_leases:v1:{provider.value}",
+                token,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "llm_provider_slot_release_failed",
+                extra={"event": "llm_provider_slot_release_failed", "provider": provider.value, "error": str(exc)},
+            )
     async def complete(
         self,
         system_prompt: str,
@@ -156,16 +243,25 @@ class LLMService:
                 continue
 
             tried.append(provider.value)
+            slot = await self._acquire_provider_slot(provider)
+            if slot is None:
+                errors.append(f"{provider.value}: provider concurrency limit reached")
+                LOGGER.warning(
+                    "llm_provider_concurrency_limited",
+                    extra={"event": "llm_provider_concurrency_limited", "provider": provider.value},
+                )
+                continue
             started = time.perf_counter()
             try:
-                response = await self._call_provider(
-                    provider,
-                    system_prompt,
-                    user_message,
-                    temperature,
-                    max_tokens,
-                    response_format,
-                )
+                async with asyncio.timeout(config.timeout_seconds):
+                    response = await self._call_provider(
+                        provider,
+                        system_prompt,
+                        user_message,
+                        temperature,
+                        max_tokens,
+                        response_format,
+                    )
                 breaker._record_success()
                 LOGGER.info(
                     "llm_call_success",
@@ -208,6 +304,8 @@ class LLMService:
                 )
                 self._available_providers = [candidate for candidate in self._available_providers if candidate != provider]
                 continue
+            finally:
+                await self._release_provider_slot(provider, slot)
 
         raise AllProvidersFailedError(
             "All LLM providers failed or unavailable",

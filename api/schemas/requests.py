@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import model_validator
 
 
 MemoryCategory = Literal[
@@ -37,6 +38,7 @@ class ConversationMessageRequest(BaseModel):
         "client_assertion",
     ] | None = None
     occurred_at: datetime | None = None
+    is_memory_proposal: bool = False
 
     @field_validator("content")
     @classmethod
@@ -45,6 +47,16 @@ class ConversationMessageRequest(BaseModel):
         if not stripped:
             raise ValueError("Message content must not be empty.")
         return stripped
+
+    @model_validator(mode="after")
+    def validate_memory_proposal(self) -> ConversationMessageRequest:
+        if self.is_memory_proposal and (
+            self.role != "assistant" or self.source_kind != "assistant_output"
+        ):
+            raise ValueError(
+                "is_memory_proposal requires an assistant message with source_kind='assistant_output'."
+            )
+        return self
 
 
 class EvidenceReferenceRequest(BaseModel):

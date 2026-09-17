@@ -120,6 +120,7 @@ class MemoryAddResponse(BaseModel):
     budget_remaining_pct: float | None = None
     processing_eta_seconds: int | None = None
     processing_status: Literal["normal", "delayed"] = "normal"
+    proposal_ids: list[str] = Field(default_factory=list)
     request_id: str
     timestamp: datetime
 
@@ -141,6 +142,8 @@ class MemoryJobStatusData(BaseModel):
     completed_at: datetime | None = None
     dead_lettered_at: datetime | None = None
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
+    proposal_ids: list[str] = Field(default_factory=list)
+    operational_metrics: dict[str, int] = Field(default_factory=dict)
 
 
 class MemoryJobStatusResponse(ResponseEnvelope):

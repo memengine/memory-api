@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 MemoryCategory = Literal[
     "preference",
@@ -43,6 +43,15 @@ class ConversationMessage(BaseModel):
     external_turn_id: str | None = Field(default=None, min_length=1, max_length=255)
     source_kind: MessageSourceKind | None = None
     occurred_at: datetime | None = None
+    is_memory_proposal: bool = False
+
+    @model_validator(mode="after")
+    def validate_proposal(self):
+        if self.is_memory_proposal and (
+            self.role != "assistant" or self.source_kind != "assistant_output"
+        ):
+            raise ValueError("Memory proposals require assistant_output from an assistant.")
+        return self
 
     @field_validator("content")
     @classmethod
@@ -99,6 +108,7 @@ class AddRequest(BaseModel):
     messages: list[ConversationMessage] = Field(min_length=1, max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source: MemorySource | None = None
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class AddResult(BaseModel):
@@ -112,6 +122,7 @@ class AddResult(BaseModel):
     processing_status: ProcessingStatus = "normal"
     circuit_status: CircuitStatus = "HEALTHY"
     nothing_to_extract: bool = False
+    proposal_ids: list[str] = Field(default_factory=list)
 
     @property
     def was_stored(self) -> bool:
@@ -121,6 +132,8 @@ class AddResult(BaseModel):
 class MemoryJobStatus(BaseModel):
     job_id: str
     status: str
+    proposal_ids: list[str] = Field(default_factory=list)
+    operational_metrics: dict[str, int] = Field(default_factory=dict)
     memories_created: int = 0
     pending_candidates_buffered: int = 0
     pending_candidates_promoted: int = 0
@@ -377,6 +390,7 @@ class AddEnvelope(EnvelopeBase):
     processing_eta_seconds: int | None = None
     processing_status: ProcessingStatus = "normal"
     nothing_to_extract: bool = False
+    proposal_ids: list[str] = Field(default_factory=list)
 
 
 class MemoryJobStatusEnvelope(EnvelopeBase):

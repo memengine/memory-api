@@ -1,4 +1,4 @@
-﻿export type MemoryCategory =
+export type MemoryCategory =
   | "preference"
   | "fact"
   | "goal"
@@ -30,6 +30,7 @@ export interface ConversationMessage {
   externalTurnId?: string;
   sourceKind?: MessageSourceKind;
   occurredAt?: string;
+  isMemoryProposal?: boolean;
 }
 
 export interface EvidenceReference {
@@ -59,6 +60,7 @@ export interface AddRequest {
   messages: ConversationMessage[];
   metadata?: Record<string, unknown>;
   source?: MemorySource;
+  conversationId?: string;
 }
 
 export interface AddResult {
@@ -72,12 +74,15 @@ export interface AddResult {
   processingStatus: "normal" | "delayed";
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
   nothingToExtract: boolean;
+  proposalIds?: string[];
   readonly wasStored: boolean;
 }
 
 export interface MemoryJobStatus {
   jobId: string;
   status: string;
+  proposalIds?: string[];
+  operationalMetrics?: Record<string, number>;
   memoriesCreated: number;
   pendingCandidatesBuffered: number;
   pendingCandidatesPromoted: number;
@@ -292,12 +297,15 @@ interface AddEnvelope {
   processing_eta_seconds?: number | null;
   processing_status?: "normal" | "delayed";
   nothing_to_extract?: boolean;
+  proposal_ids?: string[];
 }
 
 interface MemoryJobStatusEnvelope {
   data: {
     job_id: string;
     status: string;
+    proposal_ids?: string[];
+    operational_metrics?: Record<string, number>;
     memories_created?: number;
     pending_candidates_buffered?: number;
     pending_candidates_promoted?: number;
@@ -544,12 +552,16 @@ export function toApiConversationMessages(messages: ConversationMessage[]): Arra
     if (externalTurnId && externalTurnId.length > 255) {
       throw new Error("externalTurnId must contain at most 255 characters.");
     }
+    if (message.isMemoryProposal && (message.role !== "assistant" || message.sourceKind !== "assistant_output")) {
+      throw new Error("isMemoryProposal requires an assistant message with sourceKind='assistant_output'.");
+    }
     return {
       role: message.role,
       content,
       ...(externalTurnId ? { external_turn_id: externalTurnId } : {}),
       ...(message.sourceKind ? { source_kind: message.sourceKind } : {}),
       ...(message.occurredAt ? { occurred_at: message.occurredAt } : {}),
+      ...(message.isMemoryProposal ? { is_memory_proposal: true } : {}),
     };
   });
 }
@@ -720,6 +732,7 @@ export class MemoryOS {
     metadata?: Record<string, unknown>,
     source?: MemorySource,
     idempotencyKey?: string,
+    conversationId?: string,
   ): Promise<AddResult> {
     const payload: AddRequest = {
       externalUserId,
@@ -727,6 +740,7 @@ export class MemoryOS {
       ...(agentId ? { agentId } : {}),
       ...(metadata ? { metadata } : {}),
       ...(source ? { source } : {}),
+      ...(conversationId ? { conversationId } : {}),
     };
     const response = await this.requestResponse("POST", "/v1/memories/add", {
       ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
@@ -735,6 +749,7 @@ export class MemoryOS {
         ...(payload.agentId ? { agent_id: payload.agentId } : {}),
         messages: toApiConversationMessages(payload.messages),
         metadata: payload.metadata ?? {},
+        ...(payload.conversationId ? { conversation_id: payload.conversationId } : {}),
         ...(payload.source
           ? {
               source: {
@@ -764,6 +779,7 @@ export class MemoryOS {
       processingStatus: payloadJson.processing_status ?? processingStatusFromHeaders(response.headers),
       circuitStatus: circuitStatusFromHeaders(response.headers),
       nothingToExtract: payloadJson.nothing_to_extract ?? false,
+      proposalIds: payloadJson.proposal_ids ?? [],
       get wasStored() {
         return payloadJson.status === "queued" && !(payloadJson.nothing_to_extract ?? false);
       },
@@ -861,6 +877,8 @@ export class MemoryOS {
     return {
       jobId: data.job_id,
       status: data.status,
+      proposalIds: data.proposal_ids ?? [],
+      operationalMetrics: data.operational_metrics ?? {},
       memoriesCreated: data.memories_created ?? 0,
       pendingCandidatesBuffered: data.pending_candidates_buffered ?? 0,
       pendingCandidatesPromoted: data.pending_candidates_promoted ?? 0,

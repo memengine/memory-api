@@ -60,6 +60,31 @@ _EXTRACTION_SESSION_FACTORY: sessionmaker[Session] | None = None
 _EXTRACTION_SESSION_FACTORY_PID: int | None = None
 
 
+def retry_countdown_seconds(*, job_id: str, attempts: int) -> int:
+    """Bound retries and deterministically spread jobs that fail together."""
+
+    base_seconds = 60 * max(1, attempts)
+    jitter_ceiling = max(1, min(30, base_seconds // 5))
+    digest = hashlib.sha256(f"{job_id}:{attempts}".encode("utf-8")).digest()
+    jitter_seconds = int.from_bytes(digest[:2], "big") % (jitter_ceiling + 1)
+    return base_seconds + jitter_seconds
+
+def queue_wait_ms(job_payload: dict[str, Any], *, started_at: datetime | None = None) -> int:
+    """Measure queueing from the persisted enqueue timestamp, never client time."""
+
+    queued_at = job_payload.get("queued_at")
+    if isinstance(queued_at, str):
+        try:
+            queued_at = datetime.fromisoformat(queued_at.replace("Z", "+00:00"))
+        except ValueError:
+            queued_at = None
+    if not isinstance(queued_at, datetime):
+        return 0
+    if queued_at.tzinfo is None:
+        queued_at = queued_at.replace(tzinfo=UTC)
+    now = started_at or datetime.now(UTC)
+    return max(0, int((now - queued_at).total_seconds() * 1000))
+
 class ExtractionPipelineError(RuntimeError):
     """Safe extraction failure context for logs and durable job diagnostics."""
 
@@ -122,7 +147,7 @@ def _job_status_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "memories_created", "pending_candidates_buffered", "pending_candidates_promoted",
         "attempts", "max_attempts", "queue_name", "plan_tier", "error", "error_type",
         "queued_at", "created_at", "processing_started_at", "started_at", "completed_at",
-        "dead_lettered_at", "extraction_metadata",
+        "dead_lettered_at", "extraction_metadata", "operational_metrics", "proposal_ids",
     )
     snapshot = {field: payload[field] for field in fields if field in payload}
     stored_memories = list(payload.get("stored_memories") or [])
@@ -1109,6 +1134,9 @@ def _process_extraction_job(
         if dispatched_payload.get("queue_name"):
             job_payload["queue_name"] = dispatched_payload["queue_name"]
     _wait_for_development_crash_barrier(job_id=job_id, job_payload=job_payload)
+    operational_metrics = dict(job_payload.get("operational_metrics") or {})
+    operational_metrics["queue_wait_ms"] = queue_wait_ms(job_payload)
+    job_payload = {**job_payload, "operational_metrics": operational_metrics}
     processing_payload = {
         **job_payload,
         "status": "processing",
@@ -1155,7 +1183,7 @@ def _process_extraction_job(
             **job_payload,
             "_retain_queue_slot": True,
         }
-        countdown = 60 * attempts
+        countdown = retry_countdown_seconds(job_id=job_id, attempts=attempts)
         try:
             process_extraction_job.apply_async(
                 args=[_compact_task_payload(retry_payload)],

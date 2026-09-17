@@ -115,12 +115,14 @@ class Memory:
         metadata: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         source: MemorySource | dict[str, Any] | None = None,
+        conversation_id: str | None = None,
     ) -> AddResult:
         payload = AddRequest(
             external_user_id=external_user_id,
             agent_id=agent_id,
             messages=[item if isinstance(item, ConversationMessage) else ConversationMessage.model_validate(item) for item in messages],
             metadata=metadata or {},
+            conversation_id=conversation_id,
             source=(
                 source
                 if isinstance(source, MemorySource)
@@ -132,7 +134,7 @@ class Memory:
         response = self._request_response(
             "POST",
             "/v1/memories/add",
-            json=payload.model_dump(mode="json", exclude_none=True),
+            json=payload.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
             headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
         )
         parsed = AddEnvelope.model_validate(self._parse_json(response))
@@ -147,6 +149,7 @@ class Memory:
             processing_status=self._processing_status_from_response(response, parsed.processing_status),
             circuit_status=self._circuit_status_from_response(response),
             nothing_to_extract=parsed.nothing_to_extract,
+            proposal_ids=parsed.proposal_ids,
         )
 
     def get(

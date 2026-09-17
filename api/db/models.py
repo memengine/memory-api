@@ -2888,6 +2888,77 @@ class ExtractionJob(Base):
     )
 
 
+class ConversationEvidenceTurn(Base):
+    """Immutable identity for a caller-supplied turn, not proof of end-user authorship."""
+
+    __tablename__ = "conversation_evidence_turns"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "proxy_user_id", "conversation_scope_id", "turn_id",
+            name="uq_conversation_evidence_turn_scope",
+        ),
+        Index(
+            "ix_conversation_evidence_turns_scope_created",
+            "tenant_id", "proxy_user_id", "conversation_scope_id", "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("proxy_users.id", ondelete="CASCADE"), nullable=False
+    )
+    extraction_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("extraction_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_scope_id: Mapped[str] = mapped_column(String(320), nullable=False)
+    turn_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_kind: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MemoryProposal(Base):
+    """An explicit assistant proposal that may later receive user consent."""
+
+    __tablename__ = "memory_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "proxy_user_id", "conversation_scope_id", "assistant_turn_id",
+            name="uq_memory_proposals_assistant_turn",
+        ),
+        Index(
+            "ix_memory_proposals_active_scope",
+            "tenant_id", "proxy_user_id", "conversation_scope_id", "status", "expires_at",
+        ),
+        CheckConstraint(
+            "status IN ('active','accepted','cancelled','expired','superseded')",
+            name="ck_memory_proposals_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=UUID_SERVER_DEFAULT)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("proxy_users.id", ondelete="CASCADE"), nullable=False
+    )
+    extraction_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("extraction_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_scope_id: Mapped[str] = mapped_column(String(320), nullable=False)
+    assistant_turn_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    assistant_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 class PendingExtractionCandidate(Base):
     __tablename__ = "pending_extraction_candidates"
     __table_args__ = (

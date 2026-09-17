@@ -16,12 +16,15 @@ from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.cache import CacheService
 from api.db.models import EmbeddingModel
 from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
+from api.db.models import ConversationEvidenceTurn
+from api.db.models import MemoryProposal
 from api.db.models import Memory
 from api.db.models import MemoryClaim
 from api.db.models import MemoryClaimRevision
@@ -100,7 +103,7 @@ def _job_status_snapshot(job: dict[str, Any]) -> dict[str, Any]:
         "memories_created", "pending_candidates_buffered", "pending_candidates_promoted",
         "attempts", "max_attempts", "queue_name", "plan_tier", "error", "error_type",
         "queued_at", "created_at", "processing_started_at", "started_at", "completed_at",
-        "dead_lettered_at", "extraction_metadata",
+        "dead_lettered_at", "extraction_metadata", "operational_metrics", "proposal_ids",
     )
     snapshot = {field: job[field] for field in fields if field in job}
     stored_memories = list(job.get("stored_memories") or [])
@@ -307,7 +310,17 @@ class MemoryService:
                 }
             job["queue_name"] = reservation.queue_name
             job["plan_tier"] = reservation.plan_tier
-        persisted_job, created = await self._create_extraction_job(job)
+        try:
+            persisted_job, created = await self._create_extraction_job(job)
+        except BaseException:
+            await self.session.rollback()
+            if tenant_id and job.get("queue_name"):
+                await self.queue_router.release_extraction_slot(
+                    tenant_id=tenant_id,
+                    queue_name=str(job["queue_name"]),
+                    job_id=job["job_id"],
+                )
+            raise
         if not created:
             if tenant_id and job.get("queue_name"):
                 await self.queue_router.release_extraction_slot(
@@ -681,6 +694,8 @@ class MemoryService:
                 "completed_at": job_row.completed_at.isoformat() if job_row.completed_at else None,
                 "dead_lettered_at": job_row.dead_lettered_at.isoformat() if job_row.dead_lettered_at else None,
                 "extraction_metadata": (job_row.result or {}).get("extraction_metadata") or {},
+                "proposal_ids": [str(item) for item in (job_row.payload or {}).get("proposal_ids", [])],
+                "operational_metrics": (job_row.result or {}).get("operational_metrics") or {},
             }
         cached_job = await self.cache_service.get_job_status(job_id)
         if cached_job is not None:
@@ -688,6 +703,125 @@ class MemoryService:
 
         return {"job_id": job_id, "status": "unknown", "memories_created": 0}
 
+    @staticmethod
+    def _conversation_scope_id(job: dict[str, Any]) -> str:
+        external_id = str(job.get("external_conversation_id") or "").strip()
+        return f"external:{external_id}" if external_id else f"job:{job['job_id']}"
+
+    @staticmethod
+    def _occurred_at(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    async def _persist_evidence_ledger(
+        self,
+        *,
+        job: dict[str, Any],
+        tenant_id: str,
+        proxy_user_id: str,
+    ) -> list[str]:
+        """Persist immutable turn facts and explicitly marked assistant proposals."""
+
+        tenant_uuid = uuid.UUID(str(tenant_id))
+        proxy_uuid = uuid.UUID(str(proxy_user_id))
+        job_uuid = uuid.UUID(str(job["job_id"]))
+        scope_id = self._conversation_scope_id(job)
+        proposal_ids: list[str] = []
+        for message in list(job.get("messages") or []):
+            turn_id = str(message.get("turn_id") or "").strip()
+            content_sha256 = str(message.get("turn_content_sha256") or "").strip()
+            if not turn_id or len(content_sha256) != 64:
+                raise APIError(status_code=400, code="EVID_400", error="invalid_evidence_turn")
+            role = str(message.get("role") or "").lower()
+            source_kind = str(message.get("source_kind") or "").lower() or None
+            turn_values = {
+                "tenant_id": tenant_uuid,
+                "proxy_user_id": proxy_uuid,
+                "extraction_job_id": job_uuid,
+                "conversation_scope_id": scope_id,
+                "turn_id": turn_id,
+                "role": role,
+                "source_kind": source_kind,
+                "content_sha256": content_sha256,
+                "occurred_at": self._occurred_at(message.get("occurred_at")),
+            }
+            inserted_turn = await self.session.execute(
+                pg_insert(ConversationEvidenceTurn)
+                .values(**turn_values)
+                .on_conflict_do_nothing(constraint="uq_conversation_evidence_turn_scope")
+                .returning(ConversationEvidenceTurn.id)
+            )
+            if inserted_turn.scalar_one_or_none() is None:
+                existing_turn = (
+                    await self.session.execute(
+                        select(ConversationEvidenceTurn).where(
+                            ConversationEvidenceTurn.tenant_id == tenant_uuid,
+                            ConversationEvidenceTurn.proxy_user_id == proxy_uuid,
+                            ConversationEvidenceTurn.conversation_scope_id == scope_id,
+                            ConversationEvidenceTurn.turn_id == turn_id,
+                        )
+                    )
+                ).scalar_one()
+                if (
+                    existing_turn.role != role
+                    or existing_turn.source_kind != source_kind
+                    or existing_turn.content_sha256 != content_sha256
+                ):
+                    raise APIError(
+                        status_code=409,
+                        code="EVID_409",
+                        error="evidence_turn_payload_mismatch",
+                        details={"turn_id": turn_id},
+                    )
+
+            if not bool(message.get("is_memory_proposal")):
+                continue
+            if role != "assistant" or source_kind != "assistant_output":
+                raise APIError(status_code=400, code="PROP_400", error="invalid_memory_proposal")
+            proposal_values = {
+                "tenant_id": tenant_uuid,
+                "proxy_user_id": proxy_uuid,
+                "extraction_job_id": job_uuid,
+                "conversation_scope_id": scope_id,
+                "assistant_turn_id": turn_id,
+                "assistant_content_sha256": content_sha256,
+                "status": "active",
+                "expires_at": datetime.now(UTC) + timedelta(hours=1),
+            }
+            inserted_proposal = await self.session.execute(
+                pg_insert(MemoryProposal)
+                .values(**proposal_values)
+                .on_conflict_do_nothing(constraint="uq_memory_proposals_assistant_turn")
+                .returning(MemoryProposal.id)
+            )
+            proposal_id = inserted_proposal.scalar_one_or_none()
+            if proposal_id is None:
+                existing_proposal = (
+                    await self.session.execute(
+                        select(MemoryProposal).where(
+                            MemoryProposal.tenant_id == tenant_uuid,
+                            MemoryProposal.proxy_user_id == proxy_uuid,
+                            MemoryProposal.conversation_scope_id == scope_id,
+                            MemoryProposal.assistant_turn_id == turn_id,
+                        )
+                    )
+                ).scalar_one()
+                if existing_proposal.assistant_content_sha256 != content_sha256:
+                    raise APIError(
+                        status_code=409,
+                        code="PROP_409",
+                        error="proposal_turn_payload_mismatch",
+                        details={"turn_id": turn_id},
+                    )
+                proposal_id = existing_proposal.id
+            proposal_ids.append(str(proposal_id))
+        return proposal_ids
     async def _create_extraction_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         tenant_id = job.get("tenant_id")
         proxy_user_id = job.get("proxy_user_id")
@@ -733,7 +867,7 @@ class MemoryService:
                 status=ExtractionJobStatus.queued,
                 max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
                 queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
-                payload=job,
+                payload=dict(job),
                 payload_envelope=encrypt_json_for_dual_write(
                     tenant_id=str(tenant_id),
                     record_type="extraction-job-payload",
@@ -747,6 +881,21 @@ class MemoryService:
                 ),
             )
             self.session.add(row)
+            await self.session.flush()
+            proposal_ids = await self._persist_evidence_ledger(
+                job=job,
+                tenant_id=str(tenant_id),
+                proxy_user_id=str(proxy_user_id),
+            )
+            if proposal_ids:
+                job["proposal_ids"] = proposal_ids
+                row.payload = dict(job)
+                row.payload_envelope = encrypt_json_for_dual_write(
+                    tenant_id=str(tenant_id),
+                    record_type="extraction-job-payload",
+                    record_id=str(job["job_id"]),
+                    value=job,
+                )
             await self.session.commit()
             return job, True
         except IntegrityError:

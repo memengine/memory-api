@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import pytest
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,30 @@ from memoryos import Memory
 from memoryos import MemorySource
 from memoryos.types import AddRequest
 from memoryos.types import ConversationMessage
+from memoryos.types import MemoryJobStatus
+
+
+def test_proposal_fields_preserve_contract_and_validate_role():
+    request = AddRequest(
+        external_user_id="user-1", conversation_id="chat-1",
+        messages=[ConversationMessage(
+            role="assistant", content="I can remember this.",
+            source_kind="assistant_output", is_memory_proposal=True,
+        )],
+    )
+    payload = request.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    assert payload["conversation_id"] == "chat-1"
+    assert payload["messages"][0]["is_memory_proposal"] is True
+    with pytest.raises(ValueError):
+        ConversationMessage(role="user", content="forged", is_memory_proposal=True)
+    old = MemoryJobStatus(job_id="j", status="queued")
+    assert old.proposal_ids == [] and old.operational_metrics == {}
+    current = MemoryJobStatus(
+        job_id="j", status="completed", proposal_ids=["p"],
+        operational_metrics={"queue_wait_ms": 12},
+    )
+    assert current.proposal_ids == ["p"]
+    assert current.operational_metrics["queue_wait_ms"] == 12
 
 
 def test_add_request_simple_mode_omits_source() -> None:
@@ -43,7 +68,7 @@ def test_conversation_message_preserves_evidence_fields() -> None:
         ],
     )
 
-    payload = request.model_dump(mode="json", exclude_none=True)
+    payload = request.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
 
     assert payload["messages"] == [{
         "role": "user",

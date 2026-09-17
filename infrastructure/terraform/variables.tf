@@ -518,6 +518,18 @@ variable "llm_provider_order" {
   default     = "openai"
 }
 
+variable "llm_provider_concurrency_limits" {
+  description = "Optional shared provider concurrency caps, for example openai=8. Empty preserves provider defaults."
+  type        = string
+  default     = ""
+}
+
+variable "llm_provider_slot_ttl_seconds" {
+  description = "Recovery TTL in seconds for a leaked shared provider concurrency slot."
+  type        = number
+  default     = 120
+}
+
 variable "openai_model" {
   description = "Default OpenAI model for general LLM calls."
   type        = string

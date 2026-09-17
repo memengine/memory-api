@@ -4,6 +4,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -13,6 +14,7 @@ from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import QuotaMode
 from api.services.memory_service import MemoryService
+from api.errors import APIError
 from api.services.quota_manager import QuotaEnvelope
 from api.tasks import watchdog_tasks
 from api.tasks import extraction_tasks
@@ -43,6 +45,8 @@ class FakeAsyncSession:
     def __init__(self) -> None:
         self.added = []
         self.commit = AsyncMock()
+        self.flush = AsyncMock()
+        self.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: uuid4()))
         self.get = AsyncMock(return_value=None)
 
     def add(self, obj):
@@ -52,7 +56,10 @@ class FakeAsyncSession:
 class FakeDispatchAsyncSession(FakeAsyncSession):
     def __init__(self) -> None:
         super().__init__()
-        self.execute = AsyncMock(return_value=SimpleNamespace(rowcount=1))
+        self.execute = AsyncMock(side_effect=[
+            SimpleNamespace(scalar_one_or_none=lambda: uuid4()),
+            SimpleNamespace(rowcount=1),
+        ])
         self.rollback = AsyncMock()
 
 
@@ -60,6 +67,36 @@ class FakeReservation:
     def __init__(self) -> None:
         self.queue_name = "starter-extraction"
         self.plan_tier = "starter"
+
+
+@pytest.mark.asyncio
+async def test_rejected_evidence_rolls_back_and_releases_reserved_queue_slot():
+    session = FakeAsyncSession()
+    session.rollback = AsyncMock()
+    cache = MagicMock()
+    service = MemoryService(
+        session=session, cache_service=cache, qdrant_service=MagicMock(),
+        quota_manager=FakeQuotaManager(), embedding_service=MagicMock(),
+    )
+    service.queue_router = SimpleNamespace(
+        reserve_extraction_slot=AsyncMock(return_value=FakeReservation()),
+        release_extraction_slot=AsyncMock(),
+    )
+    service._create_extraction_job = AsyncMock(
+        side_effect=APIError(status_code=409, code="EVID_409", error="evidence_turn_payload_mismatch")
+    )
+    with pytest.raises(APIError):
+        await service.queue_memory_add(
+            requested_user_id=None, authenticated_user_id=None, agent_id=None,
+            messages=[{"role": "user", "content": "I prefer concise answers."}],
+            metadata={}, idempotency_key=None,
+            tenant_id="11111111-1111-1111-1111-111111111111",
+            external_user_id="test-user",
+            proxy_user_id="22222222-2222-2222-2222-222222222222",
+        )
+    session.rollback.assert_awaited_once()
+    service.queue_router.release_extraction_slot.assert_awaited_once()
+    cache.set_job_status.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -141,7 +178,7 @@ async def test_successful_dispatch_persists_broker_task_identity() -> None:
         proxy_user_id="22222222-2222-2222-2222-222222222222",
     )
 
-    session.execute.assert_awaited_once()
+    assert session.execute.await_count == 2
     assert session.commit.await_count == 2
     session.rollback.assert_not_awaited()
 
@@ -181,7 +218,10 @@ def test_worker_loads_compact_tenant_payload_before_processing(monkeypatch) -> N
         celery_task_id="test-task-1",
     )
 
-    assert captured["pipeline_payload"] == full_payload
+    assert captured["pipeline_payload"] == {
+        **full_payload,
+        "operational_metrics": {"queue_wait_ms": 0},
+    }
     assert result["status"] == "processed"
 
 

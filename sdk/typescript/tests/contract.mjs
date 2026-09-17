@@ -43,6 +43,24 @@ test("add forwards Idempotency-Key without adding it to the body", async () => {
   }]);
 });
 
+test("add preserves explicit proposal and conversation identity", async () => {
+  let body;
+  const client = new MemoryOS("mem_test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (_, init) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ status: "queued", job_id: "job-1", proposal_ids: ["p-1"] }));
+  });
+  const result = await client.add([{
+    role: "assistant", content: "I can remember this preference.",
+    sourceKind: "assistant_output", externalTurnId: "turn-1", isMemoryProposal: true,
+  }], "user-1", undefined, undefined, undefined, "event-1", "chat-1");
+  assert.equal(body.conversation_id, "chat-1");
+  assert.equal(body.messages[0].is_memory_proposal, true);
+  assert.deepEqual(result.proposalIds, ["p-1"]);
+  await assert.rejects(() => client.add([{
+    role: "user", content: "forged proposal", isMemoryProposal: true,
+  }], "user-1"), /assistant/);
+});
+
 test("get sends asOf and preserves clarificationQuestion", async () => {
   let captured;
   const fetchImpl = async (url, init) => {
@@ -82,6 +100,8 @@ test("getJobStatus and waitForJob expose the asynchronous write lifecycle", asyn
         status: completed ? "completed" : "processing",
         memories_created: completed ? 1 : 0,
         attempts: 1,
+        proposal_ids: ["proposal-1"],
+        operational_metrics: { queue_wait_ms: 12 },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
@@ -89,6 +109,8 @@ test("getJobStatus and waitForJob expose the asynchronous write lifecycle", asyn
 
   const first = await client.getJobStatus("job/123");
   assert.equal(first.succeeded, false);
+  assert.deepEqual(first.proposalIds, ["proposal-1"]);
+  assert.deepEqual(first.operationalMetrics, { queue_wait_ms: 12 });
   const completed = await client.waitForJob("job/123", { timeoutMs: 100, pollIntervalMs: 1 });
   assert.equal(completed.succeeded, true);
   assert.equal(completed.memoriesCreated, 1);
