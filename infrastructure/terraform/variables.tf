@@ -548,6 +548,12 @@ variable "extraction_model" {
   default     = "gpt-4o-mini"
 }
 
+variable "phase3a_confirmation_enabled" {
+  description = "Enable tenant-scoped, server-verified assistant proposal confirmations after release gates pass."
+  type        = bool
+  default     = false
+}
+
 variable "embedding_provider" {
   description = "Embedding provider used by the memory retriever."
   type        = string

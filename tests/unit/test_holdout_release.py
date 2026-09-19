@@ -26,8 +26,15 @@ def test_manual_holdout_runner_uses_shared_production_path(monkeypatch, tmp_path
         lambda path, allow_holdout: [_case("holdout")],
     )
 
-    async def fake_run(cases, *, mode, holdout_loaded):
-        captured.update({"cases": cases, "mode": mode, "holdout_loaded": holdout_loaded})
+    async def fake_run(cases, *, mode, holdout_loaded, proposal_confirmation_enabled):
+        captured.update(
+            {
+                "cases": cases,
+                "mode": mode,
+                "holdout_loaded": holdout_loaded,
+                "proposal_confirmation_enabled": proposal_confirmation_enabled,
+            }
+        )
         return {"run_id": "holdout-run", "summary": {}}
 
     monkeypatch.setattr("benchmarks.internal.holdout_release.run_live_case_evaluation", fake_run)
@@ -37,6 +44,7 @@ def test_manual_holdout_runner_uses_shared_production_path(monkeypatch, tmp_path
     assert result["run_id"] == "holdout-run"
     assert captured["mode"] == "live-provider-sealed-holdout-manual-only"
     assert captured["holdout_loaded"] is True
+    assert captured["proposal_confirmation_enabled"] is True
     assert captured["cases"][0].split == "holdout"
 
 

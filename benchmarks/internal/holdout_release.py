@@ -10,7 +10,6 @@ from benchmarks.internal.cases import ExtractionCase, load_cases
 from benchmarks.internal.live_provider import run_live_case_evaluation
 from benchmarks.internal.results import write_run_record
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOLDOUT = ROOT / "benchmarks" / "internal" / "datasets" / "extraction" / "holdout" / "holdout_v1.jsonl"
 DEFAULT_OUTPUT_ROOT = ROOT / "artifacts" / "internal-benchmarks" / "holdout"
@@ -26,6 +25,7 @@ async def run_approved_holdout_evaluation(dataset: str | Path) -> dict[str, Any]
         cases,
         mode="live-provider-sealed-holdout-manual-only",
         holdout_loaded=True,
+        proposal_confirmation_enabled=True,
     )
 
 

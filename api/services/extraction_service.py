@@ -22,9 +22,15 @@ try:  # pragma: no cover - exercised implicitly when dependency is installed.
 except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallback.
     tiktoken = None  # type: ignore[assignment]
 
-
 LOGGER = logging.getLogger(__name__)
-ALLOWED_CATEGORIES = {"preference", "fact", "goal", "procedure", "relationship", "expertise"}
+ALLOWED_CATEGORIES = {
+    "preference",
+    "fact",
+    "goal",
+    "procedure",
+    "relationship",
+    "expertise",
+}
 DEFAULT_CONFIDENCE_THRESHOLD = 0.65
 DEFAULT_PENDING_CONFIDENCE_THRESHOLD = 0.45
 MAX_CONVERSATION_TOKENS = 5000
@@ -37,21 +43,102 @@ COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
 COMPOSITIONAL_MIN_SIGNAL_GROUPS = 2
 COMPOSITIONAL_SIGNAL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("identity", (" i am ", " i'm ", " my role", " founder", " engineer", " student", " teacher", " manager")),
-    ("team", (" team", " company", " startup", " workspace", " client", " customer", " organisation", " organization")),
-    ("project", (" building", " working on", " project", " product", " app", " platform", " workflow", " integration")),
-    ("goal", (" goal", " trying to", " want to", " need to", " planning", " launch", " prepare", " improve")),
-    ("preference", (" prefer", " likes", " usually", " always", " avoid", " tone", " short", " detailed", " hindi", " english")),
-    ("timeline", (" today", " tomorrow", " next week", " by ", " deadline", " before", " after", " currently")),
+    (
+        "identity",
+        (
+            " i am ",
+            " i'm ",
+            " my role",
+            " founder",
+            " engineer",
+            " student",
+            " teacher",
+            " manager",
+        ),
+    ),
+    (
+        "team",
+        (
+            " team",
+            " company",
+            " startup",
+            " workspace",
+            " client",
+            " customer",
+            " organisation",
+            " organization",
+        ),
+    ),
+    (
+        "project",
+        (
+            " building",
+            " working on",
+            " project",
+            " product",
+            " app",
+            " platform",
+            " workflow",
+            " integration",
+        ),
+    ),
+    (
+        "goal",
+        (
+            " goal",
+            " trying to",
+            " want to",
+            " need to",
+            " planning",
+            " launch",
+            " prepare",
+            " improve",
+        ),
+    ),
+    (
+        "preference",
+        (
+            " prefer",
+            " likes",
+            " usually",
+            " always",
+            " avoid",
+            " tone",
+            " short",
+            " detailed",
+            " hindi",
+            " english",
+        ),
+    ),
+    (
+        "timeline",
+        (
+            " today",
+            " tomorrow",
+            " next week",
+            " by ",
+            " deadline",
+            " before",
+            " after",
+            " currently",
+        ),
+    ),
 )
 
 TEMPORARY_SESSION_MEMORY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bcurrent\s+(debugging|debug|troubleshooting|terminal|session|flow)\b", re.IGNORECASE),
-    re.compile(r"\bcontinue\s+with\s+the\s+(current|same)\s+.+\b(flow|debugging|debug|session)\b", re.IGNORECASE),
+    re.compile(
+        r"\bcurrent\s+(debugging|debug|troubleshooting|terminal|session|flow)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bcontinue\s+with\s+the\s+(current|same)\s+.+\b(flow|debugging|debug|session)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bdo\s+not\s+change\s+anything\b", re.IGNORECASE),
     re.compile(r"\bkeep\s+going\s+with\s+the\s+(current|same)\b", re.IGNORECASE),
     re.compile(r"\bnext\s+(terminal\s+)?command\b", re.IGNORECASE),
 )
+
 
 class ExtractionError(RuntimeError):
     """Raised when the extraction model returns unusable output."""
@@ -84,6 +171,7 @@ class ExtractionService:
         importance_shadow_enabled: bool | None = None,
         app_env: str | None = None,
         importance_shadow_service: Any | None = None,
+        proposal_confirmation_enabled: bool | None = None,
     ) -> None:
         self.client = client
         self.llm_service = llm_service or LLMService(
@@ -93,27 +181,53 @@ class ExtractionService:
         )
         self.cache_service = cache_service
         self._confidence_threshold = float(confidence_threshold)
-        self._pending_confidence_threshold = min(float(pending_confidence_threshold), self._confidence_threshold)
-        settings = get_settings() if importance_shadow_enabled is None or app_env is None else None
+        self._pending_confidence_threshold = min(
+            float(pending_confidence_threshold), self._confidence_threshold
+        )
+        settings = (
+            get_settings()
+            if (
+                importance_shadow_enabled is None
+                or app_env is None
+                or proposal_confirmation_enabled is None
+            )
+            else None
+        )
         resolved_shadow_enabled = (
             settings.importance_shadow_enabled
             if importance_shadow_enabled is None and settings is not None
             else bool(importance_shadow_enabled)
         )
-        resolved_app_env = settings.app_env if app_env is None and settings is not None else str(app_env or "")
+        resolved_app_env = (
+            settings.app_env
+            if app_env is None and settings is not None
+            else str(app_env or "")
+        )
         self._importance_shadow_enabled = bool(
-            resolved_shadow_enabled and resolved_app_env.strip().lower() == "development"
+            resolved_shadow_enabled
+            and resolved_app_env.strip().lower() == "development"
         )
         self._importance_shadow_review_dir = (
             settings.importance_shadow_review_dir if settings is not None else ""
         )
         self._importance_shadow_service = importance_shadow_service
-        resolved_spec_path = Path(spec_path) if spec_path is not None else self._default_spec_path()
+        self._proposal_confirmation_enabled = (
+            settings.phase3a_confirmation_enabled
+            if proposal_confirmation_enabled is None and settings is not None
+            else bool(proposal_confirmation_enabled)
+        )
+        resolved_spec_path = (
+            Path(spec_path) if spec_path is not None else self._default_spec_path()
+        )
         parsed = self._load_spec(resolved_spec_path)
         self._category_definitions = parsed.category_definitions
         self._importance_rubric = parsed.importance_rubric
         self._never_store = parsed.never_store
         self._examples = parsed.examples
+
+    @property
+    def proposal_confirmation_enabled(self) -> bool:
+        return self._proposal_confirmation_enabled
 
     async def extract(
         self,
@@ -124,6 +238,7 @@ class ExtractionService:
         existing_memories: list[Any] | None = None,
         user_id: str | None = None,
         source_context: dict[str, Any] | None = None,
+        proposal_context: list[dict[str, Any]] | None = None,
     ) -> ExtractionResult:
         """Extract memory candidates from a conversation.
 
@@ -136,7 +251,9 @@ class ExtractionService:
             {**message, "_turn_index": index}
             for index, message in enumerate(messages)
         ]
-        conversation, visible_turn_indexes = self._build_conversation_context(indexed_messages)
+        conversation, visible_turn_indexes = self._build_conversation_context(
+            indexed_messages
+        )
         base_user_message = self._prepend_source_context(conversation, source_context)
         user_message = self._append_existing_memory_context(
             base_user_message,
@@ -171,13 +288,18 @@ class ExtractionService:
                 tokens_used += int(composition_response.total_tokens or 0)
                 provider_used = composition_response.provider_used or provider_used
                 await self._record_provider_usage(composition_response.provider_used)
-                composition_signals = self._parse_composition_response(composition_response.content)
+                composition_signals = self._parse_composition_response(
+                    composition_response.content
+                )
                 if composition_signals:
                     before_composition = user_message
-                    user_message = self._append_composition_context(user_message, composition_signals)
+                    user_message = self._append_composition_context(
+                        user_message, composition_signals
+                    )
                     prompt_context_metrics["composition_hint_tokens"] = max(
                         0,
-                        self._count_tokens(user_message) - self._count_tokens(before_composition),
+                        self._count_tokens(user_message)
+                        - self._count_tokens(before_composition),
                     )
             except Exception as exc:  # pragma: no cover - defensive fail-open path.
                 composition_prepass_error = exc.__class__.__name__
@@ -206,20 +328,25 @@ class ExtractionService:
             for index, message in enumerate(indexed_messages)
             if self._messages_to_text([message]) in user_message
         }
-        prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(user_message)
+        prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(
+            user_message
+        )
         prompt_context_metrics.setdefault("composition_hint_tokens", 0)
-        prompt_context_metrics["composition_hint_budget_tokens"] = MAX_COMPOSITION_HINT_TOKENS
+        prompt_context_metrics["composition_hint_budget_tokens"] = (
+            MAX_COMPOSITION_HINT_TOKENS
+        )
         prompt_context_metrics["primary_system_prompt_tokens"] = primary_system_tokens
         prompt_context_metrics["primary_input_budget_tokens"] = MAX_PRIMARY_INPUT_TOKENS
         prompt_context_metrics["primary_input_tokens"] = (
-            primary_system_tokens + prompt_context_metrics["primary_user_message_tokens"]
+            primary_system_tokens
+            + prompt_context_metrics["primary_user_message_tokens"]
         )
         prompt_context_metrics["visible_turn_count"] = len(visible_turn_indexes)
         primary_started = time.perf_counter()
         response = await self.llm_service.complete(
             system_prompt=primary_system_prompt,
             user_message=user_message,
-            temperature=0.1,
+            temperature=0.0 if proposal_context else 0.1,
             max_tokens=1500,
             response_format="json",
         )
@@ -227,17 +354,20 @@ class ExtractionService:
         tokens_used += int(response.total_tokens or 0)
         provider_used = response.provider_used or provider_used
         await self._record_provider_usage(response.provider_used)
-        kept, pending, filtered_count, nothing_to_extract = self._parse_and_validate_response(
-            response.content,
-            messages=indexed_messages,
-            visible_turn_indexes=visible_turn_indexes,
-            source_context=source_context,
-            evidence_context={
-                "provider": response.provider_used,
-                "model": response.model_used,
-                "extracted_at": datetime.now(UTC).isoformat(),
-                "extractor_version": "structured-evidence-v1",
-            },
+        kept, pending, filtered_count, nothing_to_extract, rejection_counts = (
+            self._parse_and_validate_response(
+                response.content,
+                messages=indexed_messages,
+                visible_turn_indexes=visible_turn_indexes,
+                source_context=source_context,
+                evidence_context={
+                    "provider": response.provider_used,
+                    "model": response.model_used,
+                    "extracted_at": datetime.now(UTC).isoformat(),
+                    "extractor_version": "structured-evidence-v1",
+                },
+                proposal_context=proposal_context,
+            )
         )
         self._observe_importance_shadow(
             kept=kept,
@@ -274,6 +404,38 @@ class ExtractionService:
             memories_to_store=kept,
             pending_candidates=pending,
             extraction_metadata={
+                "candidate_validation": {
+                    "model_returned_memories": len(kept)
+                    + len(pending)
+                    + filtered_count,
+                    "accepted_for_storage": len(kept),
+                    "accepted_as_pending": len(pending),
+                    "rejected": filtered_count,
+                    "rejection_counts": rejection_counts,
+                    "model_marked_nothing_to_extract": nothing_to_extract,
+                },
+                "proposal_confirmation": {
+                    "enabled": self._proposal_confirmation_enabled,
+                    "active_proposal_count": len(proposal_context or []),
+                    "accepted": sum(
+                        item.validated_evidence.get("relation")
+                        == "user_confirmed_assistant_proposal"
+                        for item in kept
+                    ),
+                    "pending": sum(
+                        item.candidate_reason
+                        in {
+                            "ambiguous_proposal_reference",
+                            "proposal_reference_mismatch",
+                        }
+                        for item in pending
+                    ),
+                    "rejected_reasons": {
+                        reason: count
+                        for reason, count in rejection_counts.items()
+                        if reason.startswith("proposal_")
+                    },
+                },
                 "prompt_context": prompt_context_metrics,
                 "primary_pass": {
                     "provider": response.provider_used,
@@ -290,20 +452,31 @@ class ExtractionService:
                     "used": bool(composition_signals),
                     "provider": getattr(composition_response, "provider_used", None),
                     "model": getattr(composition_response, "model_used", None),
-                    "input_tokens": int(getattr(composition_response, "input_tokens", 0) or 0),
-                    "output_tokens": int(getattr(composition_response, "output_tokens", 0) or 0),
-                    "total_tokens": int(getattr(composition_response, "total_tokens", 0) or 0),
-                    "latency_ms": int(getattr(composition_response, "latency_ms", 0) or 0),
+                    "input_tokens": int(
+                        getattr(composition_response, "input_tokens", 0) or 0
+                    ),
+                    "output_tokens": int(
+                        getattr(composition_response, "output_tokens", 0) or 0
+                    ),
+                    "total_tokens": int(
+                        getattr(composition_response, "total_tokens", 0) or 0
+                    ),
+                    "latency_ms": int(
+                        getattr(composition_response, "latency_ms", 0) or 0
+                    ),
                     "error": composition_prepass_error,
                 },
                 "compositional_pass_attempted": composition_prepass_attempted,
                 "compositional_pass_used": bool(composition_signals),
-                "compositional_entities": len(composition_signals.get("entities") or []),
-                "compositional_relationships": len(composition_signals.get("relationships") or []),
+                "compositional_entities": len(
+                    composition_signals.get("entities") or []
+                ),
+                "compositional_relationships": len(
+                    composition_signals.get("relationships") or []
+                ),
                 "compositional_error": composition_prepass_error,
             },
         )
-
     def _observe_importance_shadow(
         self,
         *,
@@ -335,7 +508,9 @@ class ExtractionService:
             )
         except Exception as exc:  # pragma: no cover - fail-open observer boundary.
             try:
-                recorder = getattr(self._importance_shadow_service, "record_failure", None)
+                recorder = getattr(
+                    self._importance_shadow_service, "record_failure", None
+                )
                 if recorder is not None:
                     recorder(
                         error=exc,
@@ -357,14 +532,19 @@ class ExtractionService:
                     "error": str(exc),
                 },
             )
+
     async def _record_provider_usage(self, provider: str | None) -> None:
         if not provider:
             return
         hour_bucket = datetime.now(UTC).strftime("%Y%m%d%H")
         try:
             cache_service = self.cache_service or CacheService()
-            await cache_service.increment_provider_usage(str(provider).lower(), hour_bucket, ttl=7200)
-        except Exception as exc:  # pragma: no cover - metrics should never block extraction.
+            await cache_service.increment_provider_usage(
+                str(provider).lower(), hour_bucket, ttl=7200
+            )
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - metrics should never block extraction.
             LOGGER.warning(
                 "provider_usage_counter_failed",
                 extra={
@@ -384,6 +564,7 @@ class ExtractionService:
         existing_memories: list[Any] | None = None,
         user_id: str | None = None,
         source_context: dict[str, Any] | None = None,
+        proposal_context: list[dict[str, Any]] | None = None,
     ) -> ExtractionResult:
         return asyncio.run(
             self.extract(
@@ -394,9 +575,9 @@ class ExtractionService:
                 existing_memories=existing_memories,
                 user_id=user_id,
                 source_context=source_context,
+                proposal_context=proposal_context,
             )
         )
-
     def _build_system_prompt(
         self,
         *,
@@ -421,8 +602,31 @@ class ExtractionService:
             f"Also return borderline candidates with confidence >= {self._pending_confidence_threshold:.2f}; "
             "MemoryOS will hold those as pending candidates instead of storing them permanently. "
             f"Discard anything below {self._pending_confidence_threshold:.2f}.\n\n"
+            "Confidence measures how strongly the user commits to the claim, not how fluent the model feels. "
+            "Use 0.45-0.64 for tentative, conditional, someday, and no-current-plan claims "
+            "so they remain pending. Use >= 0.80 only for direct, unambiguous commitments or current facts. "
+            "Preserve uncertainty and no-current-plan qualifiers in the memory content. A conditional possibility "
+            "the user is genuinely considering (for example, 'I might relocate if my partner gets the role') is "
+            "a pending goal, not a current fact. A purely counterfactual claim whose premise is not currently true "
+            "and which the user is not considering is not a present goal and must be discarded. "
+            "Do not use pending confidence as a substitute for temporal validity. "
+            "Do not default every plausible memory to 0.70 or 0.80.\n\n"
+            "Use importance 1-3 for narrow project-only or occasionally useful context; 4-6 for "
+            "regularly useful operating context; and 7-9 only for identity-level facts, committed priorities, "
+            "or capabilities that should shape most responses. Do not default every memory to 5.\n\n"
+            "The current persistence path cannot enforce an explicit end date. Do not extract facts, procedures, "
+            "roles, or workarounds whose truth ends after a stated number of days, a stated date, or a named short "
+            "event.\n\n"
+            "Each memory must contain one independently correctable and independently reusable claim. Split "
+            "distinct governance dimensions even when they occur in one sentence. For example, separate "
+            "a residence from an employment fact, a role from a responsibility, and an organization-mandated "
+            "tool from the user's personal tool preference. Keep reasons, limitations, time qualifiers, and evidence "
+            "that merely explain the main claim inside that claim. Do not create separate memories for absence of a "
+            "preference, redundant future reversals, counterfactual background, or every supported clause. Prefer "
+            "fewer durable memories over exhaustive clause extraction. Durable autobiographical facts and durable "
+            "preferences remain eligible even when they appear after an unrelated question or request.\n\n"
             "Return exactly this JSON shape:\n"
-            '{\n'
+            "{\n"
             '  "memories": [\n'
             "    {\n"
             '      "content": "string",\n'
@@ -431,7 +635,7 @@ class ExtractionService:
             '      "confidence": float between 0.0 and 1.0,\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
             '      "evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal",\n'
-            '      "proposal_turn": 1,\n'
+            '      "proposal_turn": "integer for a confirmed registered proposal, otherwise null",\n'
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
@@ -442,7 +646,16 @@ class ExtractionService:
             "user turn that directly states or confirms the memory. A question from the user or an "
             "unsupported assistant statement is not evidence. For a confirmation of an assistant "
             "proposal, set evidence_relation to user_confirmed_assistant_proposal and proposal_turn "
-            "to the cited assistant turn index.\n\n"
+            "to the cited assistant turn index. A dependent reply such as 'yes', 'keep it', "
+            "'that captures it', or a paraphrased acceptance is not a direct user statement: cite "
+            "both the registered proposal turn and the later user turn. proposal_turn identifies "
+            "the assistant turn; evidence_turns must include the later user turn even if it also "
+            "includes the proposal. Use direct_user_statement "
+            "only when the user's own words independently state the extracted claim. Apply this test "
+            "mechanically: remove every assistant turn; if the candidate claim is no longer entailed, "
+            "it is not direct_user_statement. References such as 'that', 'it', 'this', 'the second one', "
+            "'the framing', agreement, or acceptance depend on the proposal. For direct_user_statement, "
+            "set proposal_turn to null.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
@@ -483,18 +696,25 @@ class ExtractionService:
         user_turns = [
             str(message.get("content") or "")
             for message in messages
-            if str(message.get("role") or "").lower() == "user" and str(message.get("content") or "").strip()
+            if str(message.get("role") or "").lower() == "user"
+            and str(message.get("content") or "").strip()
         ]
         if len(user_turns) < COMPOSITIONAL_MIN_USER_MESSAGES:
             return False
 
-        signal_groups = ExtractionService._composition_signal_groups("\n".join(user_turns))
+        signal_groups = ExtractionService._composition_signal_groups(
+            "\n".join(user_turns)
+        )
         if len(signal_groups) < COMPOSITIONAL_MIN_SIGNAL_GROUPS:
             return False
 
         # At least two user turns should carry durable signals. This avoids an
         # extra LLM call for one long message that the normal extractor can handle.
-        signaled_turns = sum(1 for turn in user_turns if ExtractionService._composition_signal_groups(turn))
+        signaled_turns = sum(
+            1
+            for turn in user_turns
+            if ExtractionService._composition_signal_groups(turn)
+        )
         return signaled_turns >= COMPOSITIONAL_MIN_USER_MESSAGES
 
     @staticmethod
@@ -524,13 +744,20 @@ class ExtractionService:
         try:
             data = json.loads(raw_content or "{}")
         except json.JSONDecodeError:
-            LOGGER.warning("composition_pass_invalid_json", extra={"event": "composition_pass_invalid_json"})
+            LOGGER.warning(
+                "composition_pass_invalid_json",
+                extra={"event": "composition_pass_invalid_json"},
+            )
             return {}
         if not isinstance(data, dict):
             return {}
 
-        entities = [item for item in data.get("entities") or [] if isinstance(item, dict)][:12]
-        relationships = [item for item in data.get("relationships") or [] if isinstance(item, dict)][:12]
+        entities = [
+            item for item in data.get("entities") or [] if isinstance(item, dict)
+        ][:12]
+        relationships = [
+            item for item in data.get("relationships") or [] if isinstance(item, dict)
+        ][:12]
         if not entities and not relationships:
             return {}
         return {"entities": entities, "relationships": relationships}
@@ -545,7 +772,9 @@ class ExtractionService:
             entity_type = str(entity.get("type") or "other").strip()
             evidence = str(entity.get("evidence") or "").strip()
             if name:
-                hint_lines.append(f"- entity: {name} ({entity_type}) evidence: {evidence[:160]}")
+                hint_lines.append(
+                    f"- entity: {name} ({entity_type}) evidence: {evidence[:160]}"
+                )
         for relation in signals.get("relationships") or []:
             subject = str(relation.get("subject") or "").strip()
             predicate = str(relation.get("relation") or "").strip()
@@ -562,6 +791,7 @@ class ExtractionService:
             MAX_COMPOSITION_HINT_TOKENS,
         )
         return f"{user_message}\n\n{hints}"
+
     @staticmethod
     def _prepend_source_context(
         conversation: str,
@@ -579,20 +809,31 @@ class ExtractionService:
             f"{conversation}"
         )
 
-    def _build_conversation_context(self, messages: list[dict[str, Any]]) -> tuple[str, set[int]]:
+    def _build_conversation_context(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[str, set[int]]:
         retained: list[dict[str, Any]] = []
         for message in reversed(messages):
             candidate = [message, *retained]
-            if self._count_tokens(self._messages_to_text(candidate)) > MAX_CONVERSATION_TOKENS:
+            if (
+                self._count_tokens(self._messages_to_text(candidate))
+                > MAX_CONVERSATION_TOKENS
+            ):
                 if retained:
                     break
                 continue
             retained = candidate
-            if self._count_tokens(self._messages_to_text(retained)) >= MAX_CONVERSATION_TOKENS:
+            if (
+                self._count_tokens(self._messages_to_text(retained))
+                >= MAX_CONVERSATION_TOKENS
+            ):
                 break
 
         text = self._messages_to_text(retained)
-        visible = {int(message.get("_turn_index", index)) for index, message in enumerate(retained)}
+        visible = {
+            int(message.get("_turn_index", index))
+            for index, message in enumerate(retained)
+        }
         if not text and messages:
             text = self._truncate_to_token_budget(
                 self._messages_to_text([messages[-1]]),
@@ -603,7 +844,9 @@ class ExtractionService:
     def _build_conversation_string(self, messages: list[dict[str, Any]]) -> str:
         return self._build_conversation_context(messages)[0]
 
-    def _append_existing_memory_context(self, conversation: str, existing_memories: list[Any]) -> str:
+    def _append_existing_memory_context(
+        self, conversation: str, existing_memories: list[Any]
+    ) -> str:
         if not existing_memories:
             return conversation
         ranked = sorted(
@@ -618,7 +861,11 @@ class ExtractionService:
         ]
         used_tokens = 0
         for memory in ranked:
-            category = getattr(getattr(memory, "category", ""), "value", getattr(memory, "category", "unknown"))
+            category = getattr(
+                getattr(memory, "category", ""),
+                "value",
+                getattr(memory, "category", "unknown"),
+            )
             content = str(getattr(memory, "content", "")).strip()
             if content:
                 line = f"- [{category}] {content}"
@@ -648,7 +895,11 @@ class ExtractionService:
             content = str(getattr(memory, "content", "") or "").strip()
             if not content:
                 continue
-            category = getattr(getattr(memory, "category", ""), "value", getattr(memory, "category", "unknown"))
+            category = getattr(
+                getattr(memory, "category", ""),
+                "value",
+                getattr(memory, "category", "unknown"),
+            )
             line_tokens = self._count_tokens(f"- [{category}] {content}")
             if used_tokens + line_tokens > MAX_EXISTING_MEMORY_CONTEXT_TOKENS:
                 break
@@ -674,43 +925,109 @@ class ExtractionService:
         visible_turn_indexes: set[int] | None = None,
         source_context: dict[str, Any] | None = None,
         evidence_context: dict[str, Any] | None = None,
-    ) -> tuple[list[ExtractedMemory], list[PendingExtractedMemory], int, bool]:
+        proposal_context: list[dict[str, Any]] | None = None,
+    ) -> tuple[
+        list[ExtractedMemory], list[PendingExtractedMemory], int, bool, dict[str, int]
+    ]:
         try:
             data = json.loads(raw_content or "{}")
         except json.JSONDecodeError as exc:
             LOGGER.error(
                 "extraction_invalid_json",
-                extra={"event": "extraction_invalid_json", "raw_response": raw_content[:1000]},
+                extra={
+                    "event": "extraction_invalid_json",
+                    "raw_response": raw_content[:1000],
+                },
             )
-            raise ExtractionError("LLM returned invalid JSON for memory extraction") from exc
+            raise ExtractionError(
+                "LLM returned invalid JSON for memory extraction"
+            ) from exc
 
         raw_memories = data.get("memories") or []
         if data.get("nothing_to_extract"):
-            return [], [], len(raw_memories), True
+            rejection_counts = {"model_marked_nothing_to_extract": 1}
+            if raw_memories:
+                rejection_counts["memories_ignored_after_nothing_to_extract"] = len(
+                    raw_memories
+                )
+            return [], [], len(raw_memories), True, rejection_counts
         if not isinstance(raw_memories, list):
             raise ExtractionError("LLM extraction response has non-list memories field")
 
         kept: list[ExtractedMemory] = []
         pending: list[PendingExtractedMemory] = []
         invalid_count = 0
+        rejection_counts: dict[str, int] = {}
         for raw_memory in raw_memories:
-            candidate = self._coerce_memory(raw_memory)
+            candidate, rejection_reason = self._coerce_memory(raw_memory)
             validated_evidence: dict[str, Any] = {}
             if candidate is None:
                 invalid_count += 1
+                reason = rejection_reason or "candidate_validation"
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 continue
             if not source_context:
+                relation = (
+                    raw_memory.get("evidence_relation")
+                    if isinstance(raw_memory, dict)
+                    else None
+                )
+                proposal_turn = (
+                    raw_memory.get("proposal_turn")
+                    if isinstance(raw_memory, dict)
+                    else None
+                )
+                # When the model explicitly identifies an active proposal, apply
+                # the stricter proposal relation even if it labels the dependent
+                # user reply as a direct statement. Authority is still derived
+                # only from the server-validated proposal and transcript.
+                effective_relation = (
+                    "user_confirmed_assistant_proposal"
+                    if proposal_context
+                    and isinstance(proposal_turn, int)
+                    and not isinstance(proposal_turn, bool)
+                    else relation
+                )
                 validated_evidence = self._validated_user_evidence(
                     candidate,
                     messages or [],
-                    raw_memory.get("evidence_turns") if isinstance(raw_memory, dict) else None,
-                    raw_memory.get("evidence_relation") if isinstance(raw_memory, dict) else None,
-                    raw_memory.get("proposal_turn") if isinstance(raw_memory, dict) else None,
+                    raw_memory.get("evidence_turns")
+                    if isinstance(raw_memory, dict)
+                    else None,
+                    effective_relation,
+                    proposal_turn,
                     evidence_context=evidence_context,
                     visible_turn_indexes=visible_turn_indexes,
+                    proposal_confirmation_enabled=self._proposal_confirmation_enabled,
+                    active_proposals=proposal_context,
                 )
                 if not validated_evidence:
+                    if (
+                        effective_relation == "user_confirmed_assistant_proposal"
+                        and self._proposal_confirmation_enabled
+                    ):
+                        policy = validate_conversational_evidence(
+                            messages=messages or [],
+                            evidence_turns=raw_memory.get("evidence_turns"),
+                            evidence_relation=effective_relation,
+                            proposal_turn=proposal_turn,
+                            visible_turn_indexes=visible_turn_indexes,
+                            proposal_confirmation_enabled=True,
+                            active_proposals=proposal_context,
+                        )
+                        if policy.review_required:
+                            candidate.candidate_reason = policy.reason
+                            pending.append(candidate)
+                        else:
+                            invalid_count += 1
+                        rejection_counts[policy.reason] = (
+                            rejection_counts.get(policy.reason, 0) + 1
+                        )
+                        continue
                     invalid_count += 1
+                    rejection_counts["evidence_validation"] = (
+                        rejection_counts.get("evidence_validation", 0) + 1
+                    )
                     continue
                 candidate.validated_evidence = validated_evidence
             if candidate.confidence >= self._confidence_threshold:
@@ -727,7 +1044,7 @@ class ExtractionService:
                 )
             else:
                 pending.append(candidate)
-        return kept, pending, invalid_count, False
+        return kept, pending, invalid_count, False, rejection_counts
 
     @classmethod
     def _has_user_evidence(
@@ -759,6 +1076,8 @@ class ExtractionService:
         *,
         evidence_context: dict[str, Any] | None = None,
         visible_turn_indexes: set[int] | None = None,
+        proposal_confirmation_enabled: bool = False,
+        active_proposals: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Require conversational memories to be grounded in a user's own turn.
 
@@ -778,6 +1097,8 @@ class ExtractionService:
             evidence_relation=evidence_relation,
             proposal_turn=proposal_turn,
             visible_turn_indexes=visible_turn_indexes,
+            proposal_confirmation_enabled=proposal_confirmation_enabled,
+            active_proposals=active_proposals,
         )
         if not policy.accepted:
             return {}
@@ -792,18 +1113,26 @@ class ExtractionService:
         if evidence_was_provided and not cited_indexes:
             return {}
         if cited_indexes:
-            indexed_messages = [item for item in indexed_messages if item[0] in cited_indexes]
+            indexed_messages = [
+                item for item in indexed_messages if item[0] in cited_indexes
+            ]
 
         eligible_user_indexes = set(policy.user_turn_indexes)
         user_turns = [
             (index, str(message.get("content") or "").strip())
             for index, message in indexed_messages
-            if index in eligible_user_indexes and str(message.get("content") or "").strip()
+            if index in eligible_user_indexes
+            and str(message.get("content") or "").strip()
         ]
         candidate_tokens = cls._significant_tokens(candidate.content)
         if policy.proposal_turn_index is not None:
-            proposal_content = str(messages[policy.proposal_turn_index].get("content") or "")
-            supported = bool(candidate_tokens & cls._significant_tokens(proposal_content))
+            proposal_content = str(
+                messages[policy.proposal_turn_index].get("content") or ""
+            )
+            supported = bool(
+                candidate_tokens & cls._significant_tokens(proposal_content)
+            )
+
         else:
             supported = any(
                 not cls._is_question_only(content)
@@ -820,25 +1149,46 @@ class ExtractionService:
         }
         return {
             "schema_version": 1,
-            "citation_mode": "model_cited" if evidence_was_provided else "legacy_compatibility",
-            "turn_indexes": sorted(cited_indexes) if evidence_was_provided else list(policy.user_turn_indexes),
+            "citation_mode": "model_cited"
+            if evidence_was_provided
+            else "legacy_compatibility",
+            "turn_indexes": sorted(cited_indexes)
+            if evidence_was_provided
+            else list(policy.user_turn_indexes),
             "user_turn_indexes": list(policy.user_turn_indexes),
             "relation": str(evidence_relation or "direct_user_statement"),
             "proposal_turn_index": policy.proposal_turn_index,
             "turn_references": [
                 {
                     "turn_index": index,
-                    "turn_id": str(messages[index].get("turn_id") or f"legacy-index:{index}"),
+                    "turn_id": str(
+                        messages[index].get("turn_id") or f"legacy-index:{index}"
+                    ),
                     "external_turn_id": messages[index].get("external_turn_id"),
                     "content_sha256": messages[index].get("turn_content_sha256"),
                     "role": str(messages[index].get("role") or "").lower(),
-                    "source_kind": str(messages[index].get("source_kind") or "").lower(),
+                    "source_kind": str(
+                        messages[index].get("source_kind") or ""
+                    ).lower(),
                 }
-                for index in sorted(cited_indexes) if evidence_was_provided
+                for index in sorted(cited_indexes)
+                if evidence_was_provided
             ],
             "proposal_turn_id": (
-                str(messages[policy.proposal_turn_index].get("turn_id") or f"legacy-index:{policy.proposal_turn_index}")
+                str(
+                    messages[policy.proposal_turn_index].get("turn_id")
+                    or f"legacy-index:{policy.proposal_turn_index}"
+                )
                 if policy.proposal_turn_index is not None
+                else None
+            ),
+            "proposal": (
+                {
+                    "id": policy.proposal_id,
+                    "group_id": policy.proposal_group_id,
+                    "ordinal": policy.proposal_ordinal,
+                }
+                if policy.proposal_id is not None
                 else None
             ),
             "authority": {
@@ -859,20 +1209,25 @@ class ExtractionService:
         return {
             index
             for index in value
-            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < message_count
+            if isinstance(index, int)
+            and not isinstance(index, bool)
+            and 0 <= index < message_count
         }
 
     @staticmethod
     def _is_question_only(content: str) -> bool:
         normalized = " ".join(content.lower().split())
-        if normalized.endswith("?"):
-            return True
+        if not normalized:
+            return False
 
         # A leading "when" can introduce a durable declarative preference
         # ("When you explain code, I prefer examples"), not only a question.
         # Do not discard it before the evidence gate has a chance to validate
         # the user's actual statement.
-        if re.match(r"^when\s+(?:should|do|does|did|can|could|will|would|is|are|was|were|have|has)\b", normalized):
+        if re.match(
+            r"^when\s+(?:should|do|does|did|can|could|will|would|is|are|was|were|have|has)\b",
+            normalized,
+        ):
             return True
         question_starts = (
             "am ",
@@ -893,14 +1248,48 @@ class ExtractionService:
             "will ",
             "would ",
         )
-        return normalized.startswith(question_starts)
+        clauses = [
+            clause.strip(" ,;:-")
+            for clause in re.split(r"[.!?]+", normalized)
+            if clause.strip(" ,;:-")
+        ]
+        if not clauses:
+            return normalized.endswith("?")
+
+        def clause_is_question(clause: str) -> bool:
+            if re.match(
+                r"^when\s+(?:should|do|does|did|can|could|will|would|is|are|was|were|have|has)\b",
+                clause,
+            ):
+                return True
+            return clause.startswith(question_starts)
+
+        return all(clause_is_question(clause) for clause in clauses)
 
     @staticmethod
     def _significant_tokens(text: str) -> set[str]:
         stop_words = {
-            "about", "after", "also", "and", "are", "because", "before",
-            "from", "has", "have", "into", "its", "more", "that", "the",
-            "their", "them", "this", "user", "with", "would",
+            "about",
+            "after",
+            "also",
+            "and",
+            "are",
+            "because",
+            "before",
+            "from",
+            "has",
+            "have",
+            "into",
+            "its",
+            "more",
+            "that",
+            "the",
+            "their",
+            "them",
+            "this",
+            "user",
+            "with",
+            "would",
         }
         return {
             token
@@ -908,49 +1297,64 @@ class ExtractionService:
             if len(token) >= 3 and token not in stop_words
         }
 
-    def _coerce_memory(self, raw_memory: Any) -> PendingExtractedMemory | None:
+    def _coerce_memory(
+        self, raw_memory: Any
+    ) -> tuple[PendingExtractedMemory | None, str | None]:
         if not isinstance(raw_memory, dict):
-            return None
+            return None, "invalid_shape"
 
         content = str(raw_memory.get("content") or "").strip()
         category = str(raw_memory.get("category") or "").strip().lower()
-        reasoning = str(raw_memory.get("reasoning") or "").strip() or "Extracted from conversation"
+        reasoning = (
+            str(raw_memory.get("reasoning") or "").strip()
+            or "Extracted from conversation"
+        )
         try:
             importance_score = float(raw_memory.get("importance_score"))
             confidence = float(raw_memory.get("confidence"))
         except (TypeError, ValueError):
-            return None
+            return None, "invalid_numeric_scores"
 
         if confidence < self._pending_confidence_threshold:
-            return None
-        if importance_score < 2.0:
-            return None
+            return None, "below_pending_confidence"
+        if importance_score < 1.0:
+            return None, "invalid_importance"
         if category not in ALLOWED_CATEGORIES:
-            return None
-        if self._looks_like_temporary_session_memory(content=content, category=category, reasoning=reasoning):
-            return None
+            return None, "invalid_category"
+        if self._looks_like_temporary_session_memory(
+            content=content, category=category, reasoning=reasoning
+        ):
+            return None, "temporary_session_directive"
         if len(content) < 10:
-            return None
+            return None, "content_too_short"
         if len(content) > 500:
             content = content[:500].rstrip()
 
         try:
-            return PendingExtractedMemory(
-                content=content,
-                category=category,
-                importance_score=max(1.0, min(10.0, importance_score)),
-                confidence=max(0.0, min(1.0, confidence)),
-                reasoning=reasoning,
+            return (
+                PendingExtractedMemory(
+                    content=content,
+                    category=category,
+                    importance_score=max(1.0, min(10.0, importance_score)),
+                    confidence=max(0.0, min(1.0, confidence)),
+                    reasoning=reasoning,
+                ),
+                None,
             )
         except (TypeError, ValueError):
-            return None
+            return None, "schema_validation"
 
     @staticmethod
-    def _looks_like_temporary_session_memory(*, content: str, category: str, reasoning: str) -> bool:
+    def _looks_like_temporary_session_memory(
+        *, content: str, category: str, reasoning: str
+    ) -> bool:
         if category not in {"preference", "procedure", "goal", "fact"}:
             return False
         combined = f"{content}\n{reasoning}"
-        return any(pattern.search(combined) for pattern in TEMPORARY_SESSION_MEMORY_PATTERNS)
+        return any(
+            pattern.search(combined) for pattern in TEMPORARY_SESSION_MEMORY_PATTERNS
+        )
+
     @classmethod
     def _load_spec(cls, spec_path: Path) -> ParsedExtractionSpec:
         if cls._cached_spec is not None and cls._cached_spec_path == spec_path:
@@ -964,9 +1368,13 @@ class ExtractionService:
         parsed = ParsedExtractionSpec(
             raw_text=raw_text,
             category_definitions=cls._extract_category_definitions(raw_text),
-            importance_rubric=cls._extract_section(raw_text, "## 2. Importance Scoring Rubric", "## 3."),
+            importance_rubric=cls._extract_section(
+                raw_text, "## 2. Importance Scoring Rubric", "## 3."
+            ),
             never_store=cls._extract_never_store(raw_text),
-            examples=cls._extract_section(raw_text, "## 3. Example Conversations", "## 4."),
+            examples=cls._extract_section(
+                raw_text, "## 3. Example Conversations", "## 4."
+            ),
         )
         cls._cached_spec = parsed
         cls._cached_spec_path = spec_path
@@ -974,7 +1382,9 @@ class ExtractionService:
 
     @staticmethod
     def _default_spec_path() -> Path:
-        source_tree_path = Path(__file__).resolve().parents[2] / "docs" / "extraction_spec.md"
+        source_tree_path = (
+            Path(__file__).resolve().parents[2] / "docs" / "extraction_spec.md"
+        )
         app_workdir_path = Path.cwd() / "docs" / "extraction_spec.md"
         if source_tree_path.exists():
             return source_tree_path
@@ -993,7 +1403,17 @@ class ExtractionService:
                 definitions[category] = " ".join(match.group(1).split())[:700]
         for category in ALLOWED_CATEGORIES - definitions.keys():
             definitions[category] = f"Reusable user memory in the {category} category."
-        return {category: definitions[category] for category in ("expertise", "preference", "goal", "fact", "procedure", "relationship")}
+        return {
+            category: definitions[category]
+            for category in (
+                "expertise",
+                "preference",
+                "goal",
+                "fact",
+                "procedure",
+                "relationship",
+            )
+        }
 
     @staticmethod
     def _extract_section(raw_text: str, start_marker: str, end_marker: str) -> str:
@@ -1006,8 +1426,14 @@ class ExtractionService:
 
     @staticmethod
     def _extract_never_store(raw_text: str) -> list[str]:
-        section = ExtractionService._extract_section(raw_text, "## 4. What Should NEVER Be Stored", "## 5.")
-        rules = re.findall(r"\*\*Rule\s+\d+\s+[^*]+\*\*\s*\n(.*?)(?=\n---|\n\*\*Rule|\Z)", section, flags=re.DOTALL)
+        section = ExtractionService._extract_section(
+            raw_text, "## 4. What Should NEVER Be Stored", "## 5."
+        )
+        rules = re.findall(
+            r"\*\*Rule\s+\d+\s+[^*]+\*\*\s*\n(.*?)(?=\n---|\n\*\*Rule|\Z)",
+            section,
+            flags=re.DOTALL,
+        )
         cleaned = [" ".join(rule.split())[:260] for rule in rules if rule.strip()]
         return cleaned[:20] or [
             "Never store greetings, filler, secrets, health data, one-time context, or AI-authored statements."
@@ -1023,7 +1449,17 @@ class ExtractionService:
                 turn_index = message.get("_turn_index", fallback_index)
                 source_kind = str(message.get("source_kind") or "").strip().lower()
                 source_label = f"[source {source_kind}]" if source_kind else ""
-                lines.append(f"[turn {turn_index}][{role}]{source_label}: {content}")
+                proposal_label = (
+                    "[registered memory proposal]"
+                    if bool(
+                        message.get("is_memory_proposal")
+                        or message.get("_registered_memory_proposal")
+                    )
+                    else ""
+                )
+                lines.append(
+                    f"[turn {turn_index}][{role}]{source_label}{proposal_label}: {content}"
+                )
         return "\n".join(lines)
 
     @staticmethod
@@ -1035,7 +1471,6 @@ class ExtractionService:
             return len(encoding.encode(text))
         except Exception:
             return max(1, len(text) // 4)
-
 
     @staticmethod
     def _truncate_to_token_budget(text: str, budget: int) -> str:
@@ -1052,8 +1487,10 @@ class ExtractionService:
         except Exception:
             return text[: budget * 4]
 
-__all__ = ["ExtractionError", "ExtractionResult", "ExtractionService", "ParsedExtractionSpec"]
 
-
-
-
+__all__ = [
+    "ExtractionError",
+    "ExtractionResult",
+    "ExtractionService",
+    "ParsedExtractionSpec",
+]

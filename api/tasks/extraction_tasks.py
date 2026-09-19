@@ -21,6 +21,7 @@ from celery.signals import task_postrun
 from celery.signals import worker_process_shutdown
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -33,6 +34,7 @@ from api.db.models import ExtractionJob
 from api.infra.protected_storage import encrypt_json_for_dual_write
 from api.db.models import ExtractionJobStatus
 from api.db.models import Memory
+from api.db.models import MemoryProposal
 from api.db.models import MemorySourceEvent
 from api.db.models import PendingExtractionCandidate
 from api.db.models import ProxyUser
@@ -657,6 +659,9 @@ def _promoted_memory_from_candidate(candidate: PendingExtractionCandidate) -> Ex
 
 
 def _should_promote_pending_candidate(candidate: PendingExtractionCandidate, *, store_threshold: float = 0.65) -> bool:
+    reason = str(getattr(candidate, "candidate_reason", "") or "")
+    if reason == "ambiguous_proposal_reference" or reason.startswith("proposal_reference_"):
+        return False
     return int(candidate.reinforcement_count or 0) >= _PENDING_PROMOTION_REINFORCEMENT_COUNT or float(
         candidate.confidence_score or 0.0
     ) >= store_threshold
@@ -741,6 +746,73 @@ def _persist_pending_extraction_candidates(
 
     return buffered, promoted
 
+def _claim_confirmed_proposals(
+    session: Session,
+    *,
+    memories: list[Any],
+    tenant_id: str,
+    proxy_user_id: str,
+    conversation_scope_id: str,
+) -> tuple[list[Any], int]:
+    # Claim each verified proposal in the same transaction as memory storage.
+    proposal_groups: dict[uuid.UUID, list[Any]] = {}
+    passthrough: list[Any] = []
+    for memory in memories:
+        evidence = dict(getattr(memory, "validated_evidence", None) or {})
+        if evidence.get("relation") != "user_confirmed_assistant_proposal":
+            passthrough.append(memory)
+            continue
+        proposal_id = str((evidence.get("proposal") or {}).get("id") or "")
+        try:
+            proposal_uuid = uuid.UUID(proposal_id)
+        except (TypeError, ValueError):
+            continue
+        proposal_groups.setdefault(proposal_uuid, []).append(memory)
+
+    accepted: list[Any] = list(passthrough)
+    now = datetime.now(UTC)
+    tenant_uuid = uuid.UUID(tenant_id)
+    proxy_uuid = uuid.UUID(proxy_user_id)
+    for proposal_id, proposal_memories in proposal_groups.items():
+        proposal = session.execute(
+            select(MemoryProposal).where(
+                MemoryProposal.id == proposal_id,
+                MemoryProposal.tenant_id == tenant_uuid,
+                MemoryProposal.proxy_user_id == proxy_uuid,
+                MemoryProposal.conversation_scope_id == conversation_scope_id,
+                MemoryProposal.status == "active",
+                MemoryProposal.expires_at > now,
+            )
+        ).scalar_one_or_none()
+        if proposal is None:
+            continue
+        claimed = session.execute(
+            update(MemoryProposal)
+            .where(
+                MemoryProposal.id == proposal.id,
+                MemoryProposal.status == "active",
+                MemoryProposal.expires_at > now,
+            )
+            .values(status="accepted", resolved_at=now)
+        )
+        if claimed.rowcount != 1:
+            continue
+        session.execute(
+            update(MemoryProposal)
+            .where(
+                MemoryProposal.tenant_id == tenant_uuid,
+                MemoryProposal.proxy_user_id == proxy_uuid,
+                MemoryProposal.conversation_scope_id == conversation_scope_id,
+                MemoryProposal.proposal_group_id == proposal.proposal_group_id,
+                MemoryProposal.id != proposal.id,
+                MemoryProposal.status == "active",
+            )
+            .values(status="cancelled", resolved_at=now)
+        )
+        accepted.extend(proposal_memories)
+    return accepted, len(memories) - len(accepted)
+
+
 def _load_existing_memories_for_context(session: Session, proxy_user_id: str) -> list[Memory]:
     try:
         proxy_user_uuid = uuid.UUID(str(proxy_user_id))
@@ -818,6 +890,91 @@ def _run_domain_schema_overlay(
         return {"domain_schema_error": str(exc), "domain_schema": domain_schema}
 
 
+def _active_proposal_context(
+    session: Session,
+    *,
+    job_payload: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    # Bind the latest active proposal group to immutable transcript turns.
+    tenant_id = str(job_payload.get("tenant_id") or "").strip()
+    proxy_user_id = str(job_payload.get("proxy_user_id") or "").strip()
+    job_id = str(job_payload.get("job_id") or "").strip()
+    if not tenant_id or not proxy_user_id or not job_id:
+        return []
+    external_conversation_id = str(
+        job_payload.get("external_conversation_id") or ""
+    ).strip()
+    scope_id = (
+        f"external:{external_conversation_id}"
+        if external_conversation_id
+        else f"job:{job_id}"
+    )
+    now = datetime.now(UTC)
+    proposals = list(
+        session.execute(
+            select(MemoryProposal)
+            .where(
+                MemoryProposal.tenant_id == uuid.UUID(tenant_id),
+                MemoryProposal.proxy_user_id == uuid.UUID(proxy_user_id),
+                MemoryProposal.conversation_scope_id == scope_id,
+                MemoryProposal.status == "active",
+                MemoryProposal.expires_at > now,
+            )
+            .order_by(
+                MemoryProposal.created_at.desc(),
+                MemoryProposal.proposal_ordinal.asc(),
+            )
+        ).scalars().all()
+    )
+    if not proposals:
+        return []
+    latest_group_id = proposals[0].proposal_group_id
+    active_group = [
+        proposal
+        for proposal in proposals
+        if proposal.proposal_group_id == latest_group_id
+    ]
+
+    message_locations: dict[str, tuple[int, dict[str, Any]]] = {}
+    duplicate_turn_ids: set[str] = set()
+    for index, message in enumerate(messages):
+        turn_id = str(message.get("turn_id") or "").strip()
+        if not turn_id:
+            continue
+        if turn_id in message_locations:
+            duplicate_turn_ids.add(turn_id)
+            continue
+        message_locations[turn_id] = (index, message)
+
+    context: list[dict[str, Any]] = []
+    for proposal in active_group:
+        turn_index = -1
+        located = message_locations.get(proposal.assistant_turn_id)
+        if located is not None and proposal.assistant_turn_id not in duplicate_turn_ids:
+            index, message = located
+            if (
+                str(message.get("role") or "").lower() == "assistant"
+                and str(message.get("source_kind") or "").lower() == "assistant_output"
+                and str(message.get("turn_content_sha256") or "")
+                == proposal.assistant_content_sha256
+            ):
+                turn_index = index
+                message["_registered_memory_proposal"] = True
+        context.append(
+            {
+                "id": str(proposal.id),
+                "group_id": proposal.proposal_group_id,
+                "ordinal": proposal.proposal_ordinal,
+                "turn_index": turn_index,
+                "turn_id": proposal.assistant_turn_id,
+                "content_sha256": proposal.assistant_content_sha256,
+                "expires_at": proposal.expires_at.isoformat(),
+            }
+        )
+    return context
+
+
 def _extract_memories_for_pipeline(
     extractor: Any,
     *,
@@ -827,6 +984,7 @@ def _extract_memories_for_pipeline(
     job_id: str | None,
     existing_memories: list[Memory],
     source_context: dict[str, Any] | None = None,
+    proposal_context: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Any], dict[str, Any], bool]:
     """Run either the new spec-driven extractor or a legacy test double.
 
@@ -841,6 +999,7 @@ def _extract_memories_for_pipeline(
             job_id=job_id,
             existing_memories=existing_memories,
             source_context=source_context,
+            proposal_context=proposal_context,
         )
         return (
             list(result.memories_to_store),
@@ -942,6 +1101,15 @@ def run_extraction_pipeline(
             else None
         )
         stage = "extract_memories"
+        proposal_context = (
+            _active_proposal_context(
+                session,
+                job_payload=job_payload,
+                messages=messages,
+            )
+            if bool(getattr(extractor, "proposal_confirmation_enabled", False))
+            else []
+        )
         try:
             extracted_memories, extraction_meta, should_apply_scorer = _extract_memories_for_pipeline(
                 extractor,
@@ -951,6 +1119,7 @@ def run_extraction_pipeline(
                 job_id=str(job_payload.get("job_id") or ""),
                 existing_memories=existing_memories,
                 source_context=source_context,
+                proposal_context=proposal_context,
             )
         except Exception as exc:
             if not domain_schema_name:
@@ -1002,6 +1171,24 @@ def run_extraction_pipeline(
             }
 
         stage = "store_memories"
+        external_conversation_id = str(
+            job_payload.get("external_conversation_id") or ""
+        ).strip()
+        conversation_scope_id = (
+            f"external:{external_conversation_id}"
+            if external_conversation_id
+            else f"job:{job_payload.get('job_id')}"
+        )
+        extracted_memories, stale_confirmation_count = _claim_confirmed_proposals(
+            session,
+            memories=extracted_memories,
+            tenant_id=tenant_id,
+            proxy_user_id=proxy_user_id,
+            conversation_scope_id=conversation_scope_id,
+        )
+        if stale_confirmation_count:
+            extraction_meta["stale_confirmations_rejected"] = stale_confirmation_count
+
         # Keep the caller's stable conversation reference alongside the internal
         # conversation UUID. The UUID remains the relational source key; the
         # external identifier is immutable provenance that survives extraction,
@@ -1018,9 +1205,6 @@ def run_extraction_pipeline(
                 }
         else:
             provenance_snapshot = queued_evidence_policy
-        external_conversation_id = str(
-            job_payload.get("external_conversation_id") or ""
-        ).strip()
         if external_conversation_id:
             provenance_snapshot = {
                 **provenance_snapshot,

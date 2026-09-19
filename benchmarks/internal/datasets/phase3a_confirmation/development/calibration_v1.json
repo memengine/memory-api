@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0",
+  "split": "development",
+  "minimum_cases_per_language": 30,
+  "minimum_cases_per_reference_type": 20,
+  "reference_types": {
+    "single_vague": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        ["en", "Yes, remember that."],
+        ["en", "Exactly, keep that for next time."],
+        ["en", "That is right. Save it."],
+        ["en", "Correct, please retain that."],
+        ["en", "Yes, that describes me. Remember it."],
+        ["en", "Agreed. Keep that as my preference."],
+        ["en", "Perfect, store that for later."],
+        ["hinglish", "Haan, ye yaad rakhna."],
+        ["hinglish", "Bilkul sahi, isko remember kar lo."],
+        ["hinglish", "Yes, ye meri preference hai. Save it."],
+        ["hinglish", "Sahi hai, next time ke liye rakh lo."],
+        ["hinglish", "Haan exactly, is baat ko yaad rakhna."],
+        ["hinglish", "Correct hai, ise store kar lo."],
+        ["hinglish", "Perfect, ye future mein use karna."],
+        ["hi", "हां, इसे याद रखिए।"],
+        ["hi", "बिल्कुल सही, इसे सहेज लें।"],
+        ["hi", "यह ठीक है, अगली बार के लिए याद रखें।"],
+        ["hi", "सही कहा, इसे मेरी पसंद के रूप में रखिए।"],
+        ["hi", "हां, यही बात भविष्य के लिए याद रखनी है।"],
+        ["hi", "ठीक है, इसे बाद के लिए सुरक्षित रखें।"]
+      ]
+    },
+    "single_indirect": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        ["en", "That captures how I like troubleshooting help."],
+        ["en", "That is the format I want you to use with me."],
+        ["en", "You have described my preference accurately."],
+        ["en", "That approach fits me and should carry forward."],
+        ["en", "Use that as the standing rule for my answers."],
+        ["en", "That wording reflects what works best for me."],
+        ["en", "Treat that as my usual response preference."],
+        ["hinglish", "Yehi format mere liye best rehta hai."],
+        ["hinglish", "Aage se mere saath isi approach ko use karna."],
+        ["hinglish", "Tumne meri preference bilkul sahi samjhi."],
+        ["hinglish", "Ye approach mujhe suit karti hai, continue karna."],
+        ["hinglish", "Mere answers ke liye ye standing rule rakhna."],
+        ["hinglish", "Ye description mere working style se match karti hai."],
+        ["hinglish", "Usually mujhe isi tarah help chahiye."],
+        ["hi", "समस्या हल करने में मुझे यही प्रारूप पसंद है।"],
+        ["hi", "आगे से मेरे साथ यही तरीका अपनाइए।"],
+        ["hi", "आपने मेरी पसंद को सही समझा है।"],
+        ["hi", "यह तरीका मेरे लिए सही है और आगे भी रहना चाहिए।"],
+        ["hi", "मेरे उत्तरों के लिए इसे स्थायी नियम मानिए।"],
+        ["hi", "आमतौर पर मुझे इसी तरह की सहायता चाहिए।"]
+      ]
+    },
+    "explicit_ordinal": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        ["en", "Remember the first one.", 1],
+        ["en", "Save the second proposal.", 2],
+        ["en", "Keep option 1 for later.", 1],
+        ["en", "The latter one is my preference; remember it.", 2],
+        ["en", "Store the former option.", 1],
+        ["en", "I accept proposal number 2.", 2],
+        ["en", "Use the second one as my standing preference.", 2],
+        ["hinglish", "Pehla wala yaad rakhna.", 1],
+        ["hinglish", "Second proposal ko save kar lo.", 2],
+        ["hinglish", "Option 1 mere liye keep karo.", 1],
+        ["hinglish", "Last wala meri preference hai, remember it.", 2],
+        ["hinglish", "Former option ko store karna.", 1],
+        ["hinglish", "Main proposal number 2 accept karta hoon.", 2],
+        ["hinglish", "Second one ko standing preference bana do.", 2],
+        ["hi", "पहले वाले को याद रखिए।", 1],
+        ["hi", "दूसरे प्रस्ताव को सहेजिए।", 2],
+        ["hi", "विकल्प 1 को बाद के लिए रखिए।", 1],
+        ["hi", "अंतिम वाला मेरी पसंद है, उसे याद रखें।", 2],
+        ["hi", "मैं प्रस्ताव संख्या 2 स्वीकार करता हूं।", 2],
+        ["hi", "दूसरे वाले को मेरी स्थायी पसंद मानिए।", 2]
+      ]
+    },
+    "ambiguous_multi": {
+      "expected_outcome": "pending",
+      "utterances": [
+        ["en", "Yes, remember that."],
+        ["en", "That one is right, save it."],
+        ["en", "Okay, keep the preference."],
+        ["en", "Exactly, use that next time."],
+        ["en", "I agree with that option."],
+        ["en", "Store the one I meant."],
+        ["en", "That sounds right for me."],
+        ["hinglish", "Haan, woh wala yaad rakhna."],
+        ["hinglish", "That one sahi hai, save it."],
+        ["hinglish", "Okay, preference ko keep kar lo."],
+        ["hinglish", "Exactly, next time wahi use karna."],
+        ["hinglish", "Main us option se agree karta hoon."],
+        ["hinglish", "Jo maine mean kiya wahi store karna."],
+        ["hinglish", "Woh mere liye sahi lagta hai."],
+        ["hi", "हां, उसे याद रखिए।"],
+        ["hi", "वही सही है, उसे सहेज लें।"],
+        ["hi", "ठीक है, उस पसंद को रखिए।"],
+        ["hi", "सही, अगली बार वही इस्तेमाल कीजिए।"],
+        ["hi", "मैं उस विकल्प से सहमत हूं।"],
+        ["hi", "जो मेरा मतलब था उसे सुरक्षित रखें।"]
+      ]
+    },
+    "rejection": {
+      "expected_outcome": "rejected",
+      "utterances": [
+        ["en", "No, do not remember that."],
+        ["en", "That is incorrect; discard it."],
+        ["en", "I am not agreeing to store that."],
+        ["en", "Please forget that proposal."],
+        ["en", "Did I ever say that was my preference?"],
+        ["en", "Why would you remember that?"],
+        ["en", "Maybe for today, but not as a memory."],
+        ["hinglish", "Nahi, ye yaad mat rakhna."],
+        ["hinglish", "Ye incorrect hai, discard kar do."],
+        ["hinglish", "Main isko store karne se agree nahi karta."],
+        ["hinglish", "Please is proposal ko forget karo."],
+        ["hinglish", "Maine kab bola ye meri preference hai?"],
+        ["hinglish", "Tum ise remember kyun karoge?"],
+        ["hinglish", "Aaj ke liye maybe, memory mat banana."],
+        ["hi", "नहीं, इसे याद मत रखिए।"],
+        ["hi", "यह गलत है, इसे हटा दीजिए।"],
+        ["hi", "मैं इसे सहेजने की अनुमति नहीं देता।"],
+        ["hi", "इस प्रस्ताव को भूल जाइए।"],
+        ["hi", "क्या मैंने इसे अपनी पसंद कहा था?"],
+        ["hi", "शायद केवल आज के लिए, स्थायी स्मृति नहीं।"]
+      ]
+    }
+  }
+}

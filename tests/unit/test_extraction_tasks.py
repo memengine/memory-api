@@ -391,6 +391,16 @@ def test_pending_candidate_promotes_after_reinforcement_count() -> None:
     assert promoted.confidence == 0.58
 
 
+def test_ambiguous_confirmation_never_auto_promotes() -> None:
+    candidate = SimpleNamespace(
+        confidence_score=0.99,
+        reinforcement_count=10,
+        candidate_reason="ambiguous_proposal_reference",
+    )
+
+    assert extraction_tasks._should_promote_pending_candidate(candidate) is False
+
+
 def test_pending_candidate_does_not_promote_single_weak_signal() -> None:
     candidate = SimpleNamespace(
         content="User may prefer short replies for difficult topics",
@@ -405,6 +415,83 @@ def test_pending_candidate_does_not_promote_single_weak_signal() -> None:
 
 
 
+
+
+class _ScalarResult:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _RowcountResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
+class _ProposalClaimSession:
+    def __init__(self, proposal) -> None:
+        self.proposal = proposal
+        self.calls = 0
+
+    def execute(self, _statement):
+        self.calls += 1
+        if self.calls == 1:
+            return _ScalarResult(self.proposal)
+        return _RowcountResult(1)
+
+
+def test_confirmed_proposal_is_claimed_before_memory_storage() -> None:
+    tenant_id = uuid.uuid4()
+    proxy_user_id = uuid.uuid4()
+    proposal_id = uuid.uuid4()
+    proposal = SimpleNamespace(
+        id=proposal_id,
+        proposal_group_id="group-1",
+    )
+    memory = SimpleNamespace(
+        validated_evidence={
+            "relation": "user_confirmed_assistant_proposal",
+            "proposal": {"id": str(proposal_id)},
+        }
+    )
+    session = _ProposalClaimSession(proposal)
+
+    accepted, rejected = extraction_tasks._claim_confirmed_proposals(
+        session,
+        memories=[memory],
+        tenant_id=str(tenant_id),
+        proxy_user_id=str(proxy_user_id),
+        conversation_scope_id="external:chat-1",
+    )
+
+    assert accepted == [memory]
+    assert rejected == 0
+    assert session.calls == 3
+
+
+def test_confirmation_is_dropped_if_proposal_is_no_longer_active() -> None:
+    proposal_id = uuid.uuid4()
+    memory = SimpleNamespace(
+        validated_evidence={
+            "relation": "user_confirmed_assistant_proposal",
+            "proposal": {"id": str(proposal_id)},
+        }
+    )
+    session = _ProposalClaimSession(None)
+
+    accepted, rejected = extraction_tasks._claim_confirmed_proposals(
+        session,
+        memories=[memory],
+        tenant_id=str(uuid.uuid4()),
+        proxy_user_id=str(uuid.uuid4()),
+        conversation_scope_id="external:chat-1",
+    )
+
+    assert accepted == []
+    assert rejected == 1
+    assert session.calls == 1
 
 def test_parse_optional_uuid_ignores_non_uuid_agent_labels() -> None:
     from api.tasks.extraction_tasks import _parse_optional_uuid

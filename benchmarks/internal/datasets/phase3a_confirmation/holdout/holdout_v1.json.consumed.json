@@ -1,0 +1,6 @@
+{
+  "artifact": "artifacts/internal-benchmarks/phase3a/phase3a-holdout-v1.json",
+  "dataset_sha256": "5dfc761d0e5b3164d91ec9d08727f62a78d7e93f2a64db5b78c9f211c30e88bc",
+  "release_eligible": false,
+  "status": "completed"
+}

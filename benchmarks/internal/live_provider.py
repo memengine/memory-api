@@ -6,7 +6,6 @@ import json
 import time
 from collections import Counter
 from dataclasses import asdict
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +17,18 @@ from api.services.llm_service import (
     ProviderError,
 )
 from benchmarks.internal.cases import ExtractionCase, load_cases, load_legacy_cases
-from benchmarks.internal.metrics import evaluate_extraction
+from benchmarks.internal.metrics import (
+    ExtractionMetrics,
+    aggregate_metrics,
+    evaluate_extraction,
+)
 from benchmarks.internal.results import build_run_record, write_run_record
 
 ROOT = Path(__file__).resolve().parents[2]
 LEGACY_DEVELOPMENT = ROOT / "tests" / "evals" / "general_extraction_cases"
-INTERNAL_DEVELOPMENT = ROOT / "benchmarks" / "internal" / "datasets" / "extraction" / "development"
+INTERNAL_DEVELOPMENT = (
+    ROOT / "benchmarks" / "internal" / "datasets" / "extraction" / "development"
+)
 DEFAULT_ARTIFACT_ROOT = ROOT / "artifacts" / "internal-benchmarks"
 
 # Standard paid-tier text rates in USD per 1M tokens. The rate actually used is
@@ -48,7 +53,9 @@ MODEL_RATES: dict[tuple[str, str], tuple[float, float, str]] = {
 
 
 class NoopUsageCache:
-    async def increment_provider_usage(self, provider: str, hour_bucket: str, ttl: int) -> None:
+    async def increment_provider_usage(
+        self, provider: str, hour_bucket: str, ttl: int
+    ) -> None:
         del provider, hour_bucket, ttl
 
 
@@ -86,11 +93,13 @@ async def run_live_case_evaluation(
     *,
     mode: str,
     holdout_loaded: bool,
+    proposal_confirmation_enabled: bool = False,
 ) -> dict[str, Any]:
     recorder = RecordingLLMService(LLMService())
     extraction = ExtractionService(
         llm_service=recorder,
         cache_service=NoopUsageCache(),
+        proposal_confirmation_enabled=proposal_confirmation_enabled,
     )
     metrics = []
     details: list[dict[str, Any]] = []
@@ -117,7 +126,9 @@ async def run_live_case_evaluation(
                     "importance_score": float(item.importance_score),
                     "confidence": float(item.confidence),
                     "reasoning": item.reasoning,
-                    "evidence_turns": list(item.validated_evidence.get("turn_indexes") or []),
+                    "evidence_turns": list(
+                        item.validated_evidence.get("turn_indexes") or []
+                    ),
                 }
                 for item in result.memories_to_store
             )
@@ -129,7 +140,9 @@ async def run_live_case_evaluation(
                     "importance_score": float(item.importance_score),
                     "confidence": float(item.confidence),
                     "reasoning": item.reasoning,
-                    "evidence_turns": list(item.validated_evidence.get("turn_indexes") or []),
+                    "evidence_turns": list(
+                        item.validated_evidence.get("turn_indexes") or []
+                    ),
                 }
                 for item in result.pending_candidates
             )
@@ -172,6 +185,7 @@ async def run_live_case_evaluation(
         config={
             "mode": mode,
             "holdout_loaded": holdout_loaded,
+            "proposal_confirmation_enabled": proposal_confirmation_enabled,
             "production_extraction_path": "api.services.extraction_service.ExtractionService",
             "pricing_rates_usd_per_1m_tokens": {
                 f"{provider}/{model}": {
@@ -184,8 +198,22 @@ async def run_live_case_evaluation(
         },
     )
     record["cases"] = details
+    completed_metrics = _completed_quality_metrics(metrics, details)
+    record["summary"] = aggregate_metrics(completed_metrics)
     _add_live_summary(record, details)
     return record
+
+
+def _completed_quality_metrics(
+    metrics: list[ExtractionMetrics],
+    details: list[dict[str, Any]],
+) -> list[ExtractionMetrics]:
+    """Keep infrastructure failures out of model-quality measurements."""
+    return [
+        metric
+        for metric, detail in zip(metrics, details, strict=True)
+        if detail["status"] == "completed"
+    ]
 
 
 def _response_record(response: LLMResponse) -> dict[str, Any]:
@@ -252,9 +280,13 @@ def _slice_metrics(cases: list[dict[str, Any]]) -> dict[str, float | int]:
         "case_count": len(cases),
         "micro_precision": precision,
         "micro_recall": recall,
-        "micro_f1": (2 * precision * recall / (precision + recall)) if precision + recall else 0.0,
+        "micro_f1": (2 * precision * recall / (precision + recall))
+        if precision + recall
+        else 0.0,
         "mean_latency_ms": _mean([float(case["latency_ms"]) for case in cases]),
-        "estimated_cost_usd": sum(float(case["metrics"]["estimated_cost_usd"]) for case in cases),
+        "estimated_cost_usd": sum(
+            float(case["metrics"]["estimated_cost_usd"]) for case in cases
+        ),
     }
 
 
@@ -268,7 +300,9 @@ def _add_live_summary(record: dict[str, Any], details: list[dict[str, Any]]) -> 
     )
     completed = [case for case in details if case["status"] == "completed"]
     composition_metrics = [
-        dict(case.get("extraction_metadata", {}).get("compositional_pass_metrics") or {})
+        dict(
+            case.get("extraction_metadata", {}).get("compositional_pass_metrics") or {}
+        )
         for case in completed
     ]
     prompt_metrics = [
@@ -276,7 +310,7 @@ def _add_live_summary(record: dict[str, Any], details: list[dict[str, Any]]) -> 
         for case in completed
     ]
     language_slices: dict[str, list[dict[str, Any]]] = {}
-    for case in details:
+    for case in completed:
         language_slices.setdefault(_language_slice(list(case["tags"])), []).append(case)
     attempted_cases = [
         case
@@ -293,6 +327,9 @@ def _add_live_summary(record: dict[str, Any], details: list[dict[str, Any]]) -> 
             "completed_cases": sum(case["status"] == "completed" for case in details),
             "errored_cases": sum(case["status"] == "error" for case in details),
             "errors_by_kind": dict(errors),
+            "attempted_cases": len(details),
+            "quality_metrics_exclude_errored_cases": True,
+            "release_eligible": not errors,
             "latency_ms": {
                 "mean": sum(latencies) / len(latencies) if latencies else 0.0,
                 "p50": _percentile(latencies, 0.50),
@@ -316,29 +353,49 @@ def _add_live_summary(record: dict[str, Any], details: list[dict[str, Any]]) -> 
             },
             "prompt_context": {
                 "mean_existing_memory_context_tokens": _mean(
-                    [float(item.get("existing_memory_context_tokens", 0)) for item in prompt_metrics]
+                    [
+                        float(item.get("existing_memory_context_tokens", 0))
+                        for item in prompt_metrics
+                    ]
                 ),
                 "mean_primary_user_message_tokens": _mean(
-                    [float(item.get("primary_user_message_tokens", 0)) for item in prompt_metrics]
+                    [
+                        float(item.get("primary_user_message_tokens", 0))
+                        for item in prompt_metrics
+                    ]
                 ),
                 "mean_existing_memories_included": _mean(
-                    [float(item.get("existing_memories_included", 0)) for item in prompt_metrics]
+                    [
+                        float(item.get("existing_memories_included", 0))
+                        for item in prompt_metrics
+                    ]
                 ),
             },
             "compositional_pass": {
-                "attempt_rate": _mean([float(bool(item.get("attempted"))) for item in composition_metrics]),
-                "used_rate": _mean([float(bool(item.get("used"))) for item in composition_metrics]),
-                "mean_latency_ms_when_attempted": _mean(
-                    [float(item.get("latency_ms", 0)) for item in composition_metrics if item.get("attempted")]
+                "attempt_rate": _mean(
+                    [float(bool(item.get("attempted"))) for item in composition_metrics]
                 ),
-                "total_tokens": sum(int(item.get("total_tokens", 0)) for item in composition_metrics),
+                "used_rate": _mean(
+                    [float(bool(item.get("used"))) for item in composition_metrics]
+                ),
+                "mean_latency_ms_when_attempted": _mean(
+                    [
+                        float(item.get("latency_ms", 0))
+                        for item in composition_metrics
+                        if item.get("attempted")
+                    ]
+                ),
+                "total_tokens": sum(
+                    int(item.get("total_tokens", 0)) for item in composition_metrics
+                ),
                 "observational_quality": {
                     "attempted": _slice_metrics(attempted_cases),
                     "not_attempted": _slice_metrics(non_attempted_cases),
                 },
             },
             "language_slices": {
-                label: _slice_metrics(cases) for label, cases in sorted(language_slices.items())
+                label: _slice_metrics(cases)
+                for label, cases in sorted(language_slices.items())
             },
         }
     )

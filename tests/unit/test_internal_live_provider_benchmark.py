@@ -4,17 +4,56 @@ import pytest
 
 from api.services.llm_service import LLMResponse
 from benchmarks.internal.live_provider import (
+    _add_live_summary,
+    _completed_quality_metrics,
     _error_record,
     _estimate_cost,
     load_development_cases,
 )
 
 
+
 def test_live_provider_loader_is_development_only() -> None:
     cases = load_development_cases()
-
     assert len(cases) == 49
     assert all(case.split == "development" for case in cases)
+
+
+def test_provider_errors_are_excluded_from_quality_metrics() -> None:
+    completed_metric = object()
+    errored_metric = object()
+
+    selected = _completed_quality_metrics(  # type: ignore[arg-type]
+        [completed_metric, errored_metric],
+        [{"status": "completed"}, {"status": "error"}],
+    )
+
+    assert selected == [completed_metric]
+
+
+def test_provider_error_marks_run_release_ineligible() -> None:
+    record = {"summary": {}}
+    _add_live_summary(
+        record,
+        [
+            {
+                "provider_calls": [],
+                "latency_ms": 10.0,
+                "error": {"kind": "provider_error"},
+                "status": "error",
+                "extraction_metadata": {},
+                "tags": [],
+                "pricing_warnings": [],
+                "metrics": {},
+            }
+        ],
+    )
+
+    assert record["summary"]["attempted_cases"] == 1
+    assert record["summary"]["completed_cases"] == 0
+    assert record["summary"]["errored_cases"] == 1
+    assert record["summary"]["release_eligible"] is False
+    assert record["summary"]["quality_metrics_exclude_errored_cases"] is True
 
 
 def test_gemini_cost_uses_recorded_model_and_token_types() -> None:

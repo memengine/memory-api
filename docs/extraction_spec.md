@@ -101,7 +101,7 @@ Every extracted memory must belong to exactly ONE of these six categories. If a 
 ---
 
 ### EXPERTISE
-**Definition:** Skills, knowledge domains, tools, and technologies the user knows and uses. Expertise describes what the user is CAPABLE of and what they work with.
+**Definition:** Skills, knowledge domains, tools, and technologies the user knows, is learning, or currently uses. Expertise records the user's present capability level, including beginner, working, expert, and stale experience. A stated limitation is useful expertise context; it is not the absence of a memory.
 
 **Key question to ask:** "Does this tell me what this person KNOWS or is SKILLED IN?"
 
@@ -111,7 +111,9 @@ Every extracted memory must belong to exactly ONE of these six categories. If a 
 - `"User understands vector databases and embedding-based search well"`
 
 **NOT expertise:**
-- "User is learning Rust" → debatable, but GOAL is more appropriate (aspiring, not current)
+- "User is learning Rust and cannot build useful programs yet" → this is EXPERTISE (current beginner level)
+- "User wants to become proficient in Rust next year" → this is GOAL (desired future level)
+- "User uses Rust because work mandates it but prefers another language" → split current Rust usage as EXPERTISE and personal choice as PREFERENCE
 - "User prefers Python over Go" → this is PREFERENCE
 
 ---

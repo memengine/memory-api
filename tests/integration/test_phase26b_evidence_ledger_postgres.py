@@ -167,6 +167,18 @@ async def test_evidence_and_proposal_scope_constraints_execute_in_postgres() -> 
                 {"id": uuid.UUID(job["job_id"])},
             )).scalar_one()
             assert payload["proposal_ids"] == result["proposal_ids"]
+
+            replay_job = {**job, "job_id": str(uuid.uuid4())}
+            replay_result, _ = await service._create_extraction_job(replay_job)
+            assert replay_result["proposal_ids"] == result["proposal_ids"]
+            replay_window = await ProposalWindowService(session).active_group(
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                conversation_scope_id="external:chat-26b",
+            )
+            assert len(replay_window) == 1
+            assert str(replay_window[0].id) == result["proposal_ids"][0]
+
             next_job_id = uuid.uuid4()
             next_job = {
                 **job,

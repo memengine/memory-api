@@ -737,7 +737,30 @@ class MemoryService:
             message for message in list(job.get("messages") or [])
             if bool(message.get("is_memory_proposal"))
         ]
-        if proposal_messages:
+        proposal_turn_ids = {
+            str(message.get("turn_id") or "").strip()
+            for message in proposal_messages
+            if str(message.get("turn_id") or "").strip()
+        }
+        existing_proposals = {
+            proposal.assistant_turn_id: proposal
+            for proposal in (
+                (
+                    await self.session.execute(
+                        select(MemoryProposal).where(
+                            MemoryProposal.tenant_id == tenant_uuid,
+                            MemoryProposal.proxy_user_id == proxy_uuid,
+                            MemoryProposal.conversation_scope_id == scope_id,
+                            MemoryProposal.assistant_turn_id.in_(proposal_turn_ids),
+                        )
+                    )
+                ).scalars().all()
+                if proposal_turn_ids
+                else []
+            )
+        }
+        new_proposal_turn_ids = proposal_turn_ids - existing_proposals.keys()
+        if new_proposal_turn_ids:
             # Serialize proposal-window replacement for this user. Without the
             # row lock, two concurrent jobs can each supersede the old group
             # and then both insert a new active group.
@@ -814,9 +837,21 @@ class MemoryService:
 
             if not bool(message.get("is_memory_proposal")):
                 continue
-            proposal_ordinal += 1
             if role != "assistant" or source_kind != "assistant_output":
                 raise APIError(status_code=400, code="PROP_400", error="invalid_memory_proposal")
+            existing_proposal = existing_proposals.get(turn_id)
+            if existing_proposal is not None:
+                if existing_proposal.assistant_content_sha256 != content_sha256:
+                    raise APIError(
+                        status_code=409,
+                        code="PROP_409",
+                        error="proposal_turn_payload_mismatch",
+                        details={"turn_id": turn_id},
+                    )
+                proposal_ids.append(str(existing_proposal.id))
+                continue
+
+            proposal_ordinal += 1
             proposal_values = {
                 "tenant_id": tenant_uuid,
                 "proxy_user_id": proxy_uuid,

@@ -1,0 +1,243 @@
+{
+  "minimum_cases_per_language": 15,
+  "minimum_cases_per_reference_type": 10,
+  "reference_types": {
+    "ambiguous_multi": {
+      "expected_outcome": "pending",
+      "utterances": [
+        [
+          "en",
+          "That sounds good to me, let's go with it."
+        ],
+        [
+          "en",
+          "I'm fine with both options, you decide."
+        ],
+        [
+          "en",
+          "Sure, either way works for me."
+        ],
+        [
+          "hinglish",
+          "Theek hai, dono theek lagte hain."
+        ],
+        [
+          "hinglish",
+          "Main dono options ko consider kar sakta hoon."
+        ],
+        [
+          "hinglish",
+          "Chalo, jo bhi sahi lage, wahi karte hain."
+        ],
+        [
+          "hi",
+          "यह दोनों ठीक लगते हैं, आप तय करें।"
+        ],
+        [
+          "hi",
+          "मुझे दोनों में कोई आपत्ति नहीं है।"
+        ],
+        [
+          "hi",
+          "ठीक है, जो भी बेहतर लगे वह करें।"
+        ],
+        [
+          "hi",
+          "दोनों विकल्प सही लगते हैं, निर्णय आपका।"
+        ]
+      ]
+    },
+    "explicit_ordinal": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        [
+          "en",
+          "I prefer the first option here.",
+          1
+        ],
+        [
+          "en",
+          "Go with the latter suggestion.",
+          2
+        ],
+        [
+          "en",
+          "Choose proposal number two for me.",
+          2
+        ],
+        [
+          "hinglish",
+          "Pehla wala mujhe theek lagta hai.",
+          1
+        ],
+        [
+          "hinglish",
+          "Doosre option ko chun lo.",
+          2
+        ],
+        [
+          "hinglish",
+          "Main first proposal ko select karta hoon.",
+          1
+        ],
+        [
+          "hi",
+          "पहले विकल्प को चुनें।",
+          1
+        ],
+        [
+          "hi",
+          "मैं दूसरी प्रस्ताव को चुनता हूँ।",
+          2
+        ],
+        [
+          "hi",
+          "पहला प्रस्ताव सही रहेगा।",
+          1
+        ],
+        [
+          "hi",
+          "दूसरा प्रस्ताव बेहतर है।",
+          2
+        ]
+      ]
+    },
+    "rejection": {
+      "expected_outcome": "rejected",
+      "utterances": [
+        [
+          "en",
+          "I’m not comfortable with that being saved."
+        ],
+        [
+          "en",
+          "Please don’t keep this information after our chat."
+        ],
+        [
+          "en",
+          "I’d rather not have this stored anywhere."
+        ],
+        [
+          "hinglish",
+          "Mujhe ye baat yaad rakhni nahi hai."
+        ],
+        [
+          "hinglish",
+          "Is baat ko record mat karo please."
+        ],
+        [
+          "hinglish",
+          "Main is baat ko save karne se mana karta hoon."
+        ],
+        [
+          "hi",
+          "मैं इस जानकारी को कहीं भी सुरक्षित नहीं रखना चाहता।"
+        ],
+        [
+          "hi",
+          "इस सत्र की जानकारी भूल जाओ।"
+        ],
+        [
+          "hi",
+          "मैं इसके लिए सहमत नहीं हूँ।"
+        ],
+        [
+          "hi",
+          "इस पर मेरी सहमति नहीं है।"
+        ]
+      ]
+    },
+    "single_indirect": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        [
+          "en",
+          "That sounds like a good plan to me."
+        ],
+        [
+          "en",
+          "I think that approach should work fine."
+        ],
+        [
+          "en",
+          "Looks like that’s the right way to go."
+        ],
+        [
+          "hinglish",
+          "Woh tareeka theek lagta hai."
+        ],
+        [
+          "hinglish",
+          "Chalo, ussi ko follow karte hain."
+        ],
+        [
+          "hinglish",
+          "Bilkul, wahi karna chahiye."
+        ],
+        [
+          "hi",
+          "मुझे लगता है यह सही तरीका है।"
+        ],
+        [
+          "hi",
+          "यह योजना मेरे लिए ठीक लगती है।"
+        ],
+        [
+          "hi",
+          "मैं समझता हूँ कि यह जारी रहना चाहिए।"
+        ],
+        [
+          "hi",
+          "यह तरीका मेरे हिसाब से सही रहेगा।"
+        ]
+      ]
+    },
+    "single_vague": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        [
+          "en",
+          "Sounds good to me."
+        ],
+        [
+          "en",
+          "Alright, noted."
+        ],
+        [
+          "en",
+          "Okay, got it."
+        ],
+        [
+          "hinglish",
+          "Thik hai, yaad rakhna."
+        ],
+        [
+          "hinglish",
+          "Bilkul, samajh gaya."
+        ],
+        [
+          "hinglish",
+          "Theek hai, chal aise hi."
+        ],
+        [
+          "hi",
+          "ठीक है, ध्यान रखो।"
+        ],
+        [
+          "hi",
+          "सही है, याद रखूँगा।"
+        ],
+        [
+          "hi",
+          "ठीक है, मान लिया।"
+        ],
+        [
+          "hi",
+          "ठीक है, ये सही रहेगा।"
+        ]
+      ]
+    }
+  },
+  "schema_version": "1.0",
+  "split": "holdout"
+}
