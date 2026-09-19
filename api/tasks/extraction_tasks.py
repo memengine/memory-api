@@ -975,6 +975,178 @@ def _active_proposal_context(
     return context
 
 
+def _build_phase3a_shadow_extractor(client: Any | None) -> ExtractionService:
+    """Build an isolated evaluator whose output has no write-path reference."""
+
+    return ExtractionService(
+        client=client,
+        proposal_confirmation_enabled=True,
+    )
+
+
+def _phase3a_shadow_observation(
+    shadow_extractor: Any,
+    *,
+    messages: list[dict[str, Any]],
+    proxy_user_id: str,
+    tenant_id: str,
+    job_id: str,
+    existing_memories: list[Memory],
+    source_context: dict[str, Any] | None,
+    proposal_context: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate proposal confirmation without returning any writable candidate."""
+
+    started = time.perf_counter()
+    try:
+        result = shadow_extractor.extract_sync(
+            messages=messages,
+            proxy_user_id=proxy_user_id,
+            tenant_id=tenant_id,
+            job_id=job_id,
+            existing_memories=existing_memories,
+            source_context=source_context,
+            proposal_context=proposal_context,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "phase3a_confirmation_shadow_failed",
+            extra={
+                "event": "phase3a_confirmation_shadow_failed",
+                "tenant_id": tenant_id,
+                "proxy_user_id": proxy_user_id,
+                "job_id": job_id,
+                "error_type": exc.__class__.__name__,
+            },
+        )
+        return {
+            "enabled": True,
+            "eligible": True,
+            "attempted": True,
+            "write_blocked": True,
+            "active_proposal_count": len(proposal_context),
+            "status": "error",
+            "error_type": exc.__class__.__name__,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    confirmation_meta = dict(
+        (result.extraction_metadata or {}).get("proposal_confirmation") or {}
+    )
+    accepted = max(0, int(confirmation_meta.get("accepted", 0) or 0))
+    pending = max(0, int(confirmation_meta.get("pending", 0) or 0))
+    raw_rejected_reasons = dict(confirmation_meta.get("rejected_reasons") or {})
+    proposal_rejections = [
+        (reason, count)
+        for reason, count in raw_rejected_reasons.items()
+        if str(reason).startswith("proposal_")
+    ]
+    rejected_reasons = {
+        str(reason)[:64]: max(0, int(count or 0))
+        for reason, count in sorted(proposal_rejections)[:12]
+    }
+    rejected = sum(rejected_reasons.values())
+    if accepted:
+        outcome = "accepted"
+    elif pending:
+        outcome = "pending"
+    elif rejected or result.nothing_to_extract:
+        outcome = "rejected"
+    else:
+        outcome = "no_confirmation_candidate"
+    observation = {
+        "enabled": True,
+        "eligible": True,
+        "attempted": True,
+        "write_blocked": True,
+        "active_proposal_count": len(proposal_context),
+        "status": "completed",
+        "outcome": outcome,
+        "accepted_candidate_count": accepted,
+        "pending_candidate_count": pending,
+        "rejected_candidate_count": rejected,
+        "rejected_reasons": rejected_reasons,
+        "model_marked_nothing_to_extract": bool(result.nothing_to_extract),
+        "tokens_used": max(0, int(result.tokens_used or 0)),
+        "provider_used": str(result.provider_used or "unknown")[:64],
+        "latency_ms": int((time.perf_counter() - started) * 1000),
+    }
+    LOGGER.info(
+        "phase3a_confirmation_shadow_completed",
+        extra={
+            "event": "phase3a_confirmation_shadow_completed",
+            "tenant_id": tenant_id,
+            "proxy_user_id": proxy_user_id,
+            "job_id": job_id,
+            **observation,
+        },
+    )
+    return observation
+
+
+def _run_phase3a_shadow_observation(
+    session: Session,
+    *,
+    job_payload: dict[str, Any],
+    messages: list[dict[str, Any]],
+    proxy_user_id: str,
+    tenant_id: str,
+    existing_memories: list[Memory],
+    source_context: dict[str, Any] | None,
+    client: Any | None,
+) -> dict[str, Any]:
+    """Apply the cheap proposal gate before any shadow provider call."""
+
+    try:
+        shadow_messages = [dict(message) for message in messages]
+        proposal_context = _active_proposal_context(
+            session,
+            job_payload=job_payload,
+            messages=shadow_messages,
+        )
+        if not proposal_context:
+            return {
+                "enabled": True,
+                "eligible": False,
+                "attempted": False,
+                "write_blocked": True,
+                "active_proposal_count": 0,
+                "status": "not_eligible",
+            }
+
+        return _phase3a_shadow_observation(
+            _build_phase3a_shadow_extractor(client),
+            messages=shadow_messages,
+            proxy_user_id=proxy_user_id,
+            tenant_id=tenant_id,
+            job_id=str(job_payload.get("job_id") or ""),
+            existing_memories=existing_memories,
+            source_context=source_context,
+            proposal_context=proposal_context,
+        )
+    except Exception as exc:
+        observation = {
+            "enabled": True,
+            "eligible": False,
+            "attempted": False,
+            "write_blocked": True,
+            "active_proposal_count": 0,
+            "status": "error",
+            "error_type": exc.__class__.__name__,
+        }
+        LOGGER.warning(
+            "phase3a_confirmation_shadow_gate_failed",
+            extra={
+                "event": "phase3a_confirmation_shadow_gate_failed",
+                "tenant_id": tenant_id,
+                "proxy_user_id": proxy_user_id,
+                "job_id": str(job_payload.get("job_id") or ""),
+                **observation,
+            },
+        )
+        return observation
+
+
 def _extract_memories_for_pipeline(
     extractor: Any,
     *,
@@ -1063,7 +1235,25 @@ def run_extraction_pipeline(
         raise ValueError("Extraction job requires tenant_id and proxy_user_id.")
 
     session_factory = session_factory or build_extraction_session_factory()
-    extractor = extractor or ExtractionService(client=client)
+    settings = get_settings()
+    configured_live_confirmation = bool(
+        getattr(settings, "phase3a_confirmation_enabled", False)
+    )
+    extractor = extractor or ExtractionService(
+        client=client,
+        proposal_confirmation_enabled=configured_live_confirmation,
+    )
+    live_confirmation_enabled = bool(
+        getattr(
+            extractor,
+            "proposal_confirmation_enabled",
+            configured_live_confirmation,
+        )
+    )
+    shadow_confirmation_enabled = bool(
+        getattr(settings, "phase3a_confirmation_shadow_enabled", False)
+        and not live_confirmation_enabled
+    )
     scorer = scorer or ImportanceScorer()
     qdrant_service = qdrant_service or QdrantService()
 
@@ -1107,7 +1297,7 @@ def run_extraction_pipeline(
                 job_payload=job_payload,
                 messages=messages,
             )
-            if bool(getattr(extractor, "proposal_confirmation_enabled", False))
+            if live_confirmation_enabled
             else []
         )
         try:
@@ -1119,7 +1309,7 @@ def run_extraction_pipeline(
                 job_id=str(job_payload.get("job_id") or ""),
                 existing_memories=existing_memories,
                 source_context=source_context,
-                proposal_context=proposal_context,
+                proposal_context=(proposal_context if live_confirmation_enabled else []),
             )
         except Exception as exc:
             if not domain_schema_name:
@@ -1144,6 +1334,25 @@ def run_extraction_pipeline(
                 "general_extraction_error": str(exc),
             }
             should_apply_scorer = False
+
+        if shadow_confirmation_enabled:
+            shadow_observation = _run_phase3a_shadow_observation(
+                session,
+                job_payload=job_payload,
+                messages=messages,
+                proxy_user_id=proxy_user_id,
+                tenant_id=tenant_id,
+                existing_memories=existing_memories,
+                source_context=source_context,
+                client=client,
+            )
+            metadata = dict(extraction_meta.get("extraction_metadata") or {})
+            metadata["phase3a_confirmation_shadow"] = shadow_observation
+            extraction_meta["extraction_metadata"] = metadata
+            extraction_meta["phase3a_shadow_tokens_used"] = int(
+                shadow_observation.get("tokens_used", 0) or 0
+            )
+
         stage = "persist_pending_candidates"
         pending_candidates_buffered, promoted_pending_memories = _persist_pending_extraction_candidates(
             session,
@@ -1280,6 +1489,9 @@ def run_extraction_pipeline(
             "detection_strategies_used": list(getattr(resolver, "last_detection_strategies_used", []) or []),
             "conflict_types_found": list(getattr(resolver, "last_conflict_types_found", []) or []),
             "tokens_used": int(extraction_meta.get("tokens_used", 0) or 0),
+            "phase3a_shadow_tokens_used": int(
+                extraction_meta.get("phase3a_shadow_tokens_used", 0) or 0
+            ),
             "provider_used": extraction_meta.get("provider_used"),
             "general_extraction_error": extraction_meta.get("general_extraction_error"),
             "extraction_metadata": extraction_meta.get("extraction_metadata") or {},

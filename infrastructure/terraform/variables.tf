@@ -554,6 +554,12 @@ variable "phase3a_confirmation_enabled" {
   default     = false
 }
 
+variable "phase3a_confirmation_shadow_enabled" {
+  description = "Evaluate active assistant proposals without allowing proposal-derived writes."
+  type        = bool
+  default     = false
+}
+
 variable "embedding_provider" {
   description = "Embedding provider used by the memory retriever."
   type        = string

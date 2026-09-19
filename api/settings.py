@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     importance_shadow_review_dir: str = Field(default="", alias="IMPORTANCE_SHADOW_REVIEW_DIR")
     universal_extraction_shadow_enabled: bool = Field(default=False, alias="UNIVERSAL_EXTRACTION_SHADOW_ENABLED")
     phase3a_confirmation_enabled: bool = Field(default=False, alias="PHASE3A_CONFIRMATION_ENABLED")
+    phase3a_confirmation_shadow_enabled: bool = Field(
+        default=False,
+        alias="PHASE3A_CONFIRMATION_SHADOW_ENABLED",
+    )
     embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
     embedding_model_id: str = Field(default="", alias="EMBEDDING_MODEL_ID")
     embedding_dimensions: str = Field(default="", alias="EMBEDDING_DIMENSIONS")
