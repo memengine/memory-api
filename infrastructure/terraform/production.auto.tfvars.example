@@ -42,6 +42,11 @@ openai_model           = "gpt-4o-mini"
 openai_timeout_seconds = 30
 extraction_model       = "gpt-4o-mini"
 
+# Keep live confirmation disabled until an independent release holdout passes.
+# Shadow mode is opt-in and never permits proposal-derived writes.
+phase3a_confirmation_enabled        = false
+phase3a_confirmation_shadow_enabled = false
+
 embedding_provider   = "openai"
 embedding_model      = "text-embedding-3-small"
 embedding_model_id   = "openai-text-embedding-3-small-v1"
