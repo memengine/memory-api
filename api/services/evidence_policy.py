@@ -154,7 +154,7 @@ def validate_conversational_evidence(
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "proposal_not_active")
 
     latest_user_text = str(messages[max(user_indexes)].get("content") or "")
-    if _explicit_confirmation_denial(latest_user_text):
+    if has_explicit_proposal_denial(latest_user_text):
         return EvidenceDecision(
             False,
             EvidenceAuthority.CLIENT_ASSERTION,
@@ -199,15 +199,26 @@ _CONFIRMATION_DENIAL_PATTERNS = (
     re.compile(r"\b(?:no|nope|nah)\b", re.IGNORECASE),
     re.compile(r"\b(?:do\s+not|don't|dont)\s+(?:remember|save|store|keep)\b", re.IGNORECASE),
     re.compile(r"\b(?:not|never)\s+(?:agreeing|approve|remember|save|store|keep)\b", re.IGNORECASE),
+    re.compile(r"\b(?:that|this|it)\s+is\s+not\s+my\s+(?:default|preference)\b", re.IGNORECASE),
     re.compile(r"\b(?:nahi|nahin)\b", re.IGNORECASE),
     re.compile(r"\bmat\s+(?:rakhna|rakho|banana|karo)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reject|decline|discard)(?:ed|ing)?\b", re.IGNORECASE),
     re.compile(r"(?:^|[\s,;.!?।])(?:नहीं|मत|गलत)(?=$|[\s,;.!?।])"),
+    re.compile(r"(?:अस्वीकार|खारिज)"),
+    re.compile(r"न\s+(?:रख|याद|लागू|अपना)"),
 )
 
 
-def _explicit_confirmation_denial(user_text: str) -> bool:
+def has_explicit_proposal_denial(user_text: str) -> bool:
+    """Return true only for deterministic rejection or question signals."""
+
     normalized = " ".join(user_text.split())
     return any(pattern.search(normalized) for pattern in _CONFIRMATION_DENIAL_PATTERNS)
+
+
+# Backward-compatible internal alias. Keep existing imports stable while the
+# descriptive public helper name is used by new extraction paths.
+_explicit_confirmation_denial = has_explicit_proposal_denial
 
 
 _ORDINAL_WORDS = {
@@ -239,8 +250,20 @@ def _explicit_proposal_ordinal(
         ):
             return ordinal
     multilingual_ordinals = (
-        (r"\b(?:pehla|pahla|pehli|pehle)\s+wala\b", 1),
-        (r"\b(?:doosra|dusra|doosri|dusri|doosre|dusre)\s+wala\b", 2),
+        (
+            (
+                r"\b(?:pehla|pahla|pehli|pehle)\s+"
+                r"(?:wala|one|option|proposal|choice|suggestion)\b"
+            ),
+            1,
+        ),
+        (
+            (
+                r"\b(?:doosra|dusra|doosri|dusri|doosre|dusre)\s+"
+                r"(?:wala|one|option|proposal|choice|suggestion)\b"
+            ),
+            2,
+        ),
         (r"(?:पहले|पहला|पहली)\s+(?:वाला|वाले|वाली|प्रस्ताव|विकल्प)", 1),
         (r"(?:दूसरे|दूसरा|दूसरी)\s+(?:वाला|वाले|वाली|प्रस्ताव|विकल्प)", 2),
     )
@@ -248,7 +271,8 @@ def _explicit_proposal_ordinal(
         if re.search(pattern, normalized):
             return ordinal
     numeric = re.search(
-        r"(?:\b(?:option|proposal|choice)(?:\s+number)?|\bnumber|विकल्प|प्रस्ताव\s+संख्या)\s*#?\s*(\d{1,2})(?:st|nd|rd|th)?\b",
+        r"(?:\b(?:option|proposal|choice)(?:\s+number)?|\bnumber|"
+        r"(?:विकल्प|प्रस्ताव)(?:\s+संख्या)?)\s*#?\s*(\d{1,2})(?:st|nd|rd|th)?\b",
         normalized,
     )
     if numeric:
@@ -263,7 +287,10 @@ def _explicit_proposal_ordinal(
             if item.get("ordinal") is not None
         ]
         return max(ordinals) if ordinals else None
-    if re.search(r"\b(?:the\s+former|former\s+(?:one|option|proposal|choice))\b", normalized):
+    if re.search(
+        r"\b(?:the\s+former|former\s+(?:one|option|proposal|choice|suggestion))\b",
+        normalized,
+    ):
         return 1
     return None
 
@@ -283,5 +310,6 @@ __all__ = [
     "EvidenceAuthority",
     "EvidenceDecision",
     "authority_for_submission",
+    "has_explicit_proposal_denial",
     "validate_conversational_evidence",
 ]

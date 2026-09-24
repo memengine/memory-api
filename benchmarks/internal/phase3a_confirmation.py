@@ -74,6 +74,8 @@ class ConfirmationCase:
     utterance: str
     expected_outcome: str
     target_ordinal: int | None
+    user_prelude: str | None = None
+    require_nonproposal_memory: bool = False
 
 
 def load_confirmation_cases(
@@ -88,8 +90,12 @@ def load_confirmation_cases(
     if expected_split == "holdout" and os.getenv(HOLDOUT_APPROVAL_ENV) != HOLDOUT_APPROVAL_TOKEN:
         raise PermissionError("Phase 3A holdout is locked without explicit approval token.")
     cases: list[ConfirmationCase] = []
+    user_prelude = str(raw.get("user_prelude") or "").strip() or None
     for reference_type, group in raw.get("reference_types", {}).items():
         expected = str(group.get("expected_outcome") or "")
+        require_nonproposal_memory = bool(
+            group.get("require_nonproposal_memory", False)
+        )
         for index, entry in enumerate(group.get("utterances") or [], 1):
             if not isinstance(entry, list) or len(entry) not in {2, 3}:
                 raise ValueError(f"Invalid calibration entry for {reference_type} #{index}")
@@ -103,6 +109,8 @@ def load_confirmation_cases(
                     utterance=utterance,
                     expected_outcome=expected,
                     target_ordinal=target,
+                    user_prelude=user_prelude,
+                    require_nonproposal_memory=require_nonproposal_memory,
                 )
             )
     if len({case.id for case in cases}) != len(cases):
@@ -136,6 +144,17 @@ def _case_input(case: ConfirmationCase) -> tuple[list[dict[str, Any]], list[dict
     messages: list[dict[str, Any]] = []
     proposal_context: list[dict[str, Any]] = []
     expected: dict[int, dict[str, str]] = {}
+    if case.user_prelude:
+        prelude_hash = hashlib.sha256(case.user_prelude.encode("utf-8")).hexdigest()
+        messages.append(
+            {
+                "role": "user",
+                "content": case.user_prelude,
+                "source_kind": "direct_user_input",
+                "turn_id": f"{case.id}-prelude",
+                "turn_content_sha256": prelude_hash,
+            }
+        )
     for offset, proposal in enumerate(selected, 1):
         turn_index = len(messages)
         turn_id = f"{case.id}-proposal-{offset}"
@@ -208,8 +227,18 @@ async def run_confirmation_evaluation(
                     job_id=f"phase3a-{case.id}",
                     proposal_context=proposal_context,
                 )
+                correction_recovery = dict(
+                    result.extraction_metadata.get("correction_recovery") or {}
+                )
+                if correction_recovery.get("attempted") and correction_recovery.get(
+                    "error"
+                ):
+                    raise ProviderError(
+                        "correction recovery provider call failed during evaluation"
+                    )
                 break
             except (ProviderError, AllProvidersFailedError) as exc:
+                result = None
                 error = {"kind": "provider_error", "type": type(exc).__name__, "message": str(exc)}
                 if attempts < provider_attempts:
                     await asyncio.sleep(0.25 * attempts)
@@ -235,17 +264,39 @@ async def run_confirmation_evaluation(
 
         stored = list(result.memories_to_store)
         pending = list(result.pending_candidates)
-        observed_outcome = "accepted" if stored else "pending" if pending else "rejected"
+        proposal_stored = [
+            item
+            for item in stored
+            if dict(item.validated_evidence or {}).get("relation")
+            == "user_confirmed_assistant_proposal"
+        ]
+        proposal_pending = [
+            item
+            for item in pending
+            if dict(item.validated_evidence or {}).get("relation")
+            == "user_confirmed_assistant_proposal"
+            or item.candidate_reason
+            in {"ambiguous_proposal_reference", "proposal_reference_mismatch"}
+        ]
+        nonproposal_stored = [item for item in stored if item not in proposal_stored]
+        observed_outcome = (
+            "accepted"
+            if proposal_stored
+            else "pending"
+            if proposal_pending
+            else "rejected"
+        )
         target_correct = False
         evidence_integrity = True
         if observed_outcome == "accepted":
             target = expected.get(case.target_ordinal or -1)
             predictions = [
-                {"content": item.content, "category": str(item.category)} for item in stored
+                {"content": item.content, "category": str(item.category)}
+                for item in proposal_stored
             ]
             target_correct = bool(
                 target
-                and len(stored) == 1
+                and len(proposal_stored) == 1
                 and match_memories(
                     (
                         ExpectedMemory(
@@ -256,10 +307,14 @@ async def run_confirmation_evaluation(
                     predictions,
                 )
             )
-            evidence = stored[0].validated_evidence if len(stored) == 1 else {}
+            evidence = (
+                proposal_stored[0].validated_evidence
+                if len(proposal_stored) == 1
+                else {}
+            )
             proposal = dict(evidence.get("proposal") or {})
             evidence_integrity = bool(
-                len(stored) == 1
+                len(proposal_stored) == 1
                 and evidence.get("relation") == "user_confirmed_assistant_proposal"
                 and proposal.get("ordinal") == case.target_ordinal
                 and proposal.get("id") == f"{case.id}-proposal-id-{case.target_ordinal}"
@@ -268,13 +323,28 @@ async def run_confirmation_evaluation(
             target_correct = all(
                 item.candidate_reason
                 in {"ambiguous_proposal_reference", "proposal_reference_mismatch"}
-                for item in pending
+                for item in proposal_pending
             )
-            evidence_integrity = not stored
+            evidence_integrity = not proposal_stored
         else:
-            target_correct = case.expected_outcome == "rejected"
-            evidence_integrity = True
-        correct = observed_outcome == case.expected_outcome and target_correct and evidence_integrity
+            required_direct_memory_present = (
+                not case.require_nonproposal_memory
+                or any(
+                    dict(item.validated_evidence or {}).get("relation")
+                    == "direct_user_statement"
+                    for item in nonproposal_stored
+                )
+            )
+            target_correct = (
+                case.expected_outcome == "rejected"
+                and required_direct_memory_present
+            )
+            evidence_integrity = not proposal_stored
+        correct = (
+            observed_outcome == case.expected_outcome
+            and target_correct
+            and evidence_integrity
+        )
         estimated_cost, pricing_warnings = _estimate_cost(recorder.responses)
         details.append(
             {
@@ -284,6 +354,7 @@ async def run_confirmation_evaluation(
                 "expected_outcome": case.expected_outcome,
                 "observed_outcome": observed_outcome,
                 "target_ordinal": case.target_ordinal,
+                "require_nonproposal_memory": case.require_nonproposal_memory,
                 "target_correct": target_correct,
                 "evidence_integrity": evidence_integrity,
                 "correct": correct,
@@ -293,7 +364,13 @@ async def run_confirmation_evaluation(
                 "latency_ms": round(latency_ms, 3),
                 "estimated_cost_usd": estimated_cost,
                 "pricing_warnings": pricing_warnings,
-                "candidate_counts": {"stored": len(stored), "pending": len(pending)},
+                "candidate_counts": {
+                    "stored": len(stored),
+                    "pending": len(pending),
+                    "proposal_stored": len(proposal_stored),
+                    "proposal_pending": len(proposal_pending),
+                    "nonproposal_stored": len(nonproposal_stored),
+                },
                 "candidate_confidences": [
                     float(item.confidence) for item in [*stored, *pending]
                 ],

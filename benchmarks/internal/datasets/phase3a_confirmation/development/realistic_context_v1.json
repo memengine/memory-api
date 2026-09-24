@@ -1,0 +1,129 @@
+{
+  "schema_version": "1.0",
+  "split": "development",
+  "user_prelude": "Offer one or more possible ways you could personalize future technical help; do not assume I prefer any of them yet.",
+  "minimum_cases_per_language": 28,
+  "minimum_cases_per_reference_type": 12,
+  "reference_types": {
+    "single_vague": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        ["en", "Yes—make that the way you help me going forward."],
+        ["en", "Right, keep that for all future troubleshooting."],
+        ["en", "Exactly; remember that as my usual preference."],
+        ["en", "Sounds good, carry that forward for me."],
+        ["hinglish", "Haan, aage se mere liye wahi follow karna."],
+        ["hinglish", "Bilkul, isko meri usual preference rakh lo."],
+        ["hinglish", "Right hai, future troubleshooting mein yaad rakhna."],
+        ["hinglish", "Theek hai, ye approach aage continue karna."],
+        ["hi", "हां, आगे से मेरे लिए यही तरीका अपनाइए।"],
+        ["hi", "सही है, इसे मेरी सामान्य पसंद के रूप में याद रखें।"],
+        ["hi", "बिल्कुल, भविष्य में इसी तरह सहायता कीजिए।"],
+        ["hi", "ठीक है, इस तरीके को आगे भी बनाए रखिए।"]
+      ]
+    },
+    "single_indirect": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        ["en", "That captures exactly how I want troubleshooting help presented; please keep it as my default from now on."],
+        ["en", "You have described the pattern that works best for me, so use it from here onward."],
+        ["en", "That approach fits how I work and should remain my default."],
+        ["en", "Consider that an accurate description of how I want future answers structured."],
+        ["hinglish", "Ye exactly wahi style hai jo mere liye kaam karti hai, aage bhi use karna."],
+        ["hinglish", "Tumne mera preferred pattern sahi describe kiya hai, isko default rakhna."],
+        ["hinglish", "Ye approach mere working style ko suit karti hai aur future mein rehni chahiye."],
+        ["hinglish", "Isko meri future answers ki normal setting samajh lo."],
+        ["hi", "यह ठीक वही शैली है जो मेरे लिए काम करती है; आगे भी इसे अपनाइए।"],
+        ["hi", "आपने मेरी पसंद का सही वर्णन किया है, इसे मेरा सामान्य तरीका मानिए।"],
+        ["hi", "यह तरीका मेरे काम करने के ढंग के अनुकूल है और आगे भी रहना चाहिए।"],
+        ["hi", "इसे भविष्य के उत्तरों के लिए मेरी सामान्य व्यवस्था मान लीजिए।"]
+      ]
+    },
+    "explicit_ordinal": {
+      "expected_outcome": "accepted",
+      "utterances": [
+        ["en", "Choose and remember the first proposal for me.", 1],
+        ["en", "The second option matches me; keep that one.", 2],
+        ["en", "Make proposal 2 my default from now on.", 2],
+        ["en", "I want the former suggestion retained.", 1],
+        ["hinglish", "Pehla proposal choose karke mere liye yaad rakhna.", 1],
+        ["hinglish", "Second option mujhe match karta hai, wahi keep karo.", 2],
+        ["hinglish", "Proposal 2 ko aage se mera default bana do.", 2],
+        ["hinglish", "Former suggestion ko retain karna hai.", 1],
+        ["hi", "पहले प्रस्ताव को चुनकर मेरे लिए याद रखिए।", 1],
+        ["hi", "दूसरा विकल्प मेरे अनुकूल है, उसी को रखिए।", 2],
+        ["hi", "प्रस्ताव 2 को आगे से मेरी सामान्य पसंद बनाइए।", 2],
+        ["hi", "पहले वाले सुझाव को सुरक्षित रखिए।", 1]
+      ]
+    },
+    "ambiguous_multi": {
+      "expected_outcome": "pending",
+      "utterances": [
+        ["en", "Yes, that approach should be my default."],
+        ["en", "Keep the suggestion that fits me best."],
+        ["en", "That is the one I want you to remember."],
+        ["en", "Agreed—use that option in the future."],
+        ["hinglish", "Haan, us approach ko mera default rakhna."],
+        ["hinglish", "Jo suggestion mujhe best fit karta hai wahi keep karo."],
+        ["hinglish", "Wahi one hai jo tumhe yaad rakhna chahiye."],
+        ["hinglish", "Agreed, future mein us option ko use karna."],
+        ["hi", "हां, उस तरीके को मेरी सामान्य पसंद बनाइए।"],
+        ["hi", "जो सुझाव मेरे लिए सबसे सही है उसे रखिए।"],
+        ["hi", "वही है जिसे मैं चाहता हूं कि आप याद रखें।"],
+        ["hi", "सहमत हूं, भविष्य में उस विकल्प का उपयोग कीजिए।"]
+      ]
+    },
+    "rejection": {
+      "expected_outcome": "rejected",
+      "utterances": [
+        ["en", "No, neither remember nor apply that suggestion."],
+        ["en", "That proposal does not describe me."],
+        ["en", "Do not turn that into a lasting preference."],
+        ["en", "I was only exploring options, not approving memory."],
+        ["hinglish", "Nahi, us suggestion ko na remember karo na apply."],
+        ["hinglish", "Woh proposal mujhe describe nahi karta."],
+        ["hinglish", "Usko lasting preference mat banana."],
+        ["hinglish", "Main sirf options explore kar raha tha, memory approve nahi ki."],
+        ["hi", "नहीं, उस सुझाव को न याद रखें और न लागू करें।"],
+        ["hi", "वह प्रस्ताव मेरा सही वर्णन नहीं करता।"],
+        ["hi", "उसे स्थायी पसंद में न बदलें।"],
+        ["hi", "मैं केवल विकल्प देख रहा था, स्मृति की अनुमति नहीं दे रहा था।"]
+      ]
+    },
+    "single_correction": {
+      "expected_outcome": "rejected",
+      "require_nonproposal_memory": true,
+      "utterances": [
+        ["en", "No, that is wrong; I prefer code examples before explanations."],
+        ["en", "Do not keep that proposal. I prefer concise answers instead."],
+        ["en", "That is not my default; I actually prefer detailed troubleshooting steps."],
+        ["en", "Reject that suggestion. My preference is to see the conclusion first."],
+        ["hinglish", "Nahi, woh galat hai; mujhe explanation se pehle code examples pasand hain."],
+        ["hinglish", "Us proposal ko mat rakho, mujhe instead concise answers pasand hain."],
+        ["hinglish", "Woh mera default nahi hai; mujhe actually detailed troubleshooting steps chahiye."],
+        ["hinglish", "Suggestion reject karo; meri preference conclusion pehle dekhna hai."],
+        ["hi", "नहीं, वह गलत है; मुझे व्याख्या से पहले कोड उदाहरण पसंद हैं।"],
+        ["hi", "उस प्रस्ताव को न रखें; मुझे संक्षिप्त उत्तर पसंद हैं।"],
+        ["hi", "वह मेरी सामान्य पसंद नहीं है; मुझे विस्तृत समस्या-समाधान चरण पसंद हैं।"],
+        ["hi", "उस सुझाव को अस्वीकार करें; मेरी पसंद पहले निष्कर्ष देखने की है।"]
+      ]
+    },
+    "single_unrelated": {
+      "expected_outcome": "rejected",
+      "utterances": [
+        ["en", "By the way, our deployment is scheduled for Friday."],
+        ["en", "Can you explain what a circuit breaker does?"],
+        ["en", "I need to review the billing migration tomorrow."],
+        ["en", "What was the latency of the previous request?"],
+        ["hinglish", "Waise hamara deployment Friday ko scheduled hai."],
+        ["hinglish", "Circuit breaker kya karta hai, explain kar sakte ho?"],
+        ["hinglish", "Mujhe billing migration kal review karni hai."],
+        ["hinglish", "Previous request ki latency kya thi?"],
+        ["hi", "वैसे हमारा परिनियोजन शुक्रवार के लिए निर्धारित है।"],
+        ["hi", "क्या आप समझा सकते हैं कि सर्किट ब्रेकर क्या करता है?"],
+        ["hi", "मुझे कल बिलिंग माइग्रेशन की समीक्षा करनी है।"],
+        ["hi", "पिछले अनुरोध की विलंबता कितनी थी?"]
+      ]
+    }
+  }
+}

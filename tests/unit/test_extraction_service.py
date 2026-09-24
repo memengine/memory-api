@@ -586,6 +586,8 @@ def test_system_prompt_includes_schema_and_categories(tmp_path: Path) -> None:
     assert "Do not default every memory to 5" in prompt
     assert "is a pending goal, not a current fact" in prompt
     assert "after an unrelated question or request" in prompt
+    assert "rejects an assistant proposal but states a different" in prompt
+    assert "Extract only the independently stated correction" in prompt
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +14,10 @@ from typing import Any
 from api.db.cache import CacheService
 from api.schemas.extraction_schemas import ExtractionResult, PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
-from api.services.evidence_policy import validate_conversational_evidence
+from api.services.evidence_policy import (
+    has_explicit_proposal_denial,
+    validate_conversational_evidence,
+)
 from api.services.llm_service import LLMService
 from api.settings import get_settings
 
@@ -137,6 +141,11 @@ TEMPORARY_SESSION_MEMORY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdo\s+not\s+change\s+anything\b", re.IGNORECASE),
     re.compile(r"\bkeep\s+going\s+with\s+the\s+(current|same)\b", re.IGNORECASE),
     re.compile(r"\bnext\s+(terminal\s+)?command\b", re.IGNORECASE),
+)
+
+CORRECTION_REPLACEMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:prefer|preference|pasand|chahiye)\b", re.IGNORECASE),
+    re.compile(r"(?:पसंद|चाहिए|प्राथमिकता)"),
 )
 
 
@@ -369,6 +378,97 @@ class ExtractionService:
                 proposal_context=proposal_context,
             )
         )
+        correction_recovery_attempted = self._should_attempt_correction_recovery(
+            messages=indexed_messages,
+            source_context=source_context,
+            proposal_context=proposal_context,
+            kept=kept,
+            pending=pending,
+        )
+        correction_recovery_response: Any | None = None
+        correction_recovery_error: str | None = None
+        correction_recovery_kept = 0
+        correction_recovery_pending = 0
+        correction_recovery_wall_latency_ms = 0
+        if correction_recovery_attempted:
+            try:
+                recovery_started = time.perf_counter()
+                correction_recovery_response = await self.llm_service.complete(
+                    system_prompt=self._build_correction_recovery_prompt(),
+                    user_message=self._correction_recovery_user_message(
+                        indexed_messages
+                    ),
+                    temperature=0.0,
+                    max_tokens=600,
+                    response_format="json",
+                )
+                correction_recovery_wall_latency_ms = int(
+                    (time.perf_counter() - recovery_started) * 1000
+                )
+                tokens_used += int(correction_recovery_response.total_tokens or 0)
+                provider_used = (
+                    correction_recovery_response.provider_used or provider_used
+                )
+                await self._record_provider_usage(
+                    correction_recovery_response.provider_used
+                )
+                (
+                    recovered_kept,
+                    recovered_pending,
+                    recovered_filtered,
+                    _recovered_nothing,
+                    recovered_rejections,
+                ) = self._parse_and_validate_response(
+                    self._bind_correction_recovery_evidence(
+                        correction_recovery_response.content,
+                        indexed_messages,
+                    ),
+                    messages=indexed_messages,
+                    visible_turn_indexes=visible_turn_indexes,
+                    source_context=source_context,
+                    evidence_context={
+                        "provider": correction_recovery_response.provider_used,
+                        "model": correction_recovery_response.model_used,
+                        "extracted_at": datetime.now(UTC).isoformat(),
+                        "extractor_version": "structured-evidence-v1",
+                        "pass": "correction_recovery",
+                    },
+                    # This pass can recover only the user's independent
+                    # replacement claim; it cannot confirm any proposal.
+                    proposal_context=None,
+                )
+                seen = {
+                    (item.category, " ".join(item.content.casefold().split()))
+                    for item in [*kept, *pending]
+                }
+                for item in recovered_kept:
+                    key = (item.category, " ".join(item.content.casefold().split()))
+                    if key not in seen:
+                        kept.append(item)
+                        seen.add(key)
+                        correction_recovery_kept += 1
+                for item in recovered_pending:
+                    key = (item.category, " ".join(item.content.casefold().split()))
+                    if key not in seen:
+                        pending.append(item)
+                        seen.add(key)
+                        correction_recovery_pending += 1
+                filtered_count += recovered_filtered
+                for reason, count in recovered_rejections.items():
+                    rejection_counts[reason] = rejection_counts.get(reason, 0) + count
+                nothing_to_extract = not kept and not pending
+            except Exception as exc:  # pragma: no cover - defensive fail-open path.
+                correction_recovery_error = exc.__class__.__name__
+                LOGGER.warning(
+                    "correction_recovery_failed",
+                    extra={
+                        "event": "correction_recovery_failed",
+                        "tenant_id": tenant_id,
+                        "proxy_user_id": resolved_user_id,
+                        "job_id": job_id,
+                        "error": str(exc),
+                    },
+                )
         self._observe_importance_shadow(
             kept=kept,
             pending=pending,
@@ -389,7 +489,7 @@ class ExtractionService:
                 "memories_extracted": len(kept),
                 "memories_filtered": filtered_count,
                 "pending_candidates": len(pending),
-                "tokens_used": response.total_tokens,
+                "tokens_used": tokens_used,
             },
         )
         return ExtractionResult(
@@ -445,6 +545,32 @@ class ExtractionService:
                     "total_tokens": int(response.total_tokens or 0),
                     "latency_ms": int(response.latency_ms or primary_wall_latency_ms),
                     "wall_latency_ms": primary_wall_latency_ms,
+                },
+                "correction_recovery": {
+                    "attempted": correction_recovery_attempted,
+                    "completed": correction_recovery_response is not None,
+                    "accepted_for_storage": correction_recovery_kept,
+                    "accepted_as_pending": correction_recovery_pending,
+                    "provider": getattr(
+                        correction_recovery_response, "provider_used", None
+                    ),
+                    "model": getattr(
+                        correction_recovery_response, "model_used", None
+                    ),
+                    "input_tokens": int(
+                        getattr(correction_recovery_response, "input_tokens", 0) or 0
+                    ),
+                    "output_tokens": int(
+                        getattr(correction_recovery_response, "output_tokens", 0) or 0
+                    ),
+                    "total_tokens": int(
+                        getattr(correction_recovery_response, "total_tokens", 0) or 0
+                    ),
+                    "latency_ms": int(
+                        getattr(correction_recovery_response, "latency_ms", 0) or 0
+                    ),
+                    "wall_latency_ms": correction_recovery_wall_latency_ms,
+                    "error": correction_recovery_error,
                 },
                 "compositional_pass_metrics": {
                     "attempted": composition_prepass_attempted,
@@ -655,7 +781,10 @@ class ExtractionService:
             "mechanically: remove every assistant turn; if the candidate claim is no longer entailed, "
             "it is not direct_user_statement. References such as 'that', 'it', 'this', 'the second one', "
             "'the framing', agreement, or acceptance depend on the proposal. For direct_user_statement, "
-            "set proposal_turn to null.\n\n"
+            "set proposal_turn to null. If the user rejects an assistant proposal but states a different "
+            "durable fact or preference in the same turn, never store the rejected proposal. Extract only "
+            "the independently stated correction as direct_user_statement, cite the user turn, and set "
+            "proposal_turn to null. This rule applies regardless of the language used by the user.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
@@ -678,6 +807,121 @@ class ExtractionService:
                 "into clean, atomic memories and discard unsupported hints."
             )
         return prompt
+
+    @staticmethod
+    def _build_correction_recovery_prompt() -> str:
+        return (
+            "You are recovering one direct replacement memory from the latest user turn. "
+            "The user has rejected an assistant memory proposal. Never accept, restate, or "
+            "store that rejected proposal. If the same user turn independently states a "
+            "different durable fact or preference, extract only that replacement claim. "
+            "Preserve the user's language and key wording so the claim can be verified "
+            "against the cited user turn. Set evidence_relation to direct_user_statement, "
+            "proposal_turn to null, and evidence_turns to the zero-based index of the user "
+            "turn. If there is no independent durable replacement claim, return no memories. "
+            "Use confidence >= 0.80 for an explicit replacement stated as the user's "
+            "current fact or preference; use 0.45-0.64 only when the replacement itself "
+            "is tentative or conditional. "
+            "Return JSON only in this shape: "
+            '{"memories":[{"content":"string","category":"preference|fact|goal|'
+            'procedure|relationship|expertise","importance_score":1.0,'
+            '"confidence":0.9,"evidence_turns":[0],"evidence_relation":'
+            '"direct_user_statement","proposal_turn":null,"reasoning":"string"}],'
+            '"nothing_to_extract":false,"extraction_notes":"optional string"}. '
+            'For no replacement claim return {"memories":[],"nothing_to_extract":true,'
+            '"extraction_notes":"no direct replacement claim"}.'
+        )
+
+    @classmethod
+    def _should_attempt_correction_recovery(
+        cls,
+        *,
+        messages: list[dict[str, Any]],
+        source_context: dict[str, Any] | None,
+        proposal_context: list[dict[str, Any]] | None,
+        kept: list[ExtractedMemory],
+        pending: list[PendingExtractedMemory],
+    ) -> bool:
+        if source_context or not proposal_context:
+            return False
+        if any(
+            item.validated_evidence.get("relation") == "direct_user_statement"
+            for item in [*kept, *pending]
+        ):
+            return False
+        latest_user_text = next(
+            (
+                str(message.get("content") or "").strip()
+                for message in reversed(messages)
+                if str(message.get("role") or "").strip().lower() == "user"
+                and str(message.get("source_kind") or "direct_user_input")
+                .strip()
+                .lower()
+                in {"direct_user_input", "client_assertion"}
+            ),
+            "",
+        )
+        if not latest_user_text or latest_user_text.rstrip().endswith(("?", "？")):
+            return False
+        return has_explicit_proposal_denial(latest_user_text) and any(
+            pattern.search(latest_user_text)
+            for pattern in CORRECTION_REPLACEMENT_PATTERNS
+        )
+
+    @classmethod
+    def _correction_recovery_user_message(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> str:
+        latest_user_message = next(
+            (
+                message
+                for message in reversed(messages)
+                if str(message.get("role") or "").strip().lower() == "user"
+                and str(message.get("source_kind") or "direct_user_input")
+                .strip()
+                .lower()
+                in {"direct_user_input", "client_assertion"}
+            ),
+            None,
+        )
+        return cls._messages_to_text([latest_user_message]) if latest_user_message else ""
+
+    @staticmethod
+    def _bind_correction_recovery_evidence(
+        raw_content: str,
+        messages: list[dict[str, Any]],
+    ) -> str:
+        """Bind recovery citations to the sole server-selected user turn."""
+
+        latest_user_index = next(
+            (
+                int(message.get("_turn_index", index))
+                for index, message in reversed(list(enumerate(messages)))
+                if str(message.get("role") or "").strip().lower() == "user"
+                and str(message.get("source_kind") or "direct_user_input")
+                .strip()
+                .lower()
+                in {"direct_user_input", "client_assertion"}
+            ),
+            None,
+        )
+        if latest_user_index is None:
+            return raw_content
+        try:
+            payload = json.loads(raw_content or "{}")
+        except json.JSONDecodeError:
+            return raw_content
+        memories = payload.get("memories")
+        if not isinstance(memories, list):
+            return raw_content
+        for memory in memories:
+            if not isinstance(memory, dict):
+                continue
+            memory["evidence_turns"] = [latest_user_index]
+            memory["evidence_relation"] = "direct_user_statement"
+            memory["proposal_turn"] = None
+        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _should_run_compositional_pass(
@@ -1015,20 +1259,40 @@ class ExtractionService:
                             proposal_confirmation_enabled=True,
                             active_proposals=proposal_context,
                         )
-                        if policy.review_required:
+                        if policy.reason == "explicit_confirmation_denied":
+                            # The model can correctly extract the replacement
+                            # claim while incorrectly retaining proposal_turn.
+                            # Accept it only if the same candidate independently
+                            # passes direct-user grounding against the cited turn.
+                            validated_evidence = self._validated_user_evidence(
+                                candidate,
+                                messages or [],
+                                raw_memory.get("evidence_turns"),
+                                "direct_user_statement",
+                                None,
+                                evidence_context=evidence_context,
+                                visible_turn_indexes=visible_turn_indexes,
+                            )
+                        if validated_evidence:
+                            candidate.validated_evidence = validated_evidence
+                        elif policy.review_required:
                             candidate.candidate_reason = policy.reason
                             pending.append(candidate)
-                        else:
+                        elif not validated_evidence:
                             invalid_count += 1
-                        rejection_counts[policy.reason] = (
-                            rejection_counts.get(policy.reason, 0) + 1
+                        if not validated_evidence:
+                            rejection_counts[policy.reason] = (
+                                rejection_counts.get(policy.reason, 0) + 1
+                            )
+                            continue
+                    if validated_evidence:
+                        candidate.validated_evidence = validated_evidence
+                    else:
+                        invalid_count += 1
+                        rejection_counts["evidence_validation"] = (
+                            rejection_counts.get("evidence_validation", 0) + 1
                         )
                         continue
-                    invalid_count += 1
-                    rejection_counts["evidence_validation"] = (
-                        rejection_counts.get("evidence_validation", 0) + 1
-                    )
-                    continue
                 candidate.validated_evidence = validated_evidence
             if candidate.confidence >= self._confidence_threshold:
                 kept.append(
@@ -1291,9 +1555,20 @@ class ExtractionService:
             "with",
             "would",
         }
+        tokens: list[str] = []
+        current: list[str] = []
+        for character in unicodedata.normalize("NFKC", text.casefold()):
+            category = unicodedata.category(character)
+            if category[0] in {"L", "M", "N"}:
+                current.append(character)
+            elif current:
+                tokens.append("".join(current))
+                current = []
+        if current:
+            tokens.append("".join(current))
         return {
             token
-            for token in re.findall(r"[a-z0-9]+", text.lower())
+            for token in tokens
             if len(token) >= 3 and token not in stop_words
         }
 
