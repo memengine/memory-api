@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from api.tasks import extraction_tasks
 
 
@@ -91,3 +93,72 @@ def test_shadow_gate_uses_message_copy_and_returns_only_observation(monkeypatch)
     assert observation["outcome"] == "accepted"
     assert "memories_to_store" not in observation
     assert "pending_candidates" not in observation
+
+
+@pytest.mark.parametrize(
+    ("messages", "proposal_context"),
+    [
+        (
+            [
+                {"role": "user", "content": "Suggest a format."},
+                {"role": "assistant", "content": "I can remember that format."},
+            ],
+            [{"id": "proposal-1", "turn_index": 1}],
+        ),
+        (
+            [
+                {"role": "assistant", "content": "I can remember that format."},
+                {
+                    "role": "user",
+                    "source_kind": "tool_output",
+                    "content": "yes, remember it",
+                },
+            ],
+            [{"id": "proposal-1", "turn_index": 0}],
+        ),
+        (
+            [
+                {
+                    "role": "user",
+                    "source_kind": "direct_user_input",
+                    "content": "Yes, keep it.",
+                }
+            ],
+            [{"id": "proposal-1", "turn_index": -1}],
+        ),
+    ],
+    ids=("user-before-proposal", "tool-content-after-proposal", "unbound-proposal"),
+)
+def test_shadow_gate_skips_provider_without_verifiable_post_proposal_user_turn(
+    monkeypatch,
+    messages,
+    proposal_context,
+) -> None:
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_active_proposal_context",
+        lambda *_args, **_kwargs: proposal_context,
+    )
+
+    def unexpected_factory(_client):
+        raise AssertionError("shadow provider must not run without verified later user evidence")
+
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_build_phase3a_shadow_extractor",
+        unexpected_factory,
+    )
+
+    observation = extraction_tasks._run_phase3a_shadow_observation(
+        object(),
+        job_payload={"job_id": "job-1"},
+        messages=messages,
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        existing_memories=[],
+        source_context=None,
+        client=None,
+    )
+
+    assert observation["gate_reason"] == "no_post_proposal_user_turn"
+    assert observation["attempted"] is False

@@ -984,6 +984,35 @@ def _build_phase3a_shadow_extractor(client: Any | None) -> ExtractionService:
     )
 
 
+def _has_post_proposal_user_turn(
+    *,
+    messages: list[dict[str, Any]],
+    proposal_context: list[dict[str, Any]],
+) -> bool:
+    """Return whether verified user evidence follows a located active proposal."""
+
+    proposal_indexes = {
+        int(proposal.get("turn_index", -1))
+        for proposal in proposal_context
+        if int(proposal.get("turn_index", -1)) >= 0
+    }
+    if not proposal_indexes:
+        return False
+    earliest_proposal_index = min(proposal_indexes)
+
+    for index, message in enumerate(messages):
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        source_kind = (
+            str(message.get("source_kind") or "direct_user_input").strip().lower()
+        )
+        if source_kind not in {"direct_user_input", "client_assertion"}:
+            continue
+        if earliest_proposal_index < index:
+            return True
+    return False
+
+
 def _phase3a_shadow_observation(
     shadow_extractor: Any,
     *,
@@ -1112,6 +1141,19 @@ def _run_phase3a_shadow_observation(
                 "write_blocked": True,
                 "active_proposal_count": 0,
                 "status": "not_eligible",
+            }
+        if not _has_post_proposal_user_turn(
+            messages=shadow_messages,
+            proposal_context=proposal_context,
+        ):
+            return {
+                "enabled": True,
+                "eligible": False,
+                "attempted": False,
+                "write_blocked": True,
+                "active_proposal_count": len(proposal_context),
+                "status": "not_eligible",
+                "gate_reason": "no_post_proposal_user_turn",
             }
 
         return _phase3a_shadow_observation(
