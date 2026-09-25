@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.internal.cases import HOLDOUT_APPROVAL_ENV, HOLDOUT_APPROVAL_TOKEN
-from benchmarks.internal.phase3a_confirmation import run_approved_holdout_evaluation
+from benchmarks.internal.phase3a_confirmation import (
+    load_confirmation_cases,
+    run_approved_holdout_evaluation,
+)
 
 
 def dataset_sha256(dataset: Path) -> str:
@@ -82,6 +85,12 @@ async def run_sealed_holdout_once(
         raise FileExistsError(f"Holdout output already exists: {output}")
 
     expected = _validated_expected_sha256(expected_sha256)
+    observed = dataset_sha256(dataset)
+    if observed != expected:
+        raise ValueError(
+            f"Holdout SHA-256 mismatch: expected {expected}, observed {observed}."
+        )
+    load_confirmation_cases(dataset, expected_split="holdout")
     marker = claim_holdout_once(dataset, expected_sha256=expected)
     claimed_at = json.loads(marker.read_text(encoding="utf-8"))["claimed_at"]
     try:

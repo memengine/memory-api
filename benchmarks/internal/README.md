@@ -85,7 +85,8 @@ $env:MEMORYOS_HOLDOUT_APPROVAL = "approved-manual-holdout-run"
 python -m benchmarks.internal.phase3a_holdout_release --allow-holdout --dataset <private-holdout-v2.json> --expected-sha256 <custodian-provided-sha256> --output artifacts/internal-benchmarks/phase3a/<new-result.json>
 ```
 
-The runner verifies the checksum before claiming the pack, records a single-use marker, rechecks the
-checksum after evaluation, refuses to overwrite a result, and records the checksum in both the result
-and marker. A failed or interrupted provider run still consumes the pack. Keep the feature flag off
-unless the aggregate release gate passes; never inspect failed cases for tuning.
+The runner verifies the checksum and complete dataset contract before claiming the pack, records a
+single-use marker, rechecks the checksum during the claim and after evaluation, refuses to overwrite
+a result, and records the checksum in both the result and marker. Schema or checksum failures do not
+consume the pack. Once provider evaluation starts, a failed or interrupted run does consume it. Keep
+the feature flag off unless the aggregate release gate passes; never inspect failed cases for tuning.

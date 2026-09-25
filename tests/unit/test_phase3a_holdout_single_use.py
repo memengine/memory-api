@@ -15,6 +15,15 @@ def _sha256(path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _allow_valid_preflight(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "benchmarks.internal.phase3a_holdout_release.load_confirmation_cases",
+        lambda _dataset, *, expected_split: ([], {})
+        if expected_split == "holdout"
+        else None,
+    )
+
+
 def test_phase3a_holdout_claim_is_single_use(tmp_path) -> None:
     dataset = tmp_path / "holdout.json"
     dataset.write_text("{}", encoding="utf-8")
@@ -76,6 +85,28 @@ def test_phase3a_existing_output_does_not_consume_dataset(monkeypatch, tmp_path)
     assert not (tmp_path / "holdout.json.consumed.json").exists()
 
 
+def test_phase3a_invalid_schema_does_not_consume_dataset(monkeypatch, tmp_path) -> None:
+    dataset = tmp_path / "holdout.json"
+    output = tmp_path / "result.json"
+    dataset.write_text(
+        '{"schema_version":"2.0","reference_types":{}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(HOLDOUT_APPROVAL_ENV, HOLDOUT_APPROVAL_TOKEN)
+
+    with pytest.raises(ValueError, match="expected holdout data"):
+        asyncio.run(
+            run_sealed_holdout_once(
+                dataset=dataset,
+                output=output,
+                expected_sha256=_sha256(dataset),
+            )
+        )
+
+    assert not (tmp_path / "holdout.json.consumed.json").exists()
+    assert not output.exists()
+
+
 def test_phase3a_failed_holdout_run_remains_consumed(monkeypatch, tmp_path) -> None:
     dataset = tmp_path / "holdout.json"
     output = tmp_path / "result.json"
@@ -86,6 +117,7 @@ def test_phase3a_failed_holdout_run_remains_consumed(monkeypatch, tmp_path) -> N
         raise RuntimeError("provider failed")
 
     monkeypatch.setenv(HOLDOUT_APPROVAL_ENV, HOLDOUT_APPROVAL_TOKEN)
+    _allow_valid_preflight(monkeypatch)
     monkeypatch.setattr(
         "benchmarks.internal.phase3a_holdout_release.run_approved_holdout_evaluation",
         fail,
@@ -123,6 +155,7 @@ def test_phase3a_successful_holdout_records_hash_and_artifact(monkeypatch, tmp_p
         return record
 
     monkeypatch.setenv(HOLDOUT_APPROVAL_ENV, HOLDOUT_APPROVAL_TOKEN)
+    _allow_valid_preflight(monkeypatch)
     monkeypatch.setattr(
         "benchmarks.internal.phase3a_holdout_release.run_approved_holdout_evaluation",
         succeed,
@@ -159,6 +192,7 @@ def test_phase3a_mutated_holdout_fails_closed(monkeypatch, tmp_path) -> None:
         return {"run_id": "mutated", "summary": {"release_eligible": True}}
 
     monkeypatch.setenv(HOLDOUT_APPROVAL_ENV, HOLDOUT_APPROVAL_TOKEN)
+    _allow_valid_preflight(monkeypatch)
     monkeypatch.setattr(
         "benchmarks.internal.phase3a_holdout_release.run_approved_holdout_evaluation",
         mutate,
