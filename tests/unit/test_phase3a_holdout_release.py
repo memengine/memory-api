@@ -11,7 +11,6 @@ from benchmarks.internal.phase3a_confirmation import (
 
 def test_phase3a_holdout_loader_requires_approval(monkeypatch, tmp_path) -> None:
     path = tmp_path / "holdout.json"
-    path.write_text('{"split":"holdout","reference_types":{}}', encoding="utf-8")
     monkeypatch.delenv(HOLDOUT_APPROVAL_ENV, raising=False)
 
     with pytest.raises(PermissionError, match="holdout is locked"):

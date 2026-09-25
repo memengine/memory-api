@@ -23,6 +23,7 @@ artifacts/
 benchmarks/public/data/
 benchmarks/public/results/
 benchmarks/internal/datasets/extraction/holdout/*.jsonl
+benchmarks/internal/datasets/phase3a_confirmation/holdout/*.json
 *.egg-info/
 dist/
 build/

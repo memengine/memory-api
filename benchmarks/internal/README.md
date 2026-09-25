@@ -58,3 +58,34 @@ Before this command, all of the following are required:
 `benchmarks.internal.holdout_release` uses the same production-path evaluator as the development
 runner, but only the manual loader can open the sealed dataset. This makes the release procedure
 reproducible without making the data available to ordinary development or CI.
+
+## Phase 3A confirmation holdout
+
+Phase 3A uses a separate single-use runner because every case must contain proposal content that was
+not used by the visible development fixtures. The old generated v1 holdout is consumed and is not a
+release gate.
+
+A holdout custodian must prepare a private JSON file with:
+
+- `schema_version: "2.0"` and `split: "holdout"`;
+- frozen minimum counts per language and reference type;
+- one group per evaluated reference type, including its expected outcome;
+- object-shaped cases containing `language`, `utterance`, `target_ordinal`, and `proposals`;
+- one to five proposals per case, each with non-empty `content`, expected normalized `memory`, and
+  a production-supported `category`.
+
+Accepted cases require a target ordinal within the supplied proposal list. The custodian must create
+and label both the proposal content and confirmation wording independently of the development data,
+then provide the dataset SHA-256 to the release operator without exposing case contents.
+
+After development evaluation is approved, run the sealed pack exactly once:
+
+```powershell
+$env:MEMORYOS_HOLDOUT_APPROVAL = "approved-manual-holdout-run"
+python -m benchmarks.internal.phase3a_holdout_release --allow-holdout --dataset <private-holdout-v2.json> --expected-sha256 <custodian-provided-sha256> --output artifacts/internal-benchmarks/phase3a/<new-result.json>
+```
+
+The runner verifies the checksum before claiming the pack, records a single-use marker, rechecks the
+checksum after evaluation, refuses to overwrite a result, and records the checksum in both the result
+and marker. A failed or interrupted provider run still consumes the pack. Keep the feature flag off
+unless the aggregate release gate passes; never inspect failed cases for tuning.

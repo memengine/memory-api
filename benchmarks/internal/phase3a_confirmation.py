@@ -15,6 +15,7 @@ from typing import Any
 from api.services.extraction_service import ExtractionError, ExtractionService
 from api.services.llm_service import AllProvidersFailedError, LLMService, ProviderError
 from benchmarks.internal.cases import (
+    ALLOWED_CATEGORIES,
     HOLDOUT_APPROVAL_ENV,
     HOLDOUT_APPROVAL_TOKEN,
     ExpectedMemory,
@@ -64,6 +65,22 @@ RELEASE_MINIMUMS = {
     "rejected_recall": 0.98,
     "evidence_integrity": 1.0,
 }
+HOLDOUT_LANGUAGES = {"en", "hi", "hinglish"}
+HOLDOUT_REFERENCE_OUTCOMES = {
+    "single_vague": "accepted",
+    "single_indirect": "accepted",
+    "explicit_ordinal": "accepted",
+    "ambiguous_multi": "pending",
+    "rejection": "rejected",
+}
+HOLDOUT_SLICE_MINIMUMS = {"language": 15, "reference_type": 10}
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalDefinition:
+    content: str
+    memory: str
+    category: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +93,40 @@ class ConfirmationCase:
     target_ordinal: int | None
     user_prelude: str | None = None
     require_nonproposal_memory: bool = False
+    proposals: tuple[ProposalDefinition, ...] | None = None
+
+
+def _load_proposals(
+    value: Any,
+    *,
+    reference_type: str,
+    index: int,
+) -> tuple[ProposalDefinition, ...]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 5:
+        raise ValueError(
+            f"Invalid proposals for {reference_type} #{index}: expected 1 to 5."
+        )
+    proposals: list[ProposalDefinition] = []
+    for proposal_index, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"Invalid proposal for {reference_type} #{index}.{proposal_index}"
+            )
+        content = str(item.get("content") or "").strip()
+        memory = str(item.get("memory") or "").strip()
+        category = str(item.get("category") or "").strip()
+        if not content or not memory or category not in ALLOWED_CATEGORIES:
+            raise ValueError(
+                f"Invalid proposal for {reference_type} #{index}.{proposal_index}"
+            )
+        proposals.append(
+            ProposalDefinition(
+                content=content,
+                memory=memory,
+                category=category,
+            )
+        )
+    return tuple(proposals)
 
 
 def load_confirmation_cases(
@@ -84,23 +135,102 @@ def load_confirmation_cases(
     expected_split: str,
 ) -> tuple[list[ConfirmationCase], dict[str, int]]:
     source = Path(path)
+    if (
+        expected_split == "holdout"
+        and os.getenv(HOLDOUT_APPROVAL_ENV) != HOLDOUT_APPROVAL_TOKEN
+    ):
+        raise PermissionError("Phase 3A holdout is locked without explicit approval token.")
     raw = json.loads(source.read_text(encoding="utf-8"))
     if raw.get("split") != expected_split:
         raise ValueError(f"Phase 3A evaluator expected {expected_split} data only.")
-    if expected_split == "holdout" and os.getenv(HOLDOUT_APPROVAL_ENV) != HOLDOUT_APPROVAL_TOKEN:
-        raise PermissionError("Phase 3A holdout is locked without explicit approval token.")
+    if expected_split == "holdout" and raw.get("schema_version") != "2.0":
+        raise ValueError("Phase 3A holdout must use schema_version 2.0.")
+    groups = raw.get("reference_types", {})
+    if expected_split == "holdout":
+        declared_minimums = {
+            "language": int(raw.get("minimum_cases_per_language", 0)),
+            "reference_type": int(raw.get("minimum_cases_per_reference_type", 0)),
+        }
+        if declared_minimums != HOLDOUT_SLICE_MINIMUMS:
+            raise ValueError(
+                "Phase 3A holdout must use the frozen slice minimums "
+                f"{HOLDOUT_SLICE_MINIMUMS}."
+            )
+        if set(groups) != set(HOLDOUT_REFERENCE_OUTCOMES):
+            raise ValueError("Phase 3A holdout has incorrect reference groups.")
     cases: list[ConfirmationCase] = []
     user_prelude = str(raw.get("user_prelude") or "").strip() or None
-    for reference_type, group in raw.get("reference_types", {}).items():
+    for reference_type, group in groups.items():
         expected = str(group.get("expected_outcome") or "")
+        if (
+            expected_split == "holdout"
+            and expected != HOLDOUT_REFERENCE_OUTCOMES[reference_type]
+        ):
+            raise ValueError(
+                f"Phase 3A holdout has invalid outcome for {reference_type}."
+            )
         require_nonproposal_memory = bool(
             group.get("require_nonproposal_memory", False)
         )
         for index, entry in enumerate(group.get("utterances") or [], 1):
-            if not isinstance(entry, list) or len(entry) not in {2, 3}:
+            proposals: tuple[ProposalDefinition, ...] | None = None
+            if isinstance(entry, list) and len(entry) in {2, 3}:
+                if expected_split == "holdout":
+                    raise ValueError(
+                        "Phase 3A holdout cases must include independent proposals."
+                    )
+                language, utterance = str(entry[0]), str(entry[1])
+                target = (
+                    int(entry[2])
+                    if len(entry) == 3
+                    else (1 if expected == "accepted" else None)
+                )
+            elif isinstance(entry, dict):
+                language = str(entry.get("language") or "").strip()
+                utterance = str(entry.get("utterance") or "").strip()
+                raw_target = entry.get("target_ordinal")
+                target = int(raw_target) if raw_target is not None else None
+                proposals = _load_proposals(
+                    entry.get("proposals"),
+                    reference_type=reference_type,
+                    index=index,
+                )
+                if expected_split == "holdout":
+                    visible_proposals = {
+                        (
+                            str(item["content"]).casefold().strip(),
+                            str(item["memory"]).casefold().strip(),
+                        )
+                        for item in PROPOSALS
+                    }
+                    if any(
+                        (
+                            proposal.content.casefold(),
+                            proposal.memory.casefold(),
+                        )
+                        in visible_proposals
+                        for proposal in proposals
+                    ):
+                        raise ValueError(
+                            "Phase 3A holdout reuses a visible development proposal."
+                        )
+            else:
                 raise ValueError(f"Invalid calibration entry for {reference_type} #{index}")
-            language, utterance = str(entry[0]), str(entry[1])
-            target = int(entry[2]) if len(entry) == 3 else (1 if expected == "accepted" else None)
+            if not language or not utterance:
+                raise ValueError(f"Invalid calibration entry for {reference_type} #{index}")
+            proposal_count = len(proposals) if proposals is not None else (
+                1
+                if reference_type.startswith("single_") or reference_type == "rejection"
+                else 2
+            )
+            if expected == "accepted" and target is None:
+                raise ValueError(
+                    f"Accepted case {reference_type} #{index} requires target_ordinal."
+                )
+            if target is not None and not 1 <= target <= proposal_count:
+                raise ValueError(
+                    f"Invalid target_ordinal for {reference_type} #{index}."
+                )
             cases.append(
                 ConfirmationCase(
                     id=f"{reference_type}-{language}-{index:02d}",
@@ -111,6 +241,7 @@ def load_confirmation_cases(
                     target_ordinal=target,
                     user_prelude=user_prelude,
                     require_nonproposal_memory=require_nonproposal_memory,
+                    proposals=proposals,
                 )
             )
     if len({case.id for case in cases}) != len(cases):
@@ -119,6 +250,8 @@ def load_confirmation_cases(
         "language": int(raw.get("minimum_cases_per_language", 0)),
         "reference_type": int(raw.get("minimum_cases_per_reference_type", 0)),
     }
+    if expected_split == "holdout" and {case.language for case in cases} != HOLDOUT_LANGUAGES:
+        raise ValueError("Phase 3A holdout has incorrect language slices.")
     _validate_slice_sizes(cases, minimums)
     return cases, minimums
 
@@ -139,8 +272,25 @@ def _validate_slice_sizes(cases: list[ConfirmationCase], minimums: dict[str, int
 
 
 def _case_input(case: ConfirmationCase) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, dict[str, str]]]:
-    proposal_count = 1 if case.reference_type.startswith("single_") or case.reference_type == "rejection" else 2
-    selected = [PROPOSALS[index % len(PROPOSALS)] for index in range(proposal_count)]
+    if case.proposals is not None:
+        selected = [
+            {
+                "content": proposal.content,
+                "memory": proposal.memory,
+                "category": proposal.category,
+            }
+            for proposal in case.proposals
+        ]
+    else:
+        proposal_count = (
+            1
+            if case.reference_type.startswith("single_")
+            or case.reference_type == "rejection"
+            else 2
+        )
+        selected = [
+            PROPOSALS[index % len(PROPOSALS)] for index in range(proposal_count)
+        ]
     messages: list[dict[str, Any]] = []
     proposal_context: list[dict[str, Any]] = []
     expected: dict[int, dict[str, str]] = {}
