@@ -177,6 +177,201 @@ def test_explicit_multilingual_reference_resolves_registered_proposal(
     assert decision.proposal_ordinal == expected_ordinal
 
 
+@pytest.mark.parametrize(
+    ("user_text", "proposal_turn", "expected_ordinal"),
+    [
+        ("Retain the former suggestion, not the latter.", 0, 1),
+        ("पहला विकल्प आगे के लिए रखिए, दूसरा नहीं।", 0, 1),
+        ("Former suggestion ko retain karo, latter ko nahi.", 0, 1),
+    ],
+)
+def test_contrastive_denial_keeps_only_the_positively_selected_proposal(
+    user_text: str,
+    proposal_turn: int,
+    expected_ordinal: int,
+) -> None:
+    first_messages, _ = _transcript(user_text)
+    second_proposal = "I can remember that you prefer detailed answers."
+    second_hash = hashlib.sha256(second_proposal.encode()).hexdigest()
+    messages = [
+        first_messages[0],
+        {
+            "role": "assistant",
+            "content": second_proposal,
+            "source_kind": "assistant_output",
+            "is_memory_proposal": True,
+            "turn_id": "proposal-turn-2",
+            "turn_content_sha256": second_hash,
+        },
+        first_messages[1],
+    ]
+    active = [
+        {
+            "id": "proposal-id-1",
+            "group_id": "group-1",
+            "ordinal": 1,
+            "turn_index": 0,
+            "turn_id": "proposal-turn-1",
+            "content_sha256": messages[0]["turn_content_sha256"],
+        },
+        {
+            "id": "proposal-id-2",
+            "group_id": "group-1",
+            "ordinal": 2,
+            "turn_index": 1,
+            "turn_id": "proposal-turn-2",
+            "content_sha256": second_hash,
+        },
+    ]
+
+    decision = validate_conversational_evidence(
+        messages=messages,
+        evidence_turns=[proposal_turn, 2],
+        evidence_relation="user_confirmed_assistant_proposal",
+        proposal_turn=proposal_turn,
+        visible_turn_indexes={0, 1, 2},
+        proposal_confirmation_enabled=True,
+        active_proposals=active,
+    )
+
+    assert decision.accepted is True
+    assert decision.proposal_ordinal == expected_ordinal
+
+
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "Do not remember the first proposal.",
+        "Pehla proposal yaad mat rakhna.",
+        "पहला प्रस्ताव याद मत रखिए।",
+    ],
+)
+def test_targeted_denial_still_blocks_selected_proposal(user_text: str) -> None:
+    messages, active = _transcript(user_text)
+
+    decision = validate_conversational_evidence(
+        messages=messages,
+        evidence_turns=[0, 1],
+        evidence_relation="user_confirmed_assistant_proposal",
+        proposal_turn=0,
+        visible_turn_indexes={0, 1},
+        proposal_confirmation_enabled=True,
+        active_proposals=active,
+    )
+
+    assert decision.accepted is False
+    assert decision.reason == "explicit_confirmation_denied"
+
+
+def test_registered_proposal_ordinals_are_rendered_only_after_server_match() -> None:
+    messages, active = _transcript("Remember the first proposal.")
+
+    ExtractionService._annotate_active_proposals(messages, active)
+
+    rendered = ExtractionService._messages_to_text(messages)
+    assert "[registered memory proposal 1]" in rendered
+    assert messages[0]["_registered_memory_proposal_ordinal"] == 1
+
+
+def test_mismatched_proposal_context_cannot_add_ordinal_label() -> None:
+    messages, active = _transcript("Remember that.")
+    active[0]["content_sha256"] = "forged"
+
+    ExtractionService._annotate_active_proposals(messages, active)
+
+    rendered = ExtractionService._messages_to_text(messages)
+    assert "[registered memory proposal 1]" not in rendered
+    assert "_registered_memory_proposal_ordinal" not in messages[0]
+
+
+def test_registered_claim_requires_exact_visible_proposal_binding() -> None:
+    messages, active = _transcript("Remember that.")
+    messages[0]["content"] += " Canonical claim: User prefers concise answers."
+    active[0]["memory_content"] = "User prefers concise answers."
+    active[0]["memory_category"] = "preference"
+
+    registered = ExtractionService._registered_proposal_memory(
+        messages,
+        active,
+        0,
+    )
+    assert registered == ("User prefers concise answers.", "preference")
+
+    active[0]["memory_content"] = "User prefers a hidden unrelated claim."
+    assert ExtractionService._registered_proposal_memory(messages, active, 0) is None
+
+
+@pytest.mark.asyncio
+async def test_registered_claim_replaces_model_paraphrase_after_verified_confirmation() -> None:
+    claim = "User prefers concise troubleshooting answers."
+    proposal = f"मैं इसे याद रख सकता हूँ।\nProposed memory: {claim}"
+    confirmation = "हाँ, इसे आगे के लिए याद रखिए।"
+    messages = [
+        {
+            "role": "assistant",
+            "content": proposal,
+            "source_kind": "assistant_output",
+            "is_memory_proposal": True,
+            "turn_id": "proposal-turn-1",
+            "turn_content_sha256": hashlib.sha256(proposal.encode()).hexdigest(),
+        },
+        {
+            "role": "user",
+            "content": confirmation,
+            "source_kind": "direct_user_input",
+            "turn_id": "user-turn-2",
+            "turn_content_sha256": hashlib.sha256(confirmation.encode()).hexdigest(),
+        },
+    ]
+    active = [
+        {
+            "id": "proposal-id-1",
+            "group_id": "group-1",
+            "ordinal": 1,
+            "turn_index": 0,
+            "turn_id": "proposal-turn-1",
+            "content_sha256": messages[0]["turn_content_sha256"],
+            "memory_content": claim,
+            "memory_category": "preference",
+        }
+    ]
+    llm = _SequencedLLM(
+        [
+            {
+                "memories": [
+                    {
+                        "content": "उपयोगकर्ता संक्षिप्त समस्या-समाधान उत्तर पसंद करता है।",
+                        "category": "fact",
+                        "importance_score": 6,
+                        "confidence": 0.9,
+                        "evidence_turns": [0, 1],
+                        "evidence_relation": "user_confirmed_assistant_proposal",
+                        "proposal_turn": 0,
+                        "reasoning": "The user confirmed the registered proposal.",
+                    }
+                ],
+                "nothing_to_extract": False,
+            }
+        ]
+    )
+    service = ExtractionService(
+        llm_service=llm,
+        proposal_confirmation_enabled=True,
+        importance_shadow_enabled=False,
+        app_env="test",
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 1
+    assert result.memories_to_store[0].content == claim
+    assert result.memories_to_store[0].category == "preference"
+    assert result.memories_to_store[0].validated_evidence["proposal"]["id"] == (
+        "proposal-id-1"
+    )
+    assert result.memories_to_store[0].validated_evidence["user_turn_indexes"] == [1]
+
+
 def test_unicode_user_statement_can_ground_unicode_memory() -> None:
     user_text = "मुझे व्याख्या से पहले कोड उदाहरण पसंद हैं।"
     candidate = SimpleNamespace(

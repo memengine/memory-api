@@ -969,6 +969,8 @@ def _active_proposal_context(
                 "turn_index": turn_index,
                 "turn_id": proposal.assistant_turn_id,
                 "content_sha256": proposal.assistant_content_sha256,
+                "memory_content": proposal.proposed_memory_content,
+                "memory_category": proposal.proposed_memory_category,
                 "expires_at": proposal.expires_at.isoformat(),
             }
         )

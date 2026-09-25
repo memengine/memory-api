@@ -840,8 +840,21 @@ class MemoryService:
             if role != "assistant" or source_kind != "assistant_output":
                 raise APIError(status_code=400, code="PROP_400", error="invalid_memory_proposal")
             existing_proposal = existing_proposals.get(turn_id)
+            proposed_memory = dict(message.get("proposed_memory") or {})
+            proposed_memory_content = (
+                str(proposed_memory.get("content") or "").strip() or None
+            )
+            proposed_memory_category = (
+                str(proposed_memory.get("category") or "").strip() or None
+            )
             if existing_proposal is not None:
-                if existing_proposal.assistant_content_sha256 != content_sha256:
+                if (
+                    existing_proposal.assistant_content_sha256 != content_sha256
+                    or existing_proposal.proposed_memory_content
+                    != proposed_memory_content
+                    or existing_proposal.proposed_memory_category
+                    != proposed_memory_category
+                ):
                     raise APIError(
                         status_code=409,
                         code="PROP_409",
@@ -861,6 +874,8 @@ class MemoryService:
                 "proposal_ordinal": proposal_ordinal,
                 "assistant_turn_id": turn_id,
                 "assistant_content_sha256": content_sha256,
+                "proposed_memory_content": proposed_memory_content,
+                "proposed_memory_category": proposed_memory_category,
                 "status": "active",
                 "expires_at": datetime.now(UTC) + timedelta(hours=1),
             }
@@ -882,7 +897,13 @@ class MemoryService:
                         )
                     )
                 ).scalar_one()
-                if existing_proposal.assistant_content_sha256 != content_sha256:
+                if (
+                    existing_proposal.assistant_content_sha256 != content_sha256
+                    or existing_proposal.proposed_memory_content
+                    != proposed_memory_content
+                    or existing_proposal.proposed_memory_category
+                    != proposed_memory_category
+                ):
                     raise APIError(
                         status_code=409,
                         code="PROP_409",

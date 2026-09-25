@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+import re
+import unicodedata
 import uuid
-from typing import Any
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel
-from pydantic import Field
-from pydantic import field_validator
-from pydantic import model_validator
-
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 MemoryCategory = Literal[
     "preference",
@@ -23,6 +20,20 @@ MemoryCategory = Literal[
 MemoryFormat = Literal["bullets", "json", "xml"]
 MemoryScope = Literal["private", "shared"]
 ProcessingStatus = Literal["normal", "delayed"]
+
+
+class ProposedMemoryRequest(BaseModel):
+    content: str = Field(min_length=10, max_length=500)
+    category: MemoryCategory
+
+    @field_validator("content")
+    @classmethod
+    def strip_content(cls, value: str) -> str:
+        return value.strip()
+
+
+def _visible_text(value: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
 
 
 class ConversationMessageRequest(BaseModel):
@@ -39,6 +50,7 @@ class ConversationMessageRequest(BaseModel):
     ] | None = None
     occurred_at: datetime | None = None
     is_memory_proposal: bool = False
+    proposed_memory: ProposedMemoryRequest | None = None
 
     @field_validator("content")
     @classmethod
@@ -50,11 +62,19 @@ class ConversationMessageRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_memory_proposal(self) -> ConversationMessageRequest:
+        if self.proposed_memory is not None and not self.is_memory_proposal:
+            raise ValueError("proposed_memory requires is_memory_proposal=true.")
         if self.is_memory_proposal and (
             self.role != "assistant" or self.source_kind != "assistant_output"
         ):
             raise ValueError(
                 "is_memory_proposal requires an assistant message with source_kind='assistant_output'."
+            )
+        if self.proposed_memory is not None and _visible_text(
+            self.proposed_memory.content
+        ) not in _visible_text(self.content):
+            raise ValueError(
+                "proposed_memory.content must appear verbatim in the user-visible assistant message."
             )
         return self
 

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from datetime import UTC
-from datetime import datetime
-from datetime import timedelta
+import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from api.db.models import ConversationEvidenceTurn
-from api.db.models import MemoryProposal
-from api.schemas.requests import ConversationMessageRequest
+from api.db.models import ConversationEvidenceTurn, MemoryProposal
+from api.schemas.requests import ConversationMessageRequest, ProposedMemoryRequest
 from api.services.memory_service import MemoryService
-from api.tasks.extraction_tasks import queue_wait_ms
-from api.tasks.extraction_tasks import retry_countdown_seconds
+from api.tasks.extraction_tasks import (
+    _active_proposal_context,
+    queue_wait_ms,
+    retry_countdown_seconds,
+)
 
 
 def test_evidence_and_proposal_models_have_scope_integrity_constraints() -> None:
@@ -46,6 +48,101 @@ def test_memory_proposal_marker_requires_explicit_assistant_output() -> None:
             source_kind="direct_user_input",
             is_memory_proposal=True,
         )
+
+
+def test_structured_proposal_claim_must_be_visible_and_proposal_scoped() -> None:
+    proposal = ConversationMessageRequest(
+        role="assistant",
+        content="I can remember this durable claim: User prefers concise answers.",
+        source_kind="assistant_output",
+        is_memory_proposal=True,
+        proposed_memory=ProposedMemoryRequest(
+            content="User prefers concise answers.",
+            category="preference",
+        ),
+    )
+
+    assert proposal.proposed_memory is not None
+    assert proposal.proposed_memory.content == "User prefers concise answers."
+    with pytest.raises(ValidationError, match="appear verbatim"):
+        ConversationMessageRequest(
+            role="assistant",
+            content="I can remember a different claim.",
+            source_kind="assistant_output",
+            is_memory_proposal=True,
+            proposed_memory=ProposedMemoryRequest(
+                content="User prefers concise answers.",
+                category="preference",
+            ),
+        )
+    with pytest.raises(ValidationError, match="is_memory_proposal"):
+        ConversationMessageRequest(
+            role="assistant",
+            content="User prefers concise answers.",
+            source_kind="assistant_output",
+            proposed_memory=ProposedMemoryRequest(
+                content="User prefers concise answers.",
+                category="preference",
+            ),
+        )
+
+
+def test_memory_proposal_model_has_structured_claim_columns() -> None:
+    assert MemoryProposal.__table__.c.proposed_memory_content.type.length == 500
+    assert MemoryProposal.__table__.c.proposed_memory_category.type.length == 50
+
+
+def test_worker_context_preserves_structured_proposal_claim() -> None:
+    tenant_id = uuid.uuid4()
+    proxy_user_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    content_hash = "a" * 64
+    proposal = SimpleNamespace(
+        id=uuid.uuid4(),
+        proposal_group_id=str(job_id),
+        proposal_ordinal=1,
+        assistant_turn_id="proposal-turn-1",
+        assistant_content_sha256=content_hash,
+        proposed_memory_content="User prefers concise answers.",
+        proposed_memory_category="preference",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [proposal]
+
+    class _Session:
+        def execute(self, _statement):
+            return _Result()
+
+    messages = [
+        {
+            "role": "assistant",
+            "source_kind": "assistant_output",
+            "turn_id": "proposal-turn-1",
+            "turn_content_sha256": content_hash,
+        }
+    ]
+
+    context = _active_proposal_context(
+        _Session(),
+        job_payload={
+            "tenant_id": str(tenant_id),
+            "proxy_user_id": str(proxy_user_id),
+            "job_id": str(job_id),
+            "external_conversation_id": "chat-1",
+        },
+        messages=messages,
+    )
+
+    assert context[0]["memory_content"] == "User prefers concise answers."
+    assert context[0]["memory_category"] == "preference"
+    assert context[0]["turn_index"] == 0
+    assert messages[0]["_registered_memory_proposal"] is True
 
 
 def test_conversation_scope_uses_external_id_or_job_fallback() -> None:

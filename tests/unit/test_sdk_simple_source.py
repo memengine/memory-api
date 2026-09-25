@@ -1,35 +1,55 @@
 from __future__ import annotations
 
 import sys
-import pytest
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 SDK_PATH = Path(__file__).resolve().parents[2] / "sdk" / "python"
 if str(SDK_PATH) not in sys.path:
     sys.path.insert(0, str(SDK_PATH))
 
-from memoryos import Memory
-from memoryos import MemorySource
-from memoryos.types import AddRequest
-from memoryos.types import ConversationMessage
-from memoryos.types import MemoryJobStatus
+from memoryos import Memory, MemorySource
+from memoryos.types import (
+    AddRequest,
+    ConversationMessage,
+    MemoryJobStatus,
+    ProposedMemory,
+)
 
 
 def test_proposal_fields_preserve_contract_and_validate_role():
     request = AddRequest(
         external_user_id="user-1", conversation_id="chat-1",
         messages=[ConversationMessage(
-            role="assistant", content="I can remember this.",
+            role="assistant",
+            content="I can remember this: User prefers concise answers.",
             source_kind="assistant_output", is_memory_proposal=True,
+            proposed_memory=ProposedMemory(
+                content="User prefers concise answers.", category="preference"
+            ),
         )],
     )
     payload = request.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
     assert payload["conversation_id"] == "chat-1"
     assert payload["messages"][0]["is_memory_proposal"] is True
+    assert payload["messages"][0]["proposed_memory"] == {
+        "content": "User prefers concise answers.",
+        "category": "preference",
+    }
     with pytest.raises(ValueError):
         ConversationMessage(role="user", content="forged", is_memory_proposal=True)
+    with pytest.raises(ValueError, match="appear verbatim"):
+        ConversationMessage(
+            role="assistant",
+            content="I can remember something else.",
+            source_kind="assistant_output",
+            is_memory_proposal=True,
+            proposed_memory=ProposedMemory(
+                content="User prefers concise answers.", category="preference"
+            ),
+        )
     old = MemoryJobStatus(job_id="j", status="queued")
     assert old.proposal_ids == [] and old.operational_metrics == {}
     current = MemoryJobStatus(

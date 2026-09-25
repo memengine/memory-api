@@ -16,6 +16,11 @@ export type MessageSourceKind =
   | "system_instruction"
   | "client_assertion";
 
+export interface ProposedMemory {
+  content: string;
+  category: MemoryCategory;
+}
+
 export type RetrievalFeedbackOutcome =
   | "used_successfully"
   | "used_partially"
@@ -31,6 +36,7 @@ export interface ConversationMessage {
   sourceKind?: MessageSourceKind;
   occurredAt?: string;
   isMemoryProposal?: boolean;
+  proposedMemory?: ProposedMemory;
 }
 
 export interface EvidenceReference {
@@ -555,6 +561,22 @@ export function toApiConversationMessages(messages: ConversationMessage[]): Arra
     if (message.isMemoryProposal && (message.role !== "assistant" || message.sourceKind !== "assistant_output")) {
       throw new Error("isMemoryProposal requires an assistant message with sourceKind='assistant_output'.");
     }
+    if (message.proposedMemory && !message.isMemoryProposal) {
+      throw new Error("proposedMemory requires isMemoryProposal=true.");
+    }
+    let proposedMemory: ProposedMemory | undefined;
+    if (message.proposedMemory) {
+      const proposedContent = message.proposedMemory.content.trim();
+      if (proposedContent.length < 10 || proposedContent.length > 500) {
+        throw new Error("proposedMemory.content must contain 10 to 500 characters.");
+      }
+      const normalizedMessage = content.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ");
+      const normalizedClaim = proposedContent.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ");
+      if (!normalizedMessage.includes(normalizedClaim)) {
+        throw new Error("proposedMemory.content must appear verbatim in the assistant message.");
+      }
+      proposedMemory = { content: proposedContent, category: message.proposedMemory.category };
+    }
     return {
       role: message.role,
       content,
@@ -562,6 +584,12 @@ export function toApiConversationMessages(messages: ConversationMessage[]): Arra
       ...(message.sourceKind ? { source_kind: message.sourceKind } : {}),
       ...(message.occurredAt ? { occurred_at: message.occurredAt } : {}),
       ...(message.isMemoryProposal ? { is_memory_proposal: true } : {}),
+      ...(proposedMemory ? {
+        proposed_memory: {
+          content: proposedMemory.content,
+          category: proposedMemory.category,
+        },
+      } : {}),
     };
   });
 }

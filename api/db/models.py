@@ -2958,6 +2958,8 @@ class MemoryProposal(Base):
     proposal_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     assistant_turn_id: Mapped[str] = mapped_column(String(300), nullable=False)
     assistant_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    proposed_memory_content: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    proposed_memory_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

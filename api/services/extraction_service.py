@@ -260,6 +260,7 @@ class ExtractionService:
             {**message, "_turn_index": index}
             for index, message in enumerate(messages)
         ]
+        self._annotate_active_proposals(indexed_messages, proposal_context or [])
         conversation, visible_turn_indexes = self._build_conversation_context(
             indexed_messages
         )
@@ -784,7 +785,11 @@ class ExtractionService:
             "set proposal_turn to null. If the user rejects an assistant proposal but states a different "
             "durable fact or preference in the same turn, never store the rejected proposal. Extract only "
             "the independently stated correction as direct_user_statement, cite the user turn, and set "
-            "proposal_turn to null. This rule applies regardless of the language used by the user.\n\n"
+            "proposal_turn to null. This rule applies regardless of the language used by the user. "
+            "For a confirmed registered proposal, output the durable claim itself, not a meta-memory "
+            "such as 'the user wants to remember that ...'. Preserve the proposal's original language "
+            "and reuse its key claim wording instead of translating it; the registered proposal number "
+            "shown in the transcript is the server-verified ordinal.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
@@ -1203,7 +1208,21 @@ class ExtractionService:
         invalid_count = 0
         rejection_counts: dict[str, int] = {}
         for raw_memory in raw_memories:
-            candidate, rejection_reason = self._coerce_memory(raw_memory)
+            candidate_payload = raw_memory
+            if isinstance(raw_memory, dict):
+                registered_memory = self._registered_proposal_memory(
+                    messages or [],
+                    proposal_context or [],
+                    raw_memory.get("proposal_turn"),
+                )
+                if registered_memory is not None:
+                    memory_content, memory_category = registered_memory
+                    candidate_payload = {
+                        **raw_memory,
+                        "content": memory_content,
+                        "category": memory_category,
+                    }
+            candidate, rejection_reason = self._coerce_memory(candidate_payload)
             validated_evidence: dict[str, Any] = {}
             if candidate is None:
                 invalid_count += 1
@@ -1715,6 +1734,83 @@ class ExtractionService:
         ]
 
     @staticmethod
+    def _registered_proposal_memory(
+        messages: list[dict[str, Any]],
+        proposal_context: list[dict[str, Any]],
+        proposal_turn: Any,
+    ) -> tuple[str, str] | None:
+        """Return an immutable, user-visible proposal claim for one exact turn."""
+
+        if (
+            not isinstance(proposal_turn, int)
+            or isinstance(proposal_turn, bool)
+            or not 0 <= proposal_turn < len(messages)
+        ):
+            return None
+        message = messages[proposal_turn]
+        target = next(
+            (
+                proposal
+                for proposal in proposal_context
+                if proposal.get("turn_index") == proposal_turn
+                and str(proposal.get("turn_id") or "")
+                == str(message.get("turn_id") or "")
+                and str(proposal.get("content_sha256") or "")
+                == str(message.get("turn_content_sha256") or "")
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        memory_content = str(target.get("memory_content") or "").strip()
+        memory_category = str(target.get("memory_category") or "").strip()
+        if not memory_content or memory_category not in ALLOWED_CATEGORIES:
+            return None
+        visible_message = " ".join(
+            unicodedata.normalize("NFKC", str(message.get("content") or ""))
+            .casefold()
+            .split()
+        )
+        visible_claim = " ".join(
+            unicodedata.normalize("NFKC", memory_content).casefold().split()
+        )
+        if visible_claim not in visible_message:
+            return None
+        return memory_content, memory_category
+
+    @staticmethod
+    def _annotate_active_proposals(
+        messages: list[dict[str, Any]],
+        proposal_context: list[dict[str, Any]],
+    ) -> None:
+        """Attach server-verified proposal ordinals to their immutable turns."""
+
+        for proposal in proposal_context:
+            turn_index = proposal.get("turn_index")
+            if (
+                not isinstance(turn_index, int)
+                or isinstance(turn_index, bool)
+                or not 0 <= turn_index < len(messages)
+            ):
+                continue
+            message = messages[turn_index]
+            if (
+                str(message.get("role") or "").strip().lower() != "assistant"
+                or str(message.get("source_kind") or "").strip().lower()
+                != "assistant_output"
+                or str(message.get("turn_id") or "")
+                != str(proposal.get("turn_id") or "")
+                or str(message.get("turn_content_sha256") or "")
+                != str(proposal.get("content_sha256") or "")
+            ):
+                continue
+            ordinal = proposal.get("ordinal")
+            if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 1:
+                continue
+            message["_registered_memory_proposal"] = True
+            message["_registered_memory_proposal_ordinal"] = ordinal
+
+    @staticmethod
     def _messages_to_text(messages: list[dict[str, Any]]) -> str:
         lines: list[str] = []
         for fallback_index, message in enumerate(messages):
@@ -1724,14 +1820,24 @@ class ExtractionService:
                 turn_index = message.get("_turn_index", fallback_index)
                 source_kind = str(message.get("source_kind") or "").strip().lower()
                 source_label = f"[source {source_kind}]" if source_kind else ""
-                proposal_label = (
-                    "[registered memory proposal]"
-                    if bool(
-                        message.get("is_memory_proposal")
-                        or message.get("_registered_memory_proposal")
-                    )
-                    else ""
+                proposal_ordinal = message.get(
+                    "_registered_memory_proposal_ordinal"
                 )
+                if isinstance(proposal_ordinal, int) and not isinstance(
+                    proposal_ordinal, bool
+                ):
+                    proposal_label = (
+                        f"[registered memory proposal {proposal_ordinal}]"
+                    )
+                else:
+                    proposal_label = (
+                        "[registered memory proposal]"
+                        if bool(
+                            message.get("is_memory_proposal")
+                            or message.get("_registered_memory_proposal")
+                        )
+                        else ""
+                    )
                 lines.append(
                     f"[turn {turn_index}][{role}]{source_label}{proposal_label}: {content}"
                 )

@@ -308,13 +308,20 @@ def _case_input(case: ConfirmationCase) -> tuple[list[dict[str, Any]], list[dict
     for offset, proposal in enumerate(selected, 1):
         turn_index = len(messages)
         turn_id = f"{case.id}-proposal-{offset}"
-        content_hash = hashlib.sha256(proposal["content"].encode("utf-8")).hexdigest()
+        visible_content = (
+            f"{proposal['content']}\nProposed memory: {proposal['memory']}"
+        )
+        content_hash = hashlib.sha256(visible_content.encode("utf-8")).hexdigest()
         messages.append(
             {
                 "role": "assistant",
-                "content": proposal["content"],
+                "content": visible_content,
                 "source_kind": "assistant_output",
                 "is_memory_proposal": True,
+                "proposed_memory": {
+                    "content": proposal["memory"],
+                    "category": proposal["category"],
+                },
                 "turn_id": turn_id,
                 "turn_content_sha256": content_hash,
             }
@@ -327,6 +334,8 @@ def _case_input(case: ConfirmationCase) -> tuple[list[dict[str, Any]], list[dict
                 "turn_index": turn_index,
                 "turn_id": turn_id,
                 "content_sha256": content_hash,
+                "memory_content": proposal["memory"],
+                "memory_category": proposal["category"],
             }
         )
         expected[offset] = proposal

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from datetime import UTC, date, datetime
 from typing import Any, Literal
@@ -24,6 +25,18 @@ MessageSourceKind = Literal[
     "system_instruction",
     "client_assertion",
 ]
+
+
+class ProposedMemory(BaseModel):
+    content: str = Field(min_length=10, max_length=500)
+    category: MemoryCategory
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        return value.strip()
+
+
 QuotaMode = Literal["FULL", "PASSTHROUGH", "DEGRADED_RETRIEVE", "BLOCKED"]
 CircuitStatus = Literal["HEALTHY", "DEGRADED", "CRITICAL"]
 ProcessingStatus = Literal["normal", "delayed"]
@@ -44,13 +57,29 @@ class ConversationMessage(BaseModel):
     source_kind: MessageSourceKind | None = None
     occurred_at: datetime | None = None
     is_memory_proposal: bool = False
+    proposed_memory: ProposedMemory | None = None
 
     @model_validator(mode="after")
     def validate_proposal(self):
+        if self.proposed_memory is not None and not self.is_memory_proposal:
+            raise ValueError("proposed_memory requires is_memory_proposal=true.")
         if self.is_memory_proposal and (
             self.role != "assistant" or self.source_kind != "assistant_output"
         ):
             raise ValueError("Memory proposals require assistant_output from an assistant.")
+        if self.proposed_memory is not None:
+            visible_message = " ".join(
+                unicodedata.normalize("NFKC", self.content).casefold().split()
+            )
+            visible_claim = " ".join(
+                unicodedata.normalize("NFKC", self.proposed_memory.content)
+                .casefold()
+                .split()
+            )
+            if visible_claim not in visible_message:
+                raise ValueError(
+                    "proposed_memory.content must appear verbatim in the assistant message."
+                )
         return self
 
     @field_validator("content")

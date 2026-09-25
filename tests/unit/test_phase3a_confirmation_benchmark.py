@@ -148,8 +148,13 @@ def test_phase3a_holdout_uses_case_specific_proposals(monkeypatch, tmp_path) -> 
     messages, _, expected = _case_input(cases[0])
 
     assert messages[0]["content"] == (
-        "I can remember that you avoid meetings before noon."
+        "I can remember that you avoid meetings before noon.\n"
+        "Proposed memory: User avoids meetings before noon."
     )
+    assert messages[0]["proposed_memory"] == {
+        "content": "User avoids meetings before noon.",
+        "category": "preference",
+    }
     assert expected[1] == {
         "content": "I can remember that you avoid meetings before noon.",
         "memory": "User avoids meetings before noon.",

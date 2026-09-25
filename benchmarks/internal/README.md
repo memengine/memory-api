@@ -59,6 +59,19 @@ Before this command, all of the following are required:
 runner, but only the manual loader can open the sealed dataset. This makes the release procedure
 reproducible without making the data available to ordinary development or CI.
 
+## Phase 3A confirmation development evaluation
+
+`datasets/phase3a_confirmation/development/proposal_generalization_v1.json` is the visible,
+repeatable development set for testing confirmation behavior against unfamiliar proposal content. It
+contains 60 cases, balanced across English, Hindi, and Hinglish and across the five confirmation
+reference types. Every case supplies its own proposals; all six memory categories are balanced, and
+none of the legacy fixed development proposals are reused.
+
+This set is safe for diagnosis and prompt or policy iteration. It is not release evidence. Run it
+twice through the real provider before proposing a production change, classify any failures by model
+extraction, proposal selection, normalization, deterministic policy, or evaluator behavior, and keep
+Phase 3A disabled until a separately created blind holdout passes the frozen release gate.
+
 ## Phase 3A confirmation holdout
 
 Phase 3A uses a separate single-use runner because every case must contain proposal content that was

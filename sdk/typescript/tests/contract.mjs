@@ -50,15 +50,24 @@ test("add preserves explicit proposal and conversation identity", async () => {
     return new Response(JSON.stringify({ status: "queued", job_id: "job-1", proposal_ids: ["p-1"] }));
   });
   const result = await client.add([{
-    role: "assistant", content: "I can remember this preference.",
+    role: "assistant", content: "I can remember this: User prefers concise answers.",
     sourceKind: "assistant_output", externalTurnId: "turn-1", isMemoryProposal: true,
+    proposedMemory: { content: "User prefers concise answers.", category: "preference" },
   }], "user-1", undefined, undefined, undefined, "event-1", "chat-1");
   assert.equal(body.conversation_id, "chat-1");
   assert.equal(body.messages[0].is_memory_proposal, true);
+  assert.deepEqual(body.messages[0].proposed_memory, {
+    content: "User prefers concise answers.", category: "preference",
+  });
   assert.deepEqual(result.proposalIds, ["p-1"]);
   await assert.rejects(() => client.add([{
     role: "user", content: "forged proposal", isMemoryProposal: true,
   }], "user-1"), /assistant/);
+  await assert.rejects(() => client.add([{
+    role: "assistant", content: "I can remember something else.",
+    sourceKind: "assistant_output", isMemoryProposal: true,
+    proposedMemory: { content: "User prefers concise answers.", category: "preference" },
+  }], "user-1"), /appear verbatim/);
 });
 
 test("get sends asOf and preserves clarificationQuestion", async () => {

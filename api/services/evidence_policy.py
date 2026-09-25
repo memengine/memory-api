@@ -154,7 +154,16 @@ def validate_conversational_evidence(
         return EvidenceDecision(False, EvidenceAuthority.CLIENT_ASSERTION, "proposal_not_active")
 
     latest_user_text = str(messages[max(user_indexes)].get("content") or "")
-    if has_explicit_proposal_denial(latest_user_text):
+    referenced_ordinal = _explicit_proposal_ordinal(latest_user_text, active)
+    denied_ordinals = _explicitly_denied_proposal_ordinals(
+        latest_user_text,
+        active,
+    )
+    if has_explicit_proposal_denial(latest_user_text) and (
+        not denied_ordinals
+        or referenced_ordinal is None
+        or int(target.get("ordinal", -1)) in denied_ordinals
+    ):
         return EvidenceDecision(
             False,
             EvidenceAuthority.CLIENT_ASSERTION,
@@ -162,7 +171,6 @@ def validate_conversational_evidence(
             user_turn_indexes=user_indexes,
             proposal_turn_index=proposal_turn,
         )
-    referenced_ordinal = _explicit_proposal_ordinal(latest_user_text, active)
     if referenced_ordinal is not None and int(target.get("ordinal", -1)) != referenced_ordinal:
         return EvidenceDecision(
             False,
@@ -235,6 +243,84 @@ _ORDINAL_WORDS = {
 }
 
 
+def _explicitly_denied_proposal_ordinals(
+    user_text: str,
+    active_proposals: list[dict[str, Any]],
+) -> set[int]:
+    """Return only proposal ordinals negated near their textual reference."""
+
+    normalized = " ".join(user_text.lower().split())
+    if not normalized:
+        return set()
+    ordinals = [
+        int(item["ordinal"])
+        for item in active_proposals
+        if item.get("ordinal") is not None
+    ]
+    last_ordinal = max(ordinals) if ordinals else None
+    mentions: list[tuple[int, int, int]] = []
+    words = {
+        **_ORDINAL_WORDS,
+        "former": 1,
+        **({"last": last_ordinal, "latter": last_ordinal} if last_ordinal else {}),
+        "pehla": 1,
+        "pahla": 1,
+        "pehli": 1,
+        "pehle": 1,
+        "doosra": 2,
+        "dusra": 2,
+        "doosri": 2,
+        "dusri": 2,
+        "doosre": 2,
+        "dusre": 2,
+    }
+    for word, ordinal in words.items():
+        if ordinal is None:
+            continue
+        mentions.extend(
+            (match.start(), match.end(), int(ordinal))
+            for match in re.finditer(rf"\b{re.escape(word)}\b", normalized)
+        )
+    hindi_words = {
+        "पहले": 1,
+        "पहला": 1,
+        "पहली": 1,
+        "दूसरे": 2,
+        "दूसरा": 2,
+        "दूसरी": 2,
+        **({"अंतिम": last_ordinal} if last_ordinal else {}),
+    }
+    for word, ordinal in hindi_words.items():
+        mentions.extend(
+            (match.start(), match.end(), int(ordinal))
+            for match in re.finditer(re.escape(word), normalized)
+        )
+    for match in re.finditer(
+        r"(?:\b(?:option|proposal|choice)(?:\s+number)?|\bnumber|"
+        r"(?:विकल्प|प्रस्ताव)(?:\s+संख्या)?)\s*#?\s*(\d{1,2})(?:st|nd|rd|th)?\b",
+        normalized,
+    ):
+        mentions.append((match.start(), match.end(), int(match.group(1))))
+
+    denied: set[int] = set()
+    before_denial = re.compile(
+        r"(?:\bnot|\bnever|\bdon't|\bdont|\bnahi|\bnahin|नहीं|मत)"
+        r"(?:\s+\w+){0,3}\s*$",
+        re.IGNORECASE,
+    )
+    after_denial = re.compile(
+        r"^(?:\s+\w+){0,3}\s*(?:\bnot\b|\bnever\b|\bdon't\b|\bdont\b|"
+        r"\bnahi\b|\bnahin\b|नहीं|मत)",
+        re.IGNORECASE,
+    )
+    for start, end, ordinal in mentions:
+        before = normalized[max(0, start - 48) : start]
+        after = normalized[end : min(len(normalized), end + 48)]
+        if before_denial.search(before) or after_denial.search(after):
+            denied.add(ordinal)
+    return denied
+
+
 def _explicit_proposal_ordinal(
     user_text: str,
     active_proposals: list[dict[str, Any]],
@@ -243,8 +329,12 @@ def _explicit_proposal_ordinal(
     normalized = " ".join(user_text.lower().split())
     if not normalized:
         return None
+    denied_ordinals = _explicitly_denied_proposal_ordinals(
+        normalized,
+        active_proposals,
+    )
     for word, ordinal in _ORDINAL_WORDS.items():
-        if re.search(
+        if ordinal not in denied_ordinals and re.search(
             rf"\b(?:the\s+{word}|{word}\s+(?:one|option|proposal|choice))\b",
             normalized,
         ):
@@ -268,7 +358,7 @@ def _explicit_proposal_ordinal(
         (r"(?:दूसरे|दूसरा|दूसरी)\s+(?:वाला|वाले|वाली|प्रस्ताव|विकल्प)", 2),
     )
     for pattern, ordinal in multilingual_ordinals:
-        if re.search(pattern, normalized):
+        if ordinal not in denied_ordinals and re.search(pattern, normalized):
             return ordinal
     numeric = re.search(
         r"(?:\b(?:option|proposal|choice)(?:\s+number)?|\bnumber|"
@@ -276,7 +366,9 @@ def _explicit_proposal_ordinal(
         normalized,
     )
     if numeric:
-        return int(numeric.group(1))
+        ordinal = int(numeric.group(1))
+        if ordinal not in denied_ordinals:
+            return ordinal
     if re.search(
         r"(?:\b(?:the\s+(?:last|latter)|last\s+(?:one|option|proposal|choice|wala))\b|अंतिम\s+(?:वाला|वाले|वाली))",
         normalized,
@@ -286,8 +378,10 @@ def _explicit_proposal_ordinal(
             for item in active_proposals
             if item.get("ordinal") is not None
         ]
-        return max(ordinals) if ordinals else None
-    if re.search(
+        ordinal = max(ordinals) if ordinals else None
+        if ordinal not in denied_ordinals:
+            return ordinal
+    if 1 not in denied_ordinals and re.search(
         r"\b(?:the\s+former|former\s+(?:one|option|proposal|choice|suggestion))\b",
         normalized,
     ):
