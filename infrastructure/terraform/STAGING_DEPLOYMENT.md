@@ -33,7 +33,7 @@ records. To avoid starting an unhealthy task before its image and secret values
 exist, make the first apply a zero-task bootstrap:
 
 ```powershell
-terraform plan -var-file staging.tfvars -var 'ecs_api_desired_count=0' -var 'ecs_api_min_capacity=0' -var 'celery_scale_desired_count=0' -var 'celery_growth_desired_count=0' -var 'celery_starter_desired_count=0' -var 'celery_background_desired_count=0'
+terraform plan -var-file staging.tfvars -var 'ecs_api_desired_count=0' -var 'ecs_api_min_capacity=0' -var 'celery_scale_desired_count=0' -var 'celery_growth_desired_count=0' -var 'celery_starter_desired_count=0' -var 'celery_background_desired_count=0' -var 'celery_beat_desired_count=0'
 ```
 
 Review that plan separately, then apply it only when it has no destroys. It

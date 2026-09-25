@@ -460,13 +460,13 @@ variable "celery_background_desired_count" {
 }
 
 variable "celery_beat_desired_count" {
-  description = "Celery Beat scheduler task count. This must remain exactly one to prevent duplicate periodic dispatch."
+  description = "Celery Beat scheduler task count. Use zero only for an image-and-secrets bootstrap; normal operation requires exactly one."
   type        = number
   default     = 1
 
   validation {
-    condition     = var.celery_beat_desired_count == 1
-    error_message = "Celery Beat must run exactly one replica; additional replicas can dispatch duplicate periodic tasks."
+    condition     = contains([0, 1], var.celery_beat_desired_count)
+    error_message = "Celery Beat must be zero for bootstrap or exactly one for normal operation; additional replicas can dispatch duplicate periodic tasks."
   }
 }
 
