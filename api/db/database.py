@@ -37,9 +37,18 @@ def get_database_url() -> str:
 
 def get_sync_database_url(database_url: str | None = None) -> str:
     url = database_url or get_database_url()
-    if url.partition("://")[0] == "postgresql+asyncpg":
-        return "postgresql+psycopg2://" + url.partition("://")[2]
-    return url
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg"}:
+        return url
+    return urlunsplit(
+        (
+            "postgresql+psycopg2",
+            parsed.netloc,
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def get_async_database_url(database_url: str | None = None) -> str:
