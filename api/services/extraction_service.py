@@ -46,6 +46,17 @@ COMPOSITIONAL_MIN_MESSAGES = 4
 COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
 COMPOSITIONAL_MIN_SIGNAL_GROUPS = 2
+
+
+@dataclass(slots=True)
+class StructuredProposalResolution:
+    decision: str
+    memory: ExtractedMemory | None = None
+    pending_count: int = 0
+    discarded_model_candidates: int = 0
+    rejected_reason: str | None = None
+
+
 COMPOSITIONAL_SIGNAL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "identity",
@@ -364,9 +375,23 @@ class ExtractionService:
         tokens_used += int(response.total_tokens or 0)
         provider_used = response.provider_used or provider_used
         await self._record_provider_usage(response.provider_used)
+        normalized_response, structured_proposal = (
+            self._resolve_structured_proposal_confirmation(
+                response.content,
+                messages=indexed_messages,
+                visible_turn_indexes=visible_turn_indexes,
+                proposal_context=proposal_context or [],
+                evidence_context={
+                    "provider": response.provider_used,
+                    "model": response.model_used,
+                    "extracted_at": datetime.now(UTC).isoformat(),
+                    "extractor_version": "structured-proposal-decision-v1",
+                },
+            )
+        )
         kept, pending, filtered_count, nothing_to_extract, rejection_counts = (
             self._parse_and_validate_response(
-                response.content,
+                normalized_response,
                 messages=indexed_messages,
                 visible_turn_indexes=visible_turn_indexes,
                 source_context=source_context,
@@ -379,6 +404,31 @@ class ExtractionService:
                 proposal_context=proposal_context,
             )
         )
+        if structured_proposal is not None:
+            if structured_proposal.discarded_model_candidates:
+                filtered_count += structured_proposal.discarded_model_candidates
+                reason = "proposal_decision_model_candidate_ignored"
+                rejection_counts[reason] = (
+                    rejection_counts.get(reason, 0)
+                    + structured_proposal.discarded_model_candidates
+                )
+            if structured_proposal.memory is not None:
+                structured_key = (
+                    structured_proposal.memory.category,
+                    " ".join(structured_proposal.memory.content.casefold().split()),
+                )
+                existing_keys = {
+                    (item.category, " ".join(item.content.casefold().split()))
+                    for item in [*kept, *pending]
+                }
+                if structured_key not in existing_keys:
+                    kept.append(structured_proposal.memory)
+                nothing_to_extract = False
+            if structured_proposal.rejected_reason:
+                filtered_count += 1
+                rejection_counts[structured_proposal.rejected_reason] = (
+                    rejection_counts.get(structured_proposal.rejected_reason, 0) + 1
+                )
         correction_recovery_attempted = self._should_attempt_correction_recovery(
             messages=indexed_messages,
             source_context=source_context,
@@ -523,13 +573,25 @@ class ExtractionService:
                         == "user_confirmed_assistant_proposal"
                         for item in kept
                     ),
-                    "pending": sum(
-                        item.candidate_reason
-                        in {
-                            "ambiguous_proposal_reference",
-                            "proposal_reference_mismatch",
-                        }
-                        for item in pending
+                    "pending": (
+                        (
+                            structured_proposal.pending_count
+                            if structured_proposal
+                            else 0
+                        )
+                        + sum(
+                            item.candidate_reason
+                            in {
+                                "ambiguous_proposal_reference",
+                                "proposal_reference_mismatch",
+                            }
+                            for item in pending
+                        )
+                    ),
+                    **(
+                        {"decision_contract": structured_proposal.decision}
+                        if structured_proposal is not None
+                        else {}
                     ),
                     "rejected_reasons": {
                         reason: count
@@ -716,6 +778,11 @@ class ExtractionService:
             for category, definition in self._category_definitions.items()
         )
         never_store = "\n".join(f"- {item}" for item in self._never_store)
+        response_contract = (
+            self._structured_proposal_response_contract()
+            if self._proposal_confirmation_enabled
+            else self._legacy_response_contract()
+        )
         prompt = (
             "You are a memory extraction specialist. Extract reusable facts about a user "
             "from their conversation. Return JSON only. No markdown. No explanation.\n\n"
@@ -752,6 +819,33 @@ class ExtractionService:
             "preference, redundant future reversals, counterfactual background, or every supported clause. Prefer "
             "fewer durable memories over exhaustive clause extraction. Durable autobiographical facts and durable "
             "preferences remain eligible even when they appear after an unrelated question or request.\n\n"
+            f"{response_contract}"
+        )
+        if source_context:
+            prompt += (
+                "\n\nAUTHENTICATED SERVICE EVENT MODE\n"
+                "This payload was deliberately submitted by a registered backend service. "
+                "Declarative statements from the service are authoritative observations, "
+                "even when represented with the assistant role. Extract durable customer "
+                "facts asserted by the service, but never extract questions, instructions, "
+                "speculation, credentials, or unsupported implications. Canonicalize the "
+                "result as a fact about the user/customer."
+            )
+        if has_composition_signals:
+            prompt += (
+                "\n\nCOMPOSITIONAL EXTRACTION MODE\n"
+                "The user message includes compact entity and relationship hints from an earlier pass. "
+                "Use those hints only when they are directly supported by the transcript. "
+                "They are not memories by themselves. Convert supported cross-message relationships "
+                "into clean, atomic memories and discard unsupported hints."
+            )
+        return prompt
+
+    @staticmethod
+    def _legacy_response_contract() -> str:
+        """Keep disabled Phase 3A extraction behavior prompt-compatible."""
+
+        return (
             "Return exactly this JSON shape:\n"
             "{\n"
             '  "memories": [\n'
@@ -793,25 +887,56 @@ class ExtractionService:
             "If nothing should be extracted, return:\n"
             '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
-        if source_context:
-            prompt += (
-                "\n\nAUTHENTICATED SERVICE EVENT MODE\n"
-                "This payload was deliberately submitted by a registered backend service. "
-                "Declarative statements from the service are authoritative observations, "
-                "even when represented with the assistant role. Extract durable customer "
-                "facts asserted by the service, but never extract questions, instructions, "
-                "speculation, credentials, or unsupported implications. Canonicalize the "
-                "result as a fact about the user/customer."
-            )
-        if has_composition_signals:
-            prompt += (
-                "\n\nCOMPOSITIONAL EXTRACTION MODE\n"
-                "The user message includes compact entity and relationship hints from an earlier pass. "
-                "Use those hints only when they are directly supported by the transcript. "
-                "They are not memories by themselves. Convert supported cross-message relationships "
-                "into clean, atomic memories and discard unsupported hints."
-            )
-        return prompt
+
+    @staticmethod
+    def _structured_proposal_response_contract() -> str:
+        return (
+            "Return exactly this JSON shape:\n"
+            "{\n"
+            '  "proposal_confirmation": null or {\n'
+            '    "decision": "confirmed|rejected|ambiguous|unrelated",\n'
+            '    "target_ordinal": "integer proposal number or null"\n'
+            "  },\n"
+            '  "memories": [\n'
+            "    {\n"
+            '      "content": "string",\n'
+            '      "category": "preference|fact|goal|procedure|relationship|expertise",\n'
+            '      "importance_score": float between 1.0 and 10.0,\n'
+            '      "confidence": float between 0.0 and 1.0,\n'
+            '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
+            '      "evidence_relation": "direct_user_statement",\n'
+            '      "proposal_turn": null,\n'
+            '      "reasoning": "one sentence why this was extracted"\n'
+            "    }\n"
+            "  ],\n"
+            '  "nothing_to_extract": false,\n'
+            '  "extraction_notes": "optional string"\n'
+            "}\n\n"
+            "For normal conversations, evidence_turns is mandatory and must include at least one "
+            "user turn that directly states the memory. A question from the user or an "
+            "unsupported assistant statement is not evidence. The memories array is only for "
+            "independent direct user statements: set evidence_relation to direct_user_statement "
+            "and proposal_turn to null. Use direct_user_statement only when the user's own words "
+            "independently state the extracted claim. Apply this test mechanically: remove every "
+            "assistant turn; if the candidate claim is no longer entailed, it is not "
+            "direct_user_statement. References such as 'that', 'it', 'this', 'the second one', "
+            "'the framing', agreement, or acceptance depend on the proposal and belong only in "
+            "proposal_confirmation. If the user rejects an assistant proposal but states a different "
+            "durable fact or preference in the same turn, never store the rejected proposal. Extract "
+            "only the independently stated correction as direct_user_statement, cite the user turn, "
+            "and set proposal_turn to null. This rule applies regardless of the user's language.\n\n"
+            "When registered memory proposals are shown, always classify the latest eligible user "
+            "reply in proposal_confirmation. Use confirmed only when the user accepts a proposal. "
+            "For one active proposal, target_ordinal is 1. For multiple proposals, set "
+            "target_ordinal only when the reply identifies one proposal; otherwise use ambiguous "
+            "with target_ordinal null. Use rejected for refusal and unrelated when the reply does "
+            "not address a proposal. Do not copy a confirmed proposal into the memories array: "
+            "the backend resolves its registered content. Never output transcript turn indexes as "
+            "target_ordinal.\n\n"
+            "If nothing should be extracted, return:\n"
+            '{"proposal_confirmation":null,"memories":[],"nothing_to_extract":true,'
+            '"extraction_notes":"reason"}'
+        )
 
     @staticmethod
     def _build_correction_recovery_prompt() -> str:
@@ -1165,6 +1290,199 @@ class ExtractionService:
             "existing_memories_available": len(existing_memories),
             "existing_memories_included": included,
         }
+
+    def _resolve_structured_proposal_confirmation(
+        self,
+        raw_content: str,
+        *,
+        messages: list[dict[str, Any]],
+        visible_turn_indexes: set[int],
+        proposal_context: list[dict[str, Any]],
+        evidence_context: dict[str, Any],
+    ) -> tuple[str, StructuredProposalResolution | None]:
+        """Resolve a model decision through server-owned proposal evidence.
+
+        The model may classify intent and select a displayed ordinal. It cannot
+        provide proposal content, authority, turn IDs, or hashes. Those values
+        are resolved from the active proposal registry and revalidated by the
+        existing conversational evidence policy.
+        """
+
+        if not self._proposal_confirmation_enabled or not proposal_context:
+            return raw_content, None
+        try:
+            payload = json.loads(raw_content or "{}")
+        except json.JSONDecodeError:
+            return raw_content, None
+        if not isinstance(payload, dict):
+            return raw_content, None
+        decision_payload = payload.get("proposal_confirmation")
+        if not isinstance(decision_payload, dict):
+            return raw_content, None
+        decision = str(decision_payload.get("decision") or "").strip().lower()
+        if decision not in {"confirmed", "rejected", "ambiguous", "unrelated"}:
+            return raw_content, None
+
+        # Once the structured contract is present, proposal-derived model
+        # memories are ignored. Direct user statements still flow through the
+        # normal extraction validator.
+        raw_memories = payload.get("memories")
+        direct_memories = []
+        discarded_model_candidates = 0
+        if isinstance(raw_memories, list):
+            for item in raw_memories:
+                is_proposal_candidate = (
+                    isinstance(item, dict)
+                    and (
+                        item.get("evidence_relation")
+                        == "user_confirmed_assistant_proposal"
+                        or item.get("proposal_turn") is not None
+                    )
+                )
+                if is_proposal_candidate:
+                    discarded_model_candidates += 1
+                else:
+                    direct_memories.append(item)
+        payload["memories"] = direct_memories
+        payload["nothing_to_extract"] = not direct_memories
+        normalized = json.dumps(payload, ensure_ascii=False)
+
+        proposal_indexes = [
+            int(item["turn_index"])
+            for item in proposal_context
+            if isinstance(item.get("turn_index"), int)
+            and not isinstance(item.get("turn_index"), bool)
+            and int(item["turn_index"]) in visible_turn_indexes
+        ]
+        if not proposal_indexes:
+            return normalized, StructuredProposalResolution(
+                decision=decision,
+                discarded_model_candidates=discarded_model_candidates,
+                rejected_reason="proposal_decision_not_visible",
+            )
+        latest_user_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, min(proposal_indexes), -1)
+                if index in visible_turn_indexes
+                and str(messages[index].get("role") or "").strip().lower()
+                == "user"
+                and str(
+                    messages[index].get("source_kind") or "direct_user_input"
+                )
+                .strip()
+                .lower()
+                in {"direct_user_input", "client_assertion"}
+            ),
+            None,
+        )
+        if latest_user_index is None:
+            return normalized, StructuredProposalResolution(
+                decision=decision,
+                discarded_model_candidates=discarded_model_candidates,
+                rejected_reason="proposal_decision_missing_user_evidence",
+            )
+        latest_user_text = str(messages[latest_user_index].get("content") or "")
+
+        if decision == "rejected" or has_explicit_proposal_denial(latest_user_text):
+            return normalized, StructuredProposalResolution(
+                decision="rejected",
+                discarded_model_candidates=discarded_model_candidates,
+            )
+        if decision == "unrelated":
+            return normalized, StructuredProposalResolution(
+                decision="unrelated",
+                discarded_model_candidates=discarded_model_candidates,
+            )
+        if decision == "ambiguous":
+            return normalized, StructuredProposalResolution(
+                decision="ambiguous",
+                pending_count=1,
+                discarded_model_candidates=discarded_model_candidates,
+            )
+
+        target: dict[str, Any] | None = None
+        if len(proposal_context) == 1:
+            target = proposal_context[0]
+        else:
+            target_ordinal = decision_payload.get("target_ordinal")
+            if isinstance(target_ordinal, int) and not isinstance(
+                target_ordinal, bool
+            ):
+                ordinal_matches = [
+                    item
+                    for item in proposal_context
+                    if item.get("ordinal") == target_ordinal
+                ]
+                if len(ordinal_matches) == 1:
+                    target = ordinal_matches[0]
+        if target is None:
+            return normalized, StructuredProposalResolution(
+                decision="confirmed",
+                discarded_model_candidates=discarded_model_candidates,
+                rejected_reason="proposal_decision_target_not_active",
+            )
+        proposal_turn = target.get("turn_index")
+        registered_memory = self._registered_proposal_memory(
+            messages,
+            proposal_context,
+            proposal_turn,
+        )
+        if registered_memory is None:
+            return normalized, StructuredProposalResolution(
+                decision="confirmed",
+                discarded_model_candidates=discarded_model_candidates,
+                rejected_reason="proposal_decision_binding_failed",
+            )
+        memory_content, memory_category = registered_memory
+        candidate = PendingExtractedMemory(
+            content=memory_content,
+            category=memory_category,
+            importance_score=5.0,
+            # This denotes verified binding to immutable proposal content, not
+            # model-reported probability or calibrated classifier confidence.
+            confidence=1.0,
+            reasoning="User confirmed a server-registered memory proposal.",
+        )
+        validated_evidence = self._validated_user_evidence(
+            candidate,
+            messages,
+            [proposal_turn, latest_user_index],
+            "user_confirmed_assistant_proposal",
+            proposal_turn,
+            evidence_context=evidence_context,
+            visible_turn_indexes=visible_turn_indexes,
+            proposal_confirmation_enabled=True,
+            active_proposals=proposal_context,
+        )
+        if not validated_evidence:
+            policy = validate_conversational_evidence(
+                messages=messages,
+                evidence_turns=[proposal_turn, latest_user_index],
+                evidence_relation="user_confirmed_assistant_proposal",
+                proposal_turn=proposal_turn,
+                visible_turn_indexes=visible_turn_indexes,
+                proposal_confirmation_enabled=True,
+                active_proposals=proposal_context,
+            )
+            return normalized, StructuredProposalResolution(
+                decision="confirmed",
+                discarded_model_candidates=discarded_model_candidates,
+                rejected_reason=f"proposal_decision_{policy.reason}",
+            )
+        return normalized, StructuredProposalResolution(
+            decision="confirmed",
+            discarded_model_candidates=discarded_model_candidates,
+            memory=ExtractedMemory(
+                content=memory_content,
+                category=memory_category,  # type: ignore[arg-type]
+                importance_score=5.0,
+                confidence=1.0,
+                expiry="permanent",
+                reasoning="User confirmed a server-registered memory proposal.",
+                validated_evidence=validated_evidence,
+            ),
+        )
 
     def _parse_and_validate_response(
         self,

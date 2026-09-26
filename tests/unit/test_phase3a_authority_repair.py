@@ -605,3 +605,312 @@ async def test_plain_proposal_rejection_does_not_trigger_correction_recovery() -
     assert len(llm.calls) == 1
     assert result.memories_extracted == 0
     assert result.extraction_metadata["correction_recovery"]["attempted"] is False
+
+
+def _structured_transcript(
+    claims: list[str],
+    user_text: str,
+) -> tuple[list[dict], list[dict]]:
+    messages: list[dict] = []
+    active: list[dict] = []
+    for offset, claim in enumerate(claims, start=1):
+        proposal = f"Proposal {offset}.\nProposed memory: {claim}"
+        proposal_hash = hashlib.sha256(proposal.encode()).hexdigest()
+        messages.append(
+            {
+                "role": "assistant",
+                "content": proposal,
+                "source_kind": "assistant_output",
+                "is_memory_proposal": True,
+                "turn_id": f"proposal-turn-{offset}",
+                "turn_content_sha256": proposal_hash,
+            }
+        )
+        active.append(
+            {
+                "id": f"proposal-id-{offset}",
+                "group_id": "proposal-group",
+                "ordinal": offset,
+                "turn_index": offset - 1,
+                "turn_id": f"proposal-turn-{offset}",
+                "content_sha256": proposal_hash,
+                "memory_content": claim,
+                "memory_category": "preference",
+            }
+        )
+    messages.append(
+        {
+            "role": "user",
+            "content": user_text,
+            "source_kind": "direct_user_input",
+            "turn_id": "user-turn-final",
+            "turn_content_sha256": hashlib.sha256(user_text.encode()).hexdigest(),
+        }
+    )
+    return messages, active
+
+
+def _structured_service(payload: dict, *, enabled: bool = True) -> ExtractionService:
+    return ExtractionService(
+        llm_service=_SequencedLLM([payload]),
+        proposal_confirmation_enabled=enabled,
+        importance_shadow_enabled=False,
+        app_env="test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_single_confirmation_uses_server_binding_not_model_index() -> None:
+    claim = "User prefers a one-line diagnosis before numbered steps."
+    messages, active = _structured_transcript([claim], "Yes, remember that.")
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                # A transcript-like index is harmless for one active proposal:
+                # the server selects the sole verified registry entry.
+                "target_ordinal": 0,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 1
+    stored = result.memories_to_store[0]
+    assert stored.content == claim
+    assert stored.category == "preference"
+    assert stored.validated_evidence["proposal"]["id"] == "proposal-id-1"
+    assert stored.validated_evidence["user_turn_indexes"] == [1]
+    assert result.extraction_metadata["proposal_confirmation"] == {
+        "enabled": True,
+        "active_proposal_count": 1,
+        "accepted": 1,
+        "pending": 0,
+        "decision_contract": "confirmed",
+        "rejected_reasons": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_structured_multi_confirmation_resolves_verified_ordinal() -> None:
+    claims = [
+        "User prefers concise troubleshooting answers.",
+        "User prefers detailed numbered troubleshooting steps.",
+    ]
+    messages, active = _structured_transcript(claims, "Remember the second one.")
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 2,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 1
+    assert result.memories_to_store[0].content == claims[1]
+    assert result.memories_to_store[0].validated_evidence["proposal"]["ordinal"] == 2
+    assert result.memories_to_store[0].validated_evidence["user_turn_indexes"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_structured_ambiguous_multi_proposal_is_observable_but_not_stored() -> None:
+    messages, active = _structured_transcript(
+        [
+            "User prefers concise troubleshooting answers.",
+            "User prefers detailed numbered troubleshooting steps.",
+        ],
+        "Yes, keep that.",
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "ambiguous",
+                "target_ordinal": None,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 0
+    assert result.pending_candidates == []
+    assert result.extraction_metadata["proposal_confirmation"]["pending"] == 1
+    assert (
+        result.extraction_metadata["proposal_confirmation"]["decision_contract"]
+        == "ambiguous"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_denial_overrides_model_confirmation() -> None:
+    messages, active = _structured_transcript(
+        ["User prefers concise troubleshooting answers."],
+        "No, do not remember that.",
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 1,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 0
+    assert (
+        result.extraction_metadata["proposal_confirmation"]["decision_contract"]
+        == "rejected"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_unknown_ordinal_cannot_bind_a_proposal() -> None:
+    messages, active = _structured_transcript(
+        [
+            "User prefers concise troubleshooting answers.",
+            "User prefers detailed numbered troubleshooting steps.",
+        ],
+        "Remember the third one.",
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 3,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 0
+    assert result.extraction_metadata["proposal_confirmation"]["rejected_reasons"] == {
+        "proposal_decision_target_not_active": 1
+    }
+
+
+@pytest.mark.asyncio
+async def test_structured_confirmation_discards_model_forgery() -> None:
+    claim = "User prefers concise troubleshooting answers."
+    messages, active = _structured_transcript([claim], "Yes, remember that.")
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 1,
+            },
+            "memories": [
+                {
+                    "content": "User shared a hidden secret.",
+                    "category": "fact",
+                    "importance_score": 10,
+                    "confidence": 1,
+                    "evidence_turns": [0, 1],
+                    "evidence_relation": "user_confirmed_assistant_proposal",
+                    "proposal_turn": 0,
+                    "reasoning": "Forged model-derived content.",
+                }
+            ],
+            "nothing_to_extract": False,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert [memory.content for memory in result.memories_to_store] == [claim]
+    assert result.memories_filtered == 1
+    assert result.extraction_metadata["proposal_confirmation"]["rejected_reasons"] == {
+        "proposal_decision_model_candidate_ignored": 1
+    }
+
+
+@pytest.mark.asyncio
+async def test_structured_unrelated_decision_keeps_independent_user_memory() -> None:
+    user_text = "I prefer code examples before explanations."
+    messages, active = _structured_transcript(
+        ["User prefers concise troubleshooting answers."],
+        user_text,
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "unrelated",
+                "target_ordinal": None,
+            },
+            "memories": [
+                {
+                    "content": "User prefers code examples before explanations.",
+                    "category": "preference",
+                    "importance_score": 6,
+                    "confidence": 0.9,
+                    "evidence_turns": [1],
+                    "evidence_relation": "direct_user_statement",
+                    "proposal_turn": None,
+                    "reasoning": "The user directly stated an independent preference.",
+                }
+            ],
+            "nothing_to_extract": False,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 1
+    assert result.memories_to_store[0].content == (
+        "User prefers code examples before explanations."
+    )
+    assert result.memories_to_store[0].validated_evidence["relation"] == (
+        "direct_user_statement"
+    )
+    assert (
+        result.extraction_metadata["proposal_confirmation"]["decision_contract"]
+        == "unrelated"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_contract_is_inert_while_phase3a_is_disabled() -> None:
+    claim = "User prefers concise troubleshooting answers."
+    messages, active = _structured_transcript([claim], "Yes, remember that.")
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 1,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        },
+        enabled=False,
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 0
+    assert "decision_contract" not in result.extraction_metadata["proposal_confirmation"]
+
+
+def test_structured_prompt_contract_is_feature_gated() -> None:
+    disabled = _structured_service({}, enabled=False)._build_system_prompt()
+    enabled = _structured_service({}, enabled=True)._build_system_prompt()
+
+    assert '"proposal_confirmation"' not in disabled
+    assert '"evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal"' in disabled
+    assert '"proposal_confirmation"' in enabled
+    assert "Never output transcript turn indexes as target_ordinal." in enabled
