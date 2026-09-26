@@ -15,9 +15,11 @@ from api.db.cache import CacheService
 from api.schemas.extraction_schemas import ExtractionResult, PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.evidence_policy import (
+    explicit_proposal_ordinal,
     has_explicit_proposal_denial,
     normalized_selection_tokens,
     proposal_selection_ordinal,
+    structured_proposal_denied,
     validate_conversational_evidence,
 )
 from api.services.llm_service import LLMService
@@ -1446,7 +1448,7 @@ class ExtractionService:
             )
         latest_user_text = str(messages[latest_user_index].get("content") or "")
 
-        if decision == "rejected" or has_explicit_proposal_denial(latest_user_text):
+        if decision == "rejected":
             return normalized, StructuredProposalResolution(
                 decision="rejected",
                 discarded_model_candidates=discarded_model_candidates,
@@ -1484,6 +1486,15 @@ class ExtractionService:
                 decision="confirmed",
                 discarded_model_candidates=discarded_model_candidates,
                 rejected_reason="proposal_decision_target_not_active",
+            )
+        if structured_proposal_denied(
+            latest_user_text,
+            target_ordinal=int(target.get("ordinal", -1)),
+            active_proposals=proposal_context,
+        ):
+            return normalized, StructuredProposalResolution(
+                decision="rejected",
+                discarded_model_candidates=discarded_model_candidates,
             )
         proposal_turn = target.get("turn_index")
         registered_memory = self._registered_proposal_memory(
@@ -1576,6 +1587,12 @@ class ExtractionService:
         active_proposals: list[dict[str, Any]],
     ) -> tuple[bool, str]:
         """Require a verbatim selector that resolves to exactly one proposal."""
+
+        user_ordinal = explicit_proposal_ordinal(user_text, active_proposals)
+        if user_ordinal is not None:
+            if user_ordinal == target.get("ordinal"):
+                return True, "verified_ordinal"
+            return False, "selection_ordinal_mismatch"
 
         if not isinstance(selection_evidence, str):
             return False, "missing_selection_evidence"

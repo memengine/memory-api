@@ -728,8 +728,13 @@ def _structured_service(payload: dict, *, enabled: bool = True) -> ExtractionSer
     ("selection_evidence", "expected"),
     [
         ("Second", 2),
+        ("number two", 2),
         ("doosra", 2),
         ("दूसरा", 2),
+        ("teesra", 3),
+        ("तीसरा", 3),
+        ("चौथे", 4),
+        ("पाँचवाँ", 5),
         ("first second", None),
     ],
 )
@@ -737,7 +742,7 @@ def test_proposal_selection_ordinal_is_multilingual_and_unambiguous(
     selection_evidence: str,
     expected: int | None,
 ) -> None:
-    active = [{"ordinal": 1}, {"ordinal": 2}]
+    active = [{"ordinal": ordinal} for ordinal in range(1, 6)]
 
     assert proposal_selection_ordinal(selection_evidence, active) == expected
 
@@ -789,7 +794,9 @@ async def test_structured_multi_confirmation_resolves_verified_ordinal() -> None
             "proposal_confirmation": {
                 "decision": "confirmed",
                 "target_ordinal": 2,
-                "selection_evidence": "second",
+                # Explicit user ordinals are resolved from server-owned text;
+                # this untrusted model field is deliberately unnecessary.
+                "selection_evidence": "not present in the user turn",
             },
             "memories": [],
             "nothing_to_extract": True,
@@ -1071,6 +1078,126 @@ async def test_deterministic_denial_overrides_model_confirmation() -> None:
     assert (
         result.extraction_metadata["proposal_confirmation"]["decision_contract"]
         == "rejected"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "Yes, remember it; there is no need to ask me again.",
+        "जी, इसे लिखकर रख लीजिए, दोबारा पूछने की ज़रूरत नहीं होगी।",
+        "Theek, ab doubt nahi hai. Saved notes mein ye entry kar sakte ho.",
+    ],
+)
+async def test_structured_single_confirmation_allows_incidental_negation(
+    user_text: str,
+) -> None:
+    claim = "User prefers a weekly planning review."
+    messages, active = _structured_transcript([claim], user_text)
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 1,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert [memory.content for memory in result.memories_to_store] == [claim]
+    assert result.extraction_metadata["proposal_confirmation"]["accepted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_contrastive_confirmation_allows_selected_third() -> None:
+    claims = [
+        "User prefers red labels.",
+        "User prefers blue labels.",
+        "User prefers green labels.",
+    ]
+    messages, active = _structured_transcript(
+        claims,
+        "Correction: first nahi, third one save karo.",
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 3,
+                "selection_evidence": "third",
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert [memory.content for memory in result.memories_to_store] == [claims[2]]
+    assert result.extraction_metadata["proposal_confirmation"]["selection_gate"] == (
+        "verified_ordinal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_hindi_confirmation_selects_fourth_of_five() -> None:
+    claims = [f"User prefers label style {index}." for index in range(1, 6)]
+    messages, active = _structured_transcript(
+        claims,
+        "इन पाँच में चौथे को चुनकर याद रखिए।",
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 4,
+                "selection_evidence": None,
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert [memory.content for memory in result.memories_to_store] == [claims[3]]
+    assert result.extraction_metadata["proposal_confirmation"]["selection_gate"] == (
+        "verified_ordinal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_confirmation_rejects_when_selected_ordinal_is_denied() -> None:
+    claims = [
+        "User prefers red labels.",
+        "User prefers blue labels.",
+        "User prefers green labels.",
+    ]
+    messages, active = _structured_transcript(
+        claims,
+        "Save the second one, not the third.",
+    )
+    service = _structured_service(
+        {
+            "proposal_confirmation": {
+                "decision": "confirmed",
+                "target_ordinal": 3,
+                "selection_evidence": "third",
+            },
+            "memories": [],
+            "nothing_to_extract": True,
+        }
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert result.memories_extracted == 0
+    assert result.extraction_metadata["proposal_confirmation"]["decision_contract"] == (
+        "rejected"
     )
 
 

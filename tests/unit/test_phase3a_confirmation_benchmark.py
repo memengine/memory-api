@@ -6,11 +6,57 @@ from benchmarks.internal.cases import HOLDOUT_APPROVAL_ENV, HOLDOUT_APPROVAL_TOK
 from benchmarks.internal.phase3a_confirmation import (
     HOLDOUT_REFERENCE_OUTCOMES,
     RELEASE_MINIMUMS,
+    _bounded_proposal_confirmation,
     _case_input,
+    _observed_proposal_outcome,
     _summarize,
     load_confirmation_cases,
     load_development_cases,
 )
+
+
+def test_structured_pending_metadata_is_scored_without_persisted_candidate() -> None:
+    confirmation = {
+        "enabled": True,
+        "active_proposal_count": 2,
+        "accepted": 0,
+        "pending": 1,
+        "decision_contract": "ambiguous",
+        "selection_gate": "selection_not_unique",
+        "raw_prompt": "must not escape",
+    }
+
+    bounded = _bounded_proposal_confirmation(
+        {"proposal_confirmation": confirmation}
+    )
+
+    assert _observed_proposal_outcome(
+        proposal_stored=[],
+        proposal_pending=[],
+        proposal_confirmation=bounded,
+    ) == "pending"
+    assert bounded == {
+        "enabled": True,
+        "active_proposal_count": 2,
+        "accepted": 0,
+        "pending": 1,
+        "decision_contract": "ambiguous",
+        "selection_gate": "selection_not_unique",
+    }
+    assert "raw_prompt" not in bounded
+
+
+def test_proposal_outcome_prefers_accepted_and_rejects_without_signal() -> None:
+    assert _observed_proposal_outcome(
+        proposal_stored=[object()],
+        proposal_pending=[],
+        proposal_confirmation={"pending": 1},
+    ) == "accepted"
+    assert _observed_proposal_outcome(
+        proposal_stored=[],
+        proposal_pending=[],
+        proposal_confirmation={},
+    ) == "rejected"
 
 
 def test_phase3a_development_calibration_has_frozen_slice_minimums() -> None:

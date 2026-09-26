@@ -352,6 +352,53 @@ def _case_input(case: ConfirmationCase) -> tuple[list[dict[str, Any]], list[dict
     return messages, proposal_context, expected
 
 
+def _bounded_proposal_confirmation(metadata: dict[str, Any]) -> dict[str, Any]:
+    raw = metadata.get("proposal_confirmation")
+    if not isinstance(raw, dict):
+        return {}
+    bounded: dict[str, Any] = {}
+    for field in ("enabled", "active_proposal_count", "accepted", "pending"):
+        value = raw.get(field)
+        if isinstance(value, (bool, int)):
+            bounded[field] = value
+    for field in ("decision_contract", "selection_gate"):
+        value = raw.get(field)
+        if isinstance(value, str) and value:
+            bounded[field] = value[:64]
+    reasons = raw.get("rejected_reasons")
+    if isinstance(reasons, dict):
+        bounded["rejected_reasons"] = {
+            str(reason)[:96]: int(count)
+            for reason, count in list(reasons.items())[:12]
+            if isinstance(count, int) and not isinstance(count, bool)
+        }
+    return bounded
+
+
+def _observed_proposal_outcome(
+    *,
+    proposal_stored: list[Any],
+    proposal_pending: list[Any],
+    proposal_confirmation: dict[str, Any],
+) -> str:
+    if proposal_stored:
+        return "accepted"
+    return (
+        "pending"
+        if proposal_pending or _has_structured_pending(proposal_confirmation)
+        else "rejected"
+    )
+
+
+def _has_structured_pending(proposal_confirmation: dict[str, Any]) -> bool:
+    pending_count = proposal_confirmation.get("pending", 0)
+    return (
+        isinstance(pending_count, int)
+        and not isinstance(pending_count, bool)
+        and pending_count > 0
+    )
+
+
 async def run_confirmation_evaluation(
     dataset: str | Path,
     *,
@@ -438,12 +485,13 @@ async def run_confirmation_evaluation(
             in {"ambiguous_proposal_reference", "proposal_reference_mismatch"}
         ]
         nonproposal_stored = [item for item in stored if item not in proposal_stored]
-        observed_outcome = (
-            "accepted"
-            if proposal_stored
-            else "pending"
-            if proposal_pending
-            else "rejected"
+        proposal_confirmation = _bounded_proposal_confirmation(
+            result.extraction_metadata
+        )
+        observed_outcome = _observed_proposal_outcome(
+            proposal_stored=proposal_stored,
+            proposal_pending=proposal_pending,
+            proposal_confirmation=proposal_confirmation,
         )
         target_correct = False
         evidence_integrity = True
@@ -479,10 +527,18 @@ async def run_confirmation_evaluation(
                 and proposal.get("id") == f"{case.id}-proposal-id-{case.target_ordinal}"
             )
         elif observed_outcome == "pending":
-            target_correct = all(
+            candidate_pending_valid = bool(proposal_pending) and all(
                 item.candidate_reason
                 in {"ambiguous_proposal_reference", "proposal_reference_mismatch"}
                 for item in proposal_pending
+            )
+            structured_pending_valid = (
+                proposal_confirmation.get("decision_contract") == "ambiguous"
+                and _has_structured_pending(proposal_confirmation)
+            )
+            target_correct = (
+                not proposal_stored
+                and (candidate_pending_valid or structured_pending_valid)
             )
             evidence_integrity = not proposal_stored
         else:
@@ -533,6 +589,7 @@ async def run_confirmation_evaluation(
                 "candidate_confidences": [
                     float(item.confidence) for item in [*stored, *pending]
                 ],
+                "proposal_confirmation": proposal_confirmation,
                 "rejection_counts": dict(
                     result.extraction_metadata.get("candidate_validation", {}).get(
                         "rejection_counts", {}
