@@ -57,6 +57,7 @@ def validate_conversational_evidence(
     visible_turn_indexes: set[int] | None = None,
     proposal_confirmation_enabled: bool = False,
     active_proposals: list[dict[str, Any]] | None = None,
+    structured_proposal_decision: bool = False,
 ) -> EvidenceDecision:
     """Verify model citations against typed roles, ordering, and proposal scope."""
 
@@ -170,6 +171,21 @@ def validate_conversational_evidence(
             "explicit_confirmation_denied",
             user_turn_indexes=user_indexes,
             proposal_turn_index=proposal_turn,
+        )
+    if structured_proposal_decision:
+        return EvidenceDecision(
+            True,
+            EvidenceAuthority.CLIENT_ASSERTION,
+            "verified_structured_proposal_reference",
+            user_turn_indexes=user_indexes,
+            proposal_turn_index=proposal_turn,
+            proposal_id=str(target.get("id") or "") or None,
+            proposal_group_id=str(target.get("group_id") or "") or None,
+            proposal_ordinal=(
+                int(target["ordinal"])
+                if target.get("ordinal") is not None
+                else None
+            ),
         )
     if referenced_ordinal is not None and int(target.get("ordinal", -1)) != referenced_ordinal:
         return EvidenceDecision(

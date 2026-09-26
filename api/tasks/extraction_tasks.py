@@ -1102,6 +1102,11 @@ def _phase3a_shadow_observation(
         "tokens_used": max(0, int(result.tokens_used or 0)),
         "provider_used": str(result.provider_used or "unknown")[:64],
         "latency_ms": int((time.perf_counter() - started) * 1000),
+        **(
+            {"decision_contract": str(confirmation_meta["decision_contract"])[:32]}
+            if confirmation_meta.get("decision_contract")
+            else {}
+        ),
     }
     LOGGER.info(
         "phase3a_confirmation_shadow_completed",

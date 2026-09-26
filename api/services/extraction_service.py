@@ -929,7 +929,11 @@ class ExtractionService:
             "reply in proposal_confirmation. Use confirmed only when the user accepts a proposal. "
             "For one active proposal, target_ordinal is 1. For multiple proposals, set "
             "target_ordinal only when the reply identifies one proposal; otherwise use ambiguous "
-            "with target_ordinal null. Use rejected for refusal and unrelated when the reply does "
+            "with target_ordinal null. A generic reference such as 'that', 'that idea', 'it', "
+            "'yes', 'haan wahi', or 'ye rakh lo' does not identify one item when multiple proposals "
+            "are active; classify it as ambiguous even when it follows the last proposal. Use "
+            "confirmed only for an ordinal, a named proposal, or an unambiguous paraphrase that "
+            "selects exactly one active proposal. Use rejected for refusal and unrelated when the reply does "
             "not address a proposal. Do not copy a confirmed proposal into the memories array: "
             "the backend resolves its registered content. Never output transcript turn indexes as "
             "target_ordinal.\n\n"
@@ -1454,6 +1458,7 @@ class ExtractionService:
             visible_turn_indexes=visible_turn_indexes,
             proposal_confirmation_enabled=True,
             active_proposals=proposal_context,
+            structured_proposal_decision=True,
         )
         if not validated_evidence:
             policy = validate_conversational_evidence(
@@ -1464,6 +1469,7 @@ class ExtractionService:
                 visible_turn_indexes=visible_turn_indexes,
                 proposal_confirmation_enabled=True,
                 active_proposals=proposal_context,
+                structured_proposal_decision=True,
             )
             return normalized, StructuredProposalResolution(
                 decision="confirmed",
@@ -1679,6 +1685,7 @@ class ExtractionService:
         visible_turn_indexes: set[int] | None = None,
         proposal_confirmation_enabled: bool = False,
         active_proposals: list[dict[str, Any]] | None = None,
+        structured_proposal_decision: bool = False,
     ) -> dict[str, Any]:
         """Require conversational memories to be grounded in a user's own turn.
 
@@ -1700,6 +1707,7 @@ class ExtractionService:
             visible_turn_indexes=visible_turn_indexes,
             proposal_confirmation_enabled=proposal_confirmation_enabled,
             active_proposals=active_proposals,
+            structured_proposal_decision=structured_proposal_decision,
         )
         if not policy.accepted:
             return {}

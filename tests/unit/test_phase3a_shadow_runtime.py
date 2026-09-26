@@ -18,6 +18,7 @@ def test_shadow_observation_is_bounded_and_never_returns_candidates() -> None:
                     "proposal_confirmation": {
                         "accepted": 1,
                         "pending": 0,
+                        "decision_contract": "confirmed",
                         "rejected_reasons": {"proposal_not_active": 2},
                     }
                 },
@@ -39,6 +40,7 @@ def test_shadow_observation_is_bounded_and_never_returns_candidates() -> None:
     assert observation["accepted_candidate_count"] == 1
     assert observation["write_blocked"] is True
     assert observation["tokens_used"] == 19
+    assert observation["decision_contract"] == "confirmed"
     assert "must never escape" not in str(observation)
     assert "also private" not in str(observation)
     assert "memories_to_store" not in observation
@@ -83,6 +85,7 @@ def test_shadow_observation_bounds_untrusted_aggregate_fields() -> None:
                     "proposal_confirmation": {
                         "accepted": 0,
                         "pending": 0,
+                        "decision_contract": "x" * 100,
                         "rejected_reasons": rejected,
                     }
                 },
@@ -102,4 +105,5 @@ def test_shadow_observation_bounds_untrusted_aggregate_fields() -> None:
     assert len(observation["rejected_reasons"]) <= 12
     assert all(key.startswith("proposal_") for key in observation["rejected_reasons"])
     assert len(observation["provider_used"]) == 64
+    assert len(observation["decision_contract"]) == 32
     assert observation["tokens_used"] == 0

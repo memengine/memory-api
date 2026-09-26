@@ -177,6 +177,68 @@ def test_explicit_multilingual_reference_resolves_registered_proposal(
     assert decision.proposal_ordinal == expected_ordinal
 
 
+def test_structured_decision_does_not_require_legacy_wording_match() -> None:
+    first_messages, _ = _transcript("Second wala save karo.")
+    second_proposal = "Proposed memory: User prefers detailed answers."
+    second_hash = hashlib.sha256(second_proposal.encode()).hexdigest()
+    messages = [
+        first_messages[0],
+        {
+            "role": "assistant",
+            "content": second_proposal,
+            "source_kind": "assistant_output",
+            "is_memory_proposal": True,
+            "turn_id": "proposal-turn-2",
+            "turn_content_sha256": second_hash,
+        },
+        first_messages[1],
+    ]
+    active = [
+        {
+            "id": "proposal-id-1",
+            "group_id": "group-1",
+            "ordinal": 1,
+            "turn_index": 0,
+            "turn_id": "proposal-turn-1",
+            "content_sha256": messages[0]["turn_content_sha256"],
+        },
+        {
+            "id": "proposal-id-2",
+            "group_id": "group-1",
+            "ordinal": 2,
+            "turn_index": 1,
+            "turn_id": "proposal-turn-2",
+            "content_sha256": second_hash,
+        },
+    ]
+
+    legacy = validate_conversational_evidence(
+        messages=messages,
+        evidence_turns=[1, 2],
+        evidence_relation="user_confirmed_assistant_proposal",
+        proposal_turn=1,
+        visible_turn_indexes={0, 1, 2},
+        proposal_confirmation_enabled=True,
+        active_proposals=active,
+    )
+    structured = validate_conversational_evidence(
+        messages=messages,
+        evidence_turns=[1, 2],
+        evidence_relation="user_confirmed_assistant_proposal",
+        proposal_turn=1,
+        visible_turn_indexes={0, 1, 2},
+        proposal_confirmation_enabled=True,
+        active_proposals=active,
+        structured_proposal_decision=True,
+    )
+
+    assert legacy.accepted is False
+    assert legacy.reason == "ambiguous_proposal_reference"
+    assert structured.accepted is True
+    assert structured.reason == "verified_structured_proposal_reference"
+    assert structured.proposal_ordinal == 2
+
+
 @pytest.mark.parametrize(
     ("user_text", "proposal_turn", "expected_ordinal"),
     [
@@ -914,3 +976,4 @@ def test_structured_prompt_contract_is_feature_gated() -> None:
     assert '"evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal"' in disabled
     assert '"proposal_confirmation"' in enabled
     assert "Never output transcript turn indexes as target_ordinal." in enabled
+    assert "does not identify one item when multiple proposals are active" in enabled
