@@ -66,15 +66,17 @@ jobs:
           REQUESTED_TAG="${{ github.event.inputs.image_tag }}"
           if [ -n "$REQUESTED_TAG" ]; then
             IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${REQUESTED_TAG}"
+            DEPLOY_VERSION="$REQUESTED_TAG"
             BUILD_IMAGE="false"
           else
             IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${SHORT_SHA}"
+            DEPLOY_VERSION="$SHORT_SHA"
             BUILD_IMAGE="true"
           fi
           LATEST_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
           echo "FULL_SHA=${FULL_SHA}" >> "$GITHUB_ENV"
           echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
-          echo "APP_VERSION=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${DEPLOY_VERSION}" >> "$GITHUB_ENV"
           echo "ECR_REGISTRY=${ECR_REGISTRY}" >> "$GITHUB_ENV"
           echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
           echo "LATEST_URI=${LATEST_URI}" >> "$GITHUB_ENV"
@@ -104,7 +106,22 @@ jobs:
         run: bash .github/scripts/deploy-ecs.sh
 
       - name: Smoke test production health endpoint
-        run: curl --fail --show-error --silent "$PRODUCTION_HEALTHCHECK_URL"
+        run: |
+          DESIRED_COUNT="$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_API_SERVICE" \
+            --query 'services[0].desiredCount' \
+            --output text)"
+          if [ "$DESIRED_COUNT" = "0" ]; then
+            echo "API desired count is zero; image and migrations were prepared for bootstrap."
+            echo "Scale the API service with Terraform, then verify the health endpoint."
+            exit 0
+          fi
+          if ! [[ "$DESIRED_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Could not determine a positive API desired count: ${DESIRED_COUNT}" >&2
+            exit 1
+          fi
+          curl --fail --show-error --silent "$PRODUCTION_HEALTHCHECK_URL"
 
       - name: Notify Slack on failure
         if: failure()

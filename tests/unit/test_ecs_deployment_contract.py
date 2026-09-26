@@ -40,3 +40,20 @@ def test_live_staging_alias_is_not_automatically_deployed_on_push() -> None:
 
     assert "\n  push:" not in workflow
     assert "force_deploy:" in workflow
+
+
+def test_production_deploy_uses_requested_image_tag_as_app_version() -> None:
+    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert 'DEPLOY_VERSION="$REQUESTED_TAG"' in workflow
+    assert 'DEPLOY_VERSION="$SHORT_SHA"' in workflow
+    assert 'echo "APP_VERSION=${DEPLOY_VERSION}"' in workflow
+
+
+def test_production_bootstrap_skips_smoke_only_at_zero_desired_count() -> None:
+    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "'services[0].desiredCount'" in workflow
+    assert 'if [ "$DESIRED_COUNT" = "0" ]' in workflow
+    assert 'if ! [[ "$DESIRED_COUNT" =~ ^[1-9][0-9]*$ ]]' in workflow
+    assert 'curl --fail --show-error --silent "$PRODUCTION_HEALTHCHECK_URL"' in workflow
