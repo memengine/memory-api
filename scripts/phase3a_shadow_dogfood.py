@@ -43,6 +43,7 @@ OBSERVATION_FIELDS = {
     "active_proposal_count",
     "status",
     "outcome",
+    "decision_contract",
     "accepted_candidate_count",
     "pending_candidate_count",
     "rejected_candidate_count",

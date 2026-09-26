@@ -73,6 +73,7 @@ def test_bounded_observation_drops_content_and_unrelated_metadata() -> None:
             "phase3a_confirmation_shadow": {
                 "status": "completed",
                 "outcome": "accepted",
+                "decision_contract": "confirmed",
                 "latency_ms": 12,
                 "candidate_content": "must not escape either",
                 "messages": [{"content": "private"}],
@@ -85,6 +86,7 @@ def test_bounded_observation_drops_content_and_unrelated_metadata() -> None:
     assert observation == {
         "status": "completed",
         "outcome": "accepted",
+        "decision_contract": "confirmed",
         "latency_ms": 12,
     }
     assert "must not escape" not in str(observation)
