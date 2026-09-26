@@ -24,8 +24,11 @@ output "ecs_api_service_name" {
 }
 
 output "ecs_worker_service_names" {
-  description = "Comma-separated Celery worker ECS service names to use as the ECS_WORKER_SERVICES GitHub secret."
-  value       = join(",", [for service in values(aws_ecs_service.celery_worker) : service.name])
+  description = "Comma-separated Celery worker and Beat ECS service names to use as the ECS_WORKER_SERVICES GitHub secret."
+  value = join(",", concat(
+    [for service in values(aws_ecs_service.celery_worker) : service.name],
+    [aws_ecs_service.celery_beat.name],
+  ))
 }
 
 output "ecs_private_subnet_ids" {

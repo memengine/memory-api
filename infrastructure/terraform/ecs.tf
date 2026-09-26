@@ -424,6 +424,14 @@ resource "aws_ecs_service" "memoryos" {
 
   depends_on = [aws_lb_listener.https]
 
+  # GitHub Actions owns application rollouts. Terraform still publishes the
+  # baseline task-definition template, while the deploy workflow registers and
+  # selects image-specific revisions. Ignoring this field prevents a later
+  # infrastructure apply from rolling the service back to an older image.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-service"
   })
@@ -446,6 +454,10 @@ resource "aws_ecs_service" "celery_worker" {
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
   enable_execute_command             = false
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-${each.key}-worker-service"
@@ -471,6 +483,10 @@ resource "aws_ecs_service" "celery_beat" {
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
   enable_execute_command             = false
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-celery-beat-service"

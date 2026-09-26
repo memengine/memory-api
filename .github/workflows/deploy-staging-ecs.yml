@@ -11,19 +11,14 @@ on:
         options:
           - "true"
           - "false"
-  push:
-    branches:
-      - main
-    paths:
-      - "api/**"
-      - "docs/**"
-      - "sdk/**"
-      - "tests/**"
-      - "alembic.ini"
-      - "pyproject.toml"
-      - "Dockerfile"
-      - ".github/scripts/deploy-ecs.sh"
-      - ".github/workflows/deploy-staging-ecs.yml"
+      force_deploy:
+        description: "Restart services even when they already use this image (for example, after rotating secrets)"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 concurrency:
   group: staging-ecs-deploy
@@ -46,6 +41,7 @@ jobs:
       ECS_PRIVATE_SUBNETS: ${{ secrets.ECS_PRIVATE_SUBNETS }}
       ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
       RUN_MIGRATIONS: ${{ github.event.inputs.run_migrations || 'true' }}
+      FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
       HEALTHCHECK_URL: ${{ secrets.STAGING_HEALTHCHECK_URL }}
     steps:
       - name: Check out code

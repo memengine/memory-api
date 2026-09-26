@@ -11,6 +11,14 @@ on:
         options:
           - "true"
           - "false"
+      force_deploy:
+        description: "Restart services even when they already use this image (for example, after rotating secrets)"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       image_tag:
         description: "Optional ECR image tag to deploy. Leave blank to build from the selected commit."
         required: false
@@ -37,6 +45,7 @@ jobs:
       ECS_PRIVATE_SUBNETS: ${{ secrets.ECS_PRIVATE_SUBNETS }}
       ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
       RUN_MIGRATIONS: ${{ github.event.inputs.run_migrations || 'true' }}
+      FORCE_DEPLOY: ${{ github.event.inputs.force_deploy || 'false' }}
       PRODUCTION_HEALTHCHECK_URL: ${{ secrets.PRODUCTION_HEALTHCHECK_URL }}
     steps:
       - name: Check out code
