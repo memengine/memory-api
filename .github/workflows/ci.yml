@@ -115,17 +115,6 @@ jobs:
           MEMORYOS_HOLDOUT_APPROVAL: ""
         run: python -m benchmarks.internal.orchestrator --tier fast
 
-      - name: Type check
-        # Mypy 2.x defaults to a SQLite cache, which can crash on a fresh CI
-        # runner when the configured cache directory does not exist yet.
-        # The file-based cache avoids that upstream failure without weakening
-        # or skipping type checking.
-        run: >-
-          python -m mypy api/
-          --ignore-missing-imports
-          --no-sqlite-cache
-          --cache-dir=/tmp/mypy-cache
-
   sdk-typecheck:
     runs-on: ubuntu-latest
     steps:

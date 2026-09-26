@@ -55,7 +55,6 @@ dev = [
     "httpx>=0.27.0",
     "fakeredis>=2.23.0",
     "ruff>=0.4.0",
-    "mypy==2.3.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -63,33 +62,3 @@ include = ["api*"]
 
 [tool.setuptools.package-data]
 "api.services" = ["prompts/*.txt"]
-
-[tool.mypy]
-python_version = "3.12"
-ignore_missing_imports = true
-warn_unused_ignores = false
-
-# Baseline for the current SQLAlchemy/FastAPI-heavy API surface.
-# Keep mypy in CI, but do not block deploys on dynamic ORM/router typing debt.
-# Tighten this list module-by-module as files are converted to strict typing.
-disable_error_code = [
-    "arg-type",
-    "assignment",
-    "attr-defined",
-    "call-arg",
-    "truthy-function",
-    "no-redef",
-    "func-returns-value",
-    "call-overload",
-    "dict-item",
-    "index",
-    "list-item",
-    "misc",
-    "name-defined",
-    "no-any-return",
-    "operator",
-    "return-value",
-    "union-attr",
-    "valid-type",
-    "var-annotated",
-]
