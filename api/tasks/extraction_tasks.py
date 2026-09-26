@@ -1107,6 +1107,11 @@ def _phase3a_shadow_observation(
             if confirmation_meta.get("decision_contract")
             else {}
         ),
+        **(
+            {"selection_gate": str(confirmation_meta["selection_gate"])[:64]}
+            if confirmation_meta.get("selection_gate")
+            else {}
+        ),
     }
     LOGGER.info(
         "phase3a_confirmation_shadow_completed",

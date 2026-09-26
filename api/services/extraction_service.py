@@ -16,6 +16,8 @@ from api.schemas.extraction_schemas import ExtractionResult, PendingExtractedMem
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.evidence_policy import (
     has_explicit_proposal_denial,
+    normalized_selection_tokens,
+    proposal_selection_ordinal,
     validate_conversational_evidence,
 )
 from api.services.llm_service import LLMService
@@ -46,6 +48,49 @@ COMPOSITIONAL_MIN_MESSAGES = 4
 COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
 COMPOSITIONAL_MIN_SIGNAL_GROUPS = 2
+PROPOSAL_SELECTION_STOP_WORDS = frozenset(
+    {
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "idea",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "memory",
+        "my",
+        "of",
+        "one",
+        "option",
+        "or",
+        "our",
+        "proposal",
+        "that",
+        "the",
+        "their",
+        "them",
+        "they",
+        "thing",
+        "this",
+        "to",
+        "user",
+        "was",
+        "were",
+        "with",
+        "you",
+        "your",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -54,6 +99,7 @@ class StructuredProposalResolution:
     memory: ExtractedMemory | None = None
     pending_count: int = 0
     discarded_model_candidates: int = 0
+    selection_gate: str | None = None
     rejected_reason: str | None = None
 
 
@@ -593,6 +639,12 @@ class ExtractionService:
                         if structured_proposal is not None
                         else {}
                     ),
+                    **(
+                        {"selection_gate": structured_proposal.selection_gate}
+                        if structured_proposal is not None
+                        and structured_proposal.selection_gate
+                        else {}
+                    ),
                     "rejected_reasons": {
                         reason: count
                         for reason, count in rejection_counts.items()
@@ -895,7 +947,8 @@ class ExtractionService:
             "{\n"
             '  "proposal_confirmation": null or {\n'
             '    "decision": "confirmed|rejected|ambiguous|unrelated",\n'
-            '    "target_ordinal": "integer proposal number or null"\n'
+            '    "target_ordinal": "integer proposal number or null",\n'
+            '    "selection_evidence": "exact shortest substring from the user reply or null"\n'
             "  },\n"
             '  "memories": [\n'
             "    {\n"
@@ -929,7 +982,12 @@ class ExtractionService:
             "reply in proposal_confirmation. Use confirmed only when the user accepts a proposal. "
             "For one active proposal, target_ordinal is 1. For multiple proposals, set "
             "target_ordinal only when the reply identifies one proposal; otherwise use ambiguous "
-            "with target_ordinal null. A generic reference such as 'that', 'that idea', 'it', "
+            "with target_ordinal and selection_evidence null. For confirmed multiple-proposal "
+            "decisions, selection_evidence is mandatory and must copy the shortest exact words "
+            "from the user reply that uniquely select the proposal. For 'Second wala save karo', "
+            "use 'Second'; for 'keep the customer interview option', use 'customer interview'. "
+            "Never quote assistant text as selection_evidence. A generic reference such as "
+            "'that', 'that idea', 'it', "
             "'yes', 'haan wahi', or 'ye rakh lo' does not identify one item when multiple proposals "
             "are active; classify it as ambiguous even when it follows the last proposal. Use "
             "confirmed only for an ordinal, a named proposal, or an unambiguous paraphrase that "
@@ -1403,6 +1461,7 @@ class ExtractionService:
                 decision="ambiguous",
                 pending_count=1,
                 discarded_model_candidates=discarded_model_candidates,
+                selection_gate="model_ambiguous",
             )
 
         target: dict[str, Any] | None = None
@@ -1439,6 +1498,23 @@ class ExtractionService:
                 rejected_reason="proposal_decision_binding_failed",
             )
         memory_content, memory_category = registered_memory
+        selection_gate: str | None = None
+        if len(proposal_context) > 1:
+            selection_verified, selection_gate = (
+                self._verify_multi_proposal_selection(
+                    user_text=latest_user_text,
+                    selection_evidence=decision_payload.get("selection_evidence"),
+                    target=target,
+                    active_proposals=proposal_context,
+                )
+            )
+            if not selection_verified:
+                return normalized, StructuredProposalResolution(
+                    decision="ambiguous",
+                    pending_count=1,
+                    discarded_model_candidates=discarded_model_candidates,
+                    selection_gate=selection_gate,
+                )
         candidate = PendingExtractedMemory(
             content=memory_content,
             category=memory_category,
@@ -1479,6 +1555,7 @@ class ExtractionService:
         return normalized, StructuredProposalResolution(
             decision="confirmed",
             discarded_model_candidates=discarded_model_candidates,
+            selection_gate=selection_gate,
             memory=ExtractedMemory(
                 content=memory_content,
                 category=memory_category,  # type: ignore[arg-type]
@@ -1489,6 +1566,64 @@ class ExtractionService:
                 validated_evidence=validated_evidence,
             ),
         )
+
+    @staticmethod
+    def _verify_multi_proposal_selection(
+        *,
+        user_text: str,
+        selection_evidence: Any,
+        target: dict[str, Any],
+        active_proposals: list[dict[str, Any]],
+    ) -> tuple[bool, str]:
+        """Require a verbatim selector that resolves to exactly one proposal."""
+
+        if not isinstance(selection_evidence, str):
+            return False, "missing_selection_evidence"
+        evidence = " ".join(
+            unicodedata.normalize("NFKC", selection_evidence).casefold().split()
+        )
+        normalized_user = " ".join(
+            unicodedata.normalize("NFKC", user_text).casefold().split()
+        )
+        if not evidence or len(evidence) > 160:
+            return False, "invalid_selection_evidence"
+        if evidence not in normalized_user:
+            return False, "selection_evidence_not_in_user_turn"
+        evidence_sequence = normalized_selection_tokens(selection_evidence)
+        user_sequence = normalized_selection_tokens(user_text)
+        if not evidence_sequence or not any(
+            user_sequence[index : index + len(evidence_sequence)] == evidence_sequence
+            for index in range(len(user_sequence) - len(evidence_sequence) + 1)
+        ):
+            return False, "selection_evidence_not_token_aligned"
+
+        target_ordinal = target.get("ordinal")
+        evidence_ordinal = proposal_selection_ordinal(
+            selection_evidence,
+            active_proposals,
+        )
+        if evidence_ordinal is not None:
+            if evidence_ordinal == target_ordinal:
+                return True, "verified_ordinal"
+            return False, "selection_ordinal_mismatch"
+
+        def tokens(value: Any) -> set[str]:
+            return {
+                token
+                for token in normalized_selection_tokens(value)
+                if len(token) >= 2 and token not in PROPOSAL_SELECTION_STOP_WORDS
+            }
+
+        evidence_tokens = tokens(selection_evidence)
+        target_tokens = tokens(target.get("memory_content"))
+        other_tokens: set[str] = set()
+        for proposal in active_proposals:
+            if proposal is target:
+                continue
+            other_tokens.update(tokens(proposal.get("memory_content")))
+        if evidence_tokens & (target_tokens - other_tokens):
+            return True, "verified_unique_content"
+        return False, "selection_not_unique"
 
     def _parse_and_validate_response(
         self,

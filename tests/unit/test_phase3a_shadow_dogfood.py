@@ -74,6 +74,7 @@ def test_bounded_observation_drops_content_and_unrelated_metadata() -> None:
                 "status": "completed",
                 "outcome": "accepted",
                 "decision_contract": "confirmed",
+                "selection_gate": "verified_ordinal",
                 "latency_ms": 12,
                 "candidate_content": "must not escape either",
                 "messages": [{"content": "private"}],
@@ -87,6 +88,7 @@ def test_bounded_observation_drops_content_and_unrelated_metadata() -> None:
         "status": "completed",
         "outcome": "accepted",
         "decision_contract": "confirmed",
+        "selection_gate": "verified_ordinal",
         "latency_ms": 12,
     }
     assert "must not escape" not in str(observation)

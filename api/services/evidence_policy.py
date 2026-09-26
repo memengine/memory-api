@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -259,6 +260,81 @@ _ORDINAL_WORDS = {
 }
 
 
+def normalized_selection_tokens(value: Any) -> tuple[str, ...]:
+    """Return case-folded Unicode words without splitting combining marks."""
+
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in unicodedata.normalize("NFKC", str(value or "")).casefold():
+        if unicodedata.category(character)[0] in {"L", "M", "N"}:
+            current.append(character)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)
+
+
+def proposal_selection_ordinal(
+    selection_evidence: str,
+    active_proposals: list[dict[str, Any]],
+) -> int | None:
+    """Resolve an ordinal from a short, verbatim user selection span.
+
+    Unlike the legacy sentence matcher, this accepts a bare ordinal because
+    the caller separately verifies that the span is quoted from the user turn.
+    Multiple or unknown ordinals fail closed.
+    """
+
+    normalized = " ".join(selection_evidence.casefold().split())
+    if not normalized or len(normalized) > 80:
+        return None
+    tokens = normalized_selection_tokens(normalized)
+    if not tokens or len(tokens) > 4:
+        return None
+    ordinals = [
+        int(item["ordinal"])
+        for item in active_proposals
+        if item.get("ordinal") is not None
+    ]
+    last_ordinal = max(ordinals) if ordinals else None
+    aliases: dict[str, int | None] = {
+        **_ORDINAL_WORDS,
+        "former": 1,
+        "pehla": 1,
+        "pahla": 1,
+        "pehli": 1,
+        "pehle": 1,
+        "doosra": 2,
+        "dusra": 2,
+        "doosri": 2,
+        "dusri": 2,
+        "doosre": 2,
+        "dusre": 2,
+        "पहले": 1,
+        "पहला": 1,
+        "पहली": 1,
+        "दूसरे": 2,
+        "दूसरा": 2,
+        "दूसरी": 2,
+        "last": last_ordinal,
+        "latter": last_ordinal,
+        "अंतिम": last_ordinal,
+    }
+    matches = {
+        int(aliases[token])
+        for token in tokens
+        if token in aliases and aliases[token] is not None
+    }
+    matches.update(
+        int(token)
+        for token in tokens
+        if token.isdigit() and 1 <= int(token) <= 99
+    )
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def _explicitly_denied_proposal_ordinals(
     user_text: str,
     active_proposals: list[dict[str, Any]],
@@ -421,5 +497,7 @@ __all__ = [
     "EvidenceDecision",
     "authority_for_submission",
     "has_explicit_proposal_denial",
+    "normalized_selection_tokens",
+    "proposal_selection_ordinal",
     "validate_conversational_evidence",
 ]
