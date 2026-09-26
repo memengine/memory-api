@@ -22,3 +22,10 @@ def test_ci_type_checker_version_is_reproducible() -> None:
 
     development_dependencies = pyproject["project"]["optional-dependencies"]["dev"]
     assert "mypy==2.3.0" in development_dependencies
+
+
+def test_ci_type_check_avoids_fresh_sqlite_cache_crash() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "python -m mypy api/" in workflow
+    assert "--no-sqlite-cache" in workflow
