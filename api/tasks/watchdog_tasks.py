@@ -123,7 +123,12 @@ def run_watchdog_cycle(*, session_factory: sessionmaker[Session] | None = None) 
                     tenant_id=str(row.tenant_id),
                     session_factory=session_factory,
                 )
-                payload = {"job_id": str(row.id), "queue_name": queue_name, "_payload_reference": "extraction_job"}
+                payload = {
+                    "job_id": str(row.id),
+                    "tenant_id": str(row.tenant_id),
+                    "queue_name": queue_name,
+                    "_payload_reference": "extraction_job",
+                }
                 try:
                     process_extraction_job.apply_async(
                         args=[payload],
@@ -180,7 +185,12 @@ def run_watchdog_cycle(*, session_factory: sessionmaker[Session] | None = None) 
                 continue
 
             queue_name = get_extraction_queue_sync(tenant_id=str(row.tenant_id), session_factory=session_factory)
-            payload = {"job_id": str(row.id), "queue_name": queue_name, "_payload_reference": "extraction_job"}
+            payload = {
+                "job_id": str(row.id),
+                "tenant_id": str(row.tenant_id),
+                "queue_name": queue_name,
+                "_payload_reference": "extraction_job",
+            }
             process_extraction_job.apply_async(args=[payload], queue=queue_name)
             LOGGER.warning(
                 "stale_job_requeued job_id=%s tenant_id=%s attempts=%s",

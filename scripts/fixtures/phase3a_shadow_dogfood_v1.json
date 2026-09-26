@@ -1,0 +1,229 @@
+{
+  "version": "v1",
+  "purpose": "phase3a_shadow_production_plumbing",
+  "release_evidence": false,
+  "cases": [
+    {
+      "id": "en-single-vague",
+      "language": "en",
+      "reference_type": "single_vague",
+      "expected_outcome": "accepted",
+      "proposals": [{
+        "assistant_text": "I can save this preference. Proposed memory: User prefers troubleshooting answers to begin with a one-line diagnosis.",
+        "memory": "User prefers troubleshooting answers to begin with a one-line diagnosis.",
+        "category": "preference"
+      }],
+      "user_utterance": "Yes, remember that."
+    },
+    {
+      "id": "en-single-indirect",
+      "language": "en",
+      "reference_type": "single_indirect",
+      "expected_outcome": "accepted",
+      "proposals": [{
+        "assistant_text": "I can keep this for later. Proposed memory: User wants deployment checklists to include a rollback step.",
+        "memory": "User wants deployment checklists to include a rollback step.",
+        "category": "preference"
+      }],
+      "user_utterance": "That would be useful next time."
+    },
+    {
+      "id": "en-explicit-ordinal",
+      "language": "en",
+      "reference_type": "explicit_ordinal",
+      "expected_outcome": "accepted",
+      "proposals": [
+        {
+          "assistant_text": "First option. Proposed memory: User prefers status summaries as bullet points.",
+          "memory": "User prefers status summaries as bullet points.",
+          "category": "preference"
+        },
+        {
+          "assistant_text": "Second option. Proposed memory: User prefers status summaries as short paragraphs.",
+          "memory": "User prefers status summaries as short paragraphs.",
+          "category": "preference"
+        }
+      ],
+      "user_utterance": "Save the second one."
+    },
+    {
+      "id": "en-ambiguous-multi",
+      "language": "en",
+      "reference_type": "ambiguous_multi",
+      "expected_outcome": "pending",
+      "proposals": [
+        {
+          "assistant_text": "One possible memory. Proposed memory: User is evaluating a weekly product review process.",
+          "memory": "User is evaluating a weekly product review process.",
+          "category": "procedure"
+        },
+        {
+          "assistant_text": "Another possible memory. Proposed memory: User is evaluating a monthly customer interview process.",
+          "memory": "User is evaluating a monthly customer interview process.",
+          "category": "procedure"
+        }
+      ],
+      "user_utterance": "Keep that idea."
+    },
+    {
+      "id": "en-rejection",
+      "language": "en",
+      "reference_type": "rejection",
+      "expected_outcome": "rejected",
+      "proposals": [{
+        "assistant_text": "I can remember this. Proposed memory: User plans to move all services to a single region.",
+        "memory": "User plans to move all services to a single region.",
+        "category": "goal"
+      }],
+      "user_utterance": "No, do not save that."
+    },
+    {
+      "id": "hi-single-vague",
+      "language": "hi",
+      "reference_type": "single_vague",
+      "expected_outcome": "accepted",
+      "proposals": [{
+        "assistant_text": "मैं यह पसंद सहेज सकता हूँ। Proposed memory: उपयोगकर्ता चाहता है कि तकनीकी उत्तर पहले संक्षिप्त निष्कर्ष दें।",
+        "memory": "उपयोगकर्ता चाहता है कि तकनीकी उत्तर पहले संक्षिप्त निष्कर्ष दें।",
+        "category": "preference"
+      }],
+      "user_utterance": "हाँ, इसे याद रखो।"
+    },
+    {
+      "id": "hi-single-indirect",
+      "language": "hi",
+      "reference_type": "single_indirect",
+      "expected_outcome": "accepted",
+      "proposals": [{
+        "assistant_text": "मैं इसे आगे के लिए रख सकता हूँ। Proposed memory: उपयोगकर्ता चाहता है कि कोड समीक्षा में सुरक्षा जोखिम अलग से बताए जाएँ।",
+        "memory": "उपयोगकर्ता चाहता है कि कोड समीक्षा में सुरक्षा जोखिम अलग से बताए जाएँ।",
+        "category": "preference"
+      }],
+      "user_utterance": "आगे से ऐसा करना अच्छा रहेगा।"
+    },
+    {
+      "id": "hi-explicit-ordinal",
+      "language": "hi",
+      "reference_type": "explicit_ordinal",
+      "expected_outcome": "accepted",
+      "proposals": [
+        {
+          "assistant_text": "पहला विकल्प। Proposed memory: उपयोगकर्ता साप्ताहिक प्रगति रिपोर्ट चाहता है।",
+          "memory": "उपयोगकर्ता साप्ताहिक प्रगति रिपोर्ट चाहता है।",
+          "category": "preference"
+        },
+        {
+          "assistant_text": "दूसरा विकल्प। Proposed memory: उपयोगकर्ता दैनिक प्रगति रिपोर्ट चाहता है।",
+          "memory": "उपयोगकर्ता दैनिक प्रगति रिपोर्ट चाहता है।",
+          "category": "preference"
+        }
+      ],
+      "user_utterance": "दूसरा वाला याद रखो।"
+    },
+    {
+      "id": "hi-ambiguous-multi",
+      "language": "hi",
+      "reference_type": "ambiguous_multi",
+      "expected_outcome": "pending",
+      "proposals": [
+        {
+          "assistant_text": "एक संभव स्मृति। Proposed memory: उपयोगकर्ता नए ग्राहकों के लिए वीडियो मार्गदर्शिका पर विचार कर रहा है।",
+          "memory": "उपयोगकर्ता नए ग्राहकों के लिए वीडियो मार्गदर्शिका पर विचार कर रहा है।",
+          "category": "goal"
+        },
+        {
+          "assistant_text": "दूसरी संभव स्मृति। Proposed memory: उपयोगकर्ता नए ग्राहकों के लिए लिखित मार्गदर्शिका पर विचार कर रहा है।",
+          "memory": "उपयोगकर्ता नए ग्राहकों के लिए लिखित मार्गदर्शिका पर विचार कर रहा है।",
+          "category": "goal"
+        }
+      ],
+      "user_utterance": "वही याद रख लेना।"
+    },
+    {
+      "id": "hi-rejection",
+      "language": "hi",
+      "reference_type": "rejection",
+      "expected_outcome": "rejected",
+      "proposals": [{
+        "assistant_text": "मैं इसे सहेज सकता हूँ। Proposed memory: उपयोगकर्ता हर बैठक को रिकॉर्ड करना चाहता है।",
+        "memory": "उपयोगकर्ता हर बैठक को रिकॉर्ड करना चाहता है।",
+        "category": "preference"
+      }],
+      "user_utterance": "नहीं, इसे सेव मत करना।"
+    },
+    {
+      "id": "hinglish-single-vague",
+      "language": "hinglish",
+      "reference_type": "single_vague",
+      "expected_outcome": "accepted",
+      "proposals": [{
+        "assistant_text": "Main ye preference save kar sakta hoon. Proposed memory: User chahta hai ki debugging answers pehle root cause batayein.",
+        "memory": "User chahta hai ki debugging answers pehle root cause batayein.",
+        "category": "preference"
+      }],
+      "user_utterance": "Haan, ye yaad rakhna."
+    },
+    {
+      "id": "hinglish-single-indirect",
+      "language": "hinglish",
+      "reference_type": "single_indirect",
+      "expected_outcome": "accepted",
+      "proposals": [{
+        "assistant_text": "Main ise future ke liye save kar sakta hoon. Proposed memory: User chahta hai ki release notes mein breaking changes sabse pehle aayein.",
+        "memory": "User chahta hai ki release notes mein breaking changes sabse pehle aayein.",
+        "category": "preference"
+      }],
+      "user_utterance": "Next time ke liye ye useful rahega."
+    },
+    {
+      "id": "hinglish-explicit-ordinal",
+      "language": "hinglish",
+      "reference_type": "explicit_ordinal",
+      "expected_outcome": "accepted",
+      "proposals": [
+        {
+          "assistant_text": "Pehla option. Proposed memory: User prefers demo scripts under five minutes.",
+          "memory": "User prefers demo scripts under five minutes.",
+          "category": "preference"
+        },
+        {
+          "assistant_text": "Doosra option. Proposed memory: User prefers demo scripts under ten minutes.",
+          "memory": "User prefers demo scripts under ten minutes.",
+          "category": "preference"
+        }
+      ],
+      "user_utterance": "Second wala save karo."
+    },
+    {
+      "id": "hinglish-ambiguous-multi",
+      "language": "hinglish",
+      "reference_type": "ambiguous_multi",
+      "expected_outcome": "pending",
+      "proposals": [
+        {
+          "assistant_text": "Ek possible memory. Proposed memory: User onboarding ke liye live workshop evaluate kar raha hai.",
+          "memory": "User onboarding ke liye live workshop evaluate kar raha hai.",
+          "category": "goal"
+        },
+        {
+          "assistant_text": "Dusri possible memory. Proposed memory: User onboarding ke liye recorded course evaluate kar raha hai.",
+          "memory": "User onboarding ke liye recorded course evaluate kar raha hai.",
+          "category": "goal"
+        }
+      ],
+      "user_utterance": "Us idea ko yaad rakh lena."
+    },
+    {
+      "id": "hinglish-rejection",
+      "language": "hinglish",
+      "reference_type": "rejection",
+      "expected_outcome": "rejected",
+      "proposals": [{
+        "assistant_text": "Main ise save kar sakta hoon. Proposed memory: User har deployment ke baad team meeting schedule karna chahta hai.",
+        "memory": "User har deployment ke baad team meeting schedule karna chahta hai.",
+        "category": "procedure"
+      }],
+      "user_utterance": "Nahi, isko memory mein mat rakho."
+    }
+  ]
+}

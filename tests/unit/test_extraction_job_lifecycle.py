@@ -140,6 +140,7 @@ async def test_queue_memory_add_persists_extraction_job_row() -> None:
     dispatched = service.dispatch_task.calls[0][2]["args"][0]
     assert dispatched == {
         "job_id": result["job_id"],
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
         "queue_name": "starter-extraction",
         "_payload_reference": "extraction_job",
     }
@@ -223,6 +224,54 @@ def test_worker_loads_compact_tenant_payload_before_processing(monkeypatch) -> N
         "operational_metrics": {"queue_wait_ms": 0},
     }
     assert result["status"] == "processed"
+
+
+def test_compact_retry_payload_preserves_queue_release_identity() -> None:
+    compact = extraction_tasks._compact_task_payload(
+        {
+            "job_id": "job-1",
+            "tenant_id": "tenant-1",
+            "proxy_user_id": "proxy-1",
+            "queue_name": "starter-extraction",
+            "messages": [{"role": "user", "content": "private transcript"}],
+        }
+    )
+
+    assert compact == {
+        "job_id": "job-1",
+        "tenant_id": "tenant-1",
+        "queue_name": "starter-extraction",
+        "_payload_reference": "extraction_job",
+    }
+
+
+def test_postrun_releases_legacy_compact_payload_from_result(monkeypatch) -> None:
+    release = MagicMock()
+    monkeypatch.setattr(extraction_tasks, "release_extraction_slot_sync", release)
+
+    extraction_tasks.release_queue_slot_after_extraction(
+        sender=SimpleNamespace(name=extraction_tasks.EXTRACTION_TASK_NAME),
+        args=[
+            {
+                "job_id": "job-1",
+                "queue_name": "starter-extraction",
+                "_payload_reference": "extraction_job",
+            }
+        ],
+        retval={
+            "job_id": "job-1",
+            "tenant_id": "tenant-1",
+            "queue_name": "starter-extraction",
+            "status": "completed",
+        },
+        state="SUCCESS",
+    )
+
+    release.assert_called_once_with(
+        tenant_id="tenant-1",
+        queue_name="starter-extraction",
+        job_id="job-1",
+    )
 
 
 def test_worker_status_snapshot_excludes_transcript_and_memory_content() -> None:
@@ -352,6 +401,7 @@ def test_watchdog_requeues_stale_processing_job_only_once(monkeypatch) -> None:
         args=[
             {
                 "job_id": "33333333-3333-3333-3333-333333333333",
+                "tenant_id": "44444444-4444-4444-4444-444444444444",
                 "queue_name": "starter-extraction",
                 "_payload_reference": "extraction_job",
             }
@@ -386,6 +436,7 @@ def test_watchdog_recovers_stranded_queued_job_once_on_original_queue(monkeypatc
     apply_async.assert_called_once_with(
         args=[{
             "job_id": "55555555-5555-5555-5555-555555555555",
+            "tenant_id": "66666666-6666-6666-6666-666666666666",
             "queue_name": "growth-extraction",
             "_payload_reference": "extraction_job",
         }],

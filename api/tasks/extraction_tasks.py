@@ -299,6 +299,7 @@ def _compact_task_payload(job_payload: dict[str, Any]) -> dict[str, Any]:
     if job_payload.get("tenant_id") and job_payload.get("proxy_user_id"):
         return {
             "job_id": str(job_payload["job_id"]),
+            "tenant_id": str(job_payload["tenant_id"]),
             "queue_name": job_payload.get("queue_name"),
             "_payload_reference": "extraction_job",
         }
@@ -1689,8 +1690,12 @@ def release_queue_slot_after_extraction(
         return
     if isinstance(retval, dict) and retval.get("_retain_queue_slot"):
         return
+    result_payload = retval if isinstance(retval, dict) else {}
     release_extraction_slot_sync(
-        tenant_id=payload.get("tenant_id"),
-        queue_name=payload.get("queue_name"),
-        job_id=payload.get("job_id"),
+        # Completed legacy compact tasks do not carry tenant_id in their
+        # original Celery args. Their result does, after loading the durable
+        # extraction-job payload, so use it as a backward-compatible fallback.
+        tenant_id=payload.get("tenant_id") or result_payload.get("tenant_id"),
+        queue_name=payload.get("queue_name") or result_payload.get("queue_name"),
+        job_id=payload.get("job_id") or result_payload.get("job_id"),
     )

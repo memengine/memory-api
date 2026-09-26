@@ -89,6 +89,7 @@ def _compact_task_payload(job: dict[str, Any]) -> dict[str, Any]:
     if job.get("tenant_id") and job.get("proxy_user_id"):
         return {
             "job_id": str(job["job_id"]),
+            "tenant_id": str(job["tenant_id"]),
             "queue_name": job.get("queue_name"),
             "_payload_reference": "extraction_job",
         }
