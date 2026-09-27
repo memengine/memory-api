@@ -27,6 +27,7 @@ from api.dependencies import (
     get_proxy_user_service,
     get_quality_gate_service,
     get_retriever_service,
+    require_memory_passport_enabled,
 )
 from api.errors import APIError
 from api.routers.common import get_request_id, utc_now
@@ -752,11 +753,12 @@ async def answer_clarification_for_public_tenant_mcp(
     )
 
 
-@router.post("/universal/capability")
+@router.post("/universal/capability", include_in_schema=False)
 async def issue_universal_capability(
     request: Request,
     session: DbSession,
     cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
     x_memoryos_mcp_universal_agent_key: Annotated[
         str | None, Header(alias="X-MemoryOS-MCP-Universal-Agent-Key")
     ] = None,

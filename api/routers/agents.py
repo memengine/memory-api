@@ -15,6 +15,7 @@ from api.dependencies import DbSession
 from api.dependencies import get_agent_service
 from api.dependencies import get_authenticated_user_id
 from api.dependencies import get_authenticated_tenant_id
+from api.dependencies import require_memory_passport_enabled
 from api.errors import APIError
 from api.schemas.requests import AgentCreateRequest
 from api.schemas.responses import AgentCreateResponse
@@ -68,11 +69,12 @@ def _global_agent_to_data(agent, *, raw_agent_api_key: str | None = None) -> Glo
     return GlobalAgentRegistrationData(raw_agent_api_key=raw_agent_api_key, **payload)
 
 
-@router.get("/global/{agent_id}", response_model=GlobalAgentPublicResponse)
+@router.get("/global/{agent_id}", response_model=GlobalAgentPublicResponse, include_in_schema=False)
 async def get_global_agent_profile(
     request: Request,
     agent_id: uuid.UUID,
     session: DbSession,
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> GlobalAgentPublicResponse:
     profile = await GlobalAgentService(session=session).get_public_profile(str(agent_id))
     if profile is None:
@@ -84,11 +86,12 @@ async def get_global_agent_profile(
     )
 
 
-@router.get("/global", response_model=GlobalAgentListResponse)
+@router.get("/global", response_model=GlobalAgentListResponse, include_in_schema=False)
 async def list_global_agents(
     request: Request,
     session: DbSession,
     authenticated_tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> GlobalAgentListResponse:
     result = await session.execute(
         select(GlobalAgent)
@@ -104,12 +107,13 @@ async def list_global_agents(
     )
 
 
-@router.post("/global", response_model=GlobalAgentRegistrationResponse)
+@router.post("/global", response_model=GlobalAgentRegistrationResponse, include_in_schema=False)
 async def register_global_agent(
     request: Request,
     payload: GlobalAgentCreateRequest,
     session: DbSession,
     authenticated_tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> GlobalAgentRegistrationResponse:
     agent, raw_agent_api_key = await GlobalAgentService(session=session).register(
         tenant_id=authenticated_tenant_id,
@@ -127,12 +131,13 @@ async def register_global_agent(
     )
 
 
-@router.post("/global/{agent_id}/retire")
+@router.post("/global/{agent_id}/retire", include_in_schema=False)
 async def retire_global_agent(
     request: Request,
     agent_id: str,
     session: DbSession,
     authenticated_tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ):
     result = await GlobalAgentRetirementService(session=session).retire(
         tenant_id=authenticated_tenant_id,

@@ -32,6 +32,7 @@ from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_cache_service
 from api.dependencies import get_proxy_user_service
 from api.dependencies import get_quota_manager
+from api.dependencies import require_memory_passport_enabled
 from api.db.cache import CacheService
 from api.db.models import ApiDeprecatedField
 from api.db.models import ApiKey
@@ -2044,12 +2045,14 @@ async def get_tenant_conflict_stats(
 @router.post(
     "/directory/register",
     response_model=OrganisationDirectoryRegisterResponse,
+    include_in_schema=False,
 )
 async def register_tenant_organisation_directory(
     request: Request,
     payload: OrganisationDirectoryRegisterRequest,
     tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
     session: DbSession,
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> OrganisationDirectoryRegisterResponse:
     tenant_uuid = uuid.UUID(tenant_id)
     existing = (
@@ -2095,13 +2098,18 @@ async def register_tenant_organisation_directory(
     )
 
 
-@router.post("/memory-passport/link-token", response_model=PassportLinkTokenResponse)
+@router.post(
+    "/memory-passport/link-token",
+    response_model=PassportLinkTokenResponse,
+    include_in_schema=False,
+)
 async def create_memory_passport_link_token(
     request: Request,
     payload: PassportLinkTokenRequest,
     tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
     session: DbSession,
     cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> PassportLinkTokenResponse:
     issued = await PassportLinkService(
         session=session,

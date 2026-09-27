@@ -188,6 +188,7 @@ locals {
     { name = "OPENAI_MODEL", value = var.openai_model },
     { name = "OPENAI_TIMEOUT_SECONDS", value = tostring(var.openai_timeout_seconds) },
     { name = "EXTRACTION_MODEL", value = var.extraction_model },
+    { name = "MEMORY_PASSPORT_ENABLED", value = tostring(var.memory_passport_enabled) },
     { name = "PHASE3A_CONFIRMATION_ENABLED", value = tostring(var.phase3a_confirmation_enabled) },
     { name = "PHASE3A_CONFIRMATION_SHADOW_ENABLED", value = tostring(var.phase3a_confirmation_shadow_enabled) },
     { name = "EMBEDDING_PROVIDER", value = var.embedding_provider },

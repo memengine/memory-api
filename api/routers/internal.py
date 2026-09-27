@@ -56,6 +56,7 @@ from api.db.models import TenantBudget
 from api.db.models import VerifiedOrgConnection
 from api.config.plan_limits import apply_plan_limits
 from api.dependencies import get_cache_service
+from api.dependencies import require_memory_passport_enabled
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.routers.common import get_request_id
 from api.schemas.conflict_schemas import CrossUserConflictData
@@ -1900,9 +1901,10 @@ async def audit_logs(
     )
 
 
-@router.get("/global-agents", response_model=GlobalAgentVerificationResponse)
+@router.get("/global-agents", response_model=GlobalAgentVerificationResponse, include_in_schema=False)
 async def global_agents_for_verification(
     session: AsyncSession = Depends(get_db_session),
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
     status_filter: str = "pending",
 ) -> GlobalAgentVerificationResponse:
     normalized_status = status_filter.strip().lower()
@@ -1935,11 +1937,16 @@ async def global_agents_for_verification(
     return GlobalAgentVerificationResponse(data=records, generated_at=datetime.now(UTC))
 
 
-@router.patch("/global-agents/{agent_id}/verification", response_model=GlobalAgentVerificationRecord)
+@router.patch(
+    "/global-agents/{agent_id}/verification",
+    response_model=GlobalAgentVerificationRecord,
+    include_in_schema=False,
+)
 async def update_global_agent_verification(
     agent_id: str,
     payload: GlobalAgentVerificationUpdateRequest,
     session: AsyncSession = Depends(get_db_session),
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> GlobalAgentVerificationRecord:
     try:
         parsed_agent_id = uuid.UUID(agent_id)
@@ -1968,9 +1975,10 @@ async def update_global_agent_verification(
     return _global_agent_verification_record(agent, tenant_name, grants_count)
 
 
-@router.get("/organisations", response_model=OrganisationVerificationResponse)
+@router.get("/organisations", response_model=OrganisationVerificationResponse, include_in_schema=False)
 async def organisations_for_verification(
     session: AsyncSession = Depends(get_db_session),
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
     status_filter: str = "pending",
 ) -> OrganisationVerificationResponse:
     normalized_status = status_filter.strip().lower()
@@ -2008,11 +2016,13 @@ async def organisations_for_verification(
 @router.patch(
     "/organisations/{organisation_id}/verification",
     response_model=OrganisationVerificationRecord,
+    include_in_schema=False,
 )
 async def update_organisation_verification(
     organisation_id: str,
     payload: OrganisationVerificationUpdateRequest,
     session: AsyncSession = Depends(get_db_session),
+    _memory_passport_enabled: None = Depends(require_memory_passport_enabled),
 ) -> OrganisationVerificationRecord:
     try:
         parsed_organisation_id = uuid.UUID(organisation_id)

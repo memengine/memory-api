@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from api.db.database import get_db_session
 from api.dependencies import get_cache_service
 from api.dependencies import get_qdrant_service
+from api.dependencies import require_memory_passport_enabled
 from api.errors import APIError
 from api.routers.agents import router as agents_router
 from api.routers.uui import router as uui_router
@@ -43,6 +44,7 @@ def _build_test_app() -> FastAPI:
     app.dependency_overrides[get_db_session] = _override_db_session
     app.dependency_overrides[get_cache_service] = lambda: SimpleNamespace()
     app.dependency_overrides[get_qdrant_service] = lambda: SimpleNamespace()
+    app.dependency_overrides[require_memory_passport_enabled] = lambda: None
     return app
 
 

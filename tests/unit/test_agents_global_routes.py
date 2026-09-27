@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from api.db.database import get_db_session
 from api.dependencies import get_authenticated_tenant_id
+from api.dependencies import require_memory_passport_enabled
 from api.errors import APIError
 from api.routers.agents import router as agents_router
 from api.services.global_agent_service import GlobalAgentService
@@ -38,6 +39,7 @@ def _build_test_app() -> FastAPI:
     app.include_router(agents_router)
     app.dependency_overrides[get_db_session] = _override_db_session
     app.dependency_overrides[get_authenticated_tenant_id] = lambda: str(uuid.uuid4())
+    app.dependency_overrides[require_memory_passport_enabled] = lambda: None
     return app
 
 

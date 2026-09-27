@@ -554,6 +554,12 @@ variable "phase3a_confirmation_enabled" {
   default     = false
 }
 
+variable "memory_passport_enabled" {
+  description = "Enable the private-beta Memory Passport and Universal Memory API surface. Keep false for normal tenant deployments."
+  type        = bool
+  default     = false
+}
+
 variable "phase3a_confirmation_shadow_enabled" {
   description = "Evaluate active assistant proposals without allowing proposal-derived writes."
   type        = bool

@@ -273,7 +273,7 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         lifespan=lifespan,
     )
-    app.state.universal_app = _build_universal_app()
+    app.state.universal_app = _build_universal_app() if settings.memory_passport_enabled else None
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(RateLimiterMiddleware)
     app.add_middleware(RegionMiddleware)
@@ -307,7 +307,8 @@ def create_app() -> FastAPI:
         ],
         max_age=600,
     )
-    app.add_middleware(UniversalAuthMiddleware, universal_app=app.state.universal_app)
+    if settings.memory_passport_enabled:
+        app.add_middleware(UniversalAuthMiddleware, universal_app=app.state.universal_app)
     _register_exception_handlers(app)
 
     @app.get("/health", response_model=HealthResponse, tags=["health"])
@@ -372,12 +373,14 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(internal_router)
     app.include_router(tenant_router)
-    app.include_router(uui_router)
+    if settings.memory_passport_enabled:
+        app.include_router(uui_router)
     app.include_router(users_router)
     app.include_router(api_keys_router)
     app.include_router(billing_router)
     app.include_router(agents_router)
-    app.include_router(universal_router)
+    if settings.memory_passport_enabled:
+        app.include_router(universal_router)
     app.include_router(webhooks_router)
     app.include_router(razorpay_webhooks_router)
 

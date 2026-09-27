@@ -22,9 +22,20 @@ from api.services.quota_manager import QuotaManager
 from api.services.retriever import RetrieverService
 from api.services.user_service import UserService
 from api.services.webhook_service import WebhookService
+from api.settings import get_settings
 
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+def require_memory_passport_enabled() -> None:
+    """Keep the private-beta Memory Passport surface closed by default."""
+    if not get_settings().memory_passport_enabled:
+        raise APIError(
+            status_code=404,
+            code="FEATURE_404",
+            error="memory_passport_not_available",
+        )
 
 
 def get_authenticated_user_id(request: Request) -> str:
