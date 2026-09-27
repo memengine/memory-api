@@ -362,6 +362,33 @@ def test_add_endpoint_forwards_source_provenance(monkeypatch) -> None:
     assert quality_gate_service.calls[0]["semantic_deduplication"] is False
 
 
+def test_add_endpoint_serializes_message_timestamps_before_gating_and_queueing(
+    monkeypatch,
+) -> None:
+    client, memory_service, quality_gate_service = build_client(
+        monkeypatch,
+        gate_result=GateResult(
+            passed=True,
+            blocked_layer=None,
+            reason=None,
+            budget_remaining_pct=0.9,
+        ),
+    )
+    payload = add_payload()
+    payload["messages"][0]["occurred_at"] = "2026-09-27T10:15:00Z"
+
+    with client:
+        response = client.post("/v1/memories/add", json=payload)
+
+    assert response.status_code == 200
+    assert quality_gate_service.calls[0]["messages"][0]["occurred_at"] == (
+        "2026-09-27T10:15:00Z"
+    )
+    assert memory_service.queue_calls[0]["messages"][0]["occurred_at"] == (
+        "2026-09-27T10:15:00Z"
+    )
+
+
 def test_add_endpoint_returns_passthrough_when_memory_service_skips_extraction(monkeypatch) -> None:
     client, memory_service, _quality_gate_service = build_client(
         monkeypatch,

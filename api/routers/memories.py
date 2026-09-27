@@ -250,7 +250,14 @@ async def add_memories(
             )
 
     gate_started = time.perf_counter()
-    gate_messages = [message.model_dump() for message in payload.messages]
+    # Use JSON-mode serialization at the request boundary. Conversation
+    # messages may contain timezone-aware ``occurred_at`` values; leaving
+    # those as Python ``datetime`` objects breaks provenance hashing and the
+    # JSON-backed extraction job payload.
+    serialized_messages = [
+        message.model_dump(mode="json") for message in payload.messages
+    ]
+    gate_messages = serialized_messages
     if payload.source is not None:
         # Registered backend events use service + event_id + payload_hash as
         # their idempotency boundary. Conversational semantic deduplication
@@ -296,7 +303,7 @@ async def add_memories(
         requested_user_id=None,
         authenticated_user_id=None,
         agent_id=payload.agent_id,
-        messages=[message.model_dump() for message in payload.messages],
+        messages=serialized_messages,
         metadata=payload.metadata,
         idempotency_key=idempotency_key,
         tenant_id=tenant_id,
