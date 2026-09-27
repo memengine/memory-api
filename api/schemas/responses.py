@@ -143,11 +143,26 @@ class MemoryJobStatusData(BaseModel):
     dead_lettered_at: datetime | None = None
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
     proposal_ids: list[str] = Field(default_factory=list)
+    created_memory_ids: list[str] = Field(default_factory=list)
     operational_metrics: dict[str, int] = Field(default_factory=dict)
 
 
 class MemoryJobStatusResponse(ResponseEnvelope):
     data: MemoryJobStatusData
+
+
+class MemoryClarificationOption(BaseModel):
+    answer: Literal["A", "B", "both", "neither"]
+    label: str
+    memory_id: str | None = None
+
+
+class MemoryClarificationData(BaseModel):
+    id: str
+    conflict_id: str | None = None
+    question: str
+    options: list[MemoryClarificationOption] = Field(default_factory=list)
+    expires_at: datetime | None = None
 
 
 class MemoryRetrieveResponse(ResponseEnvelope):
@@ -157,6 +172,7 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     system_prompt_addition: str
     context_token_count: int = 0
     clarification_question: str | None = None
+    clarification: MemoryClarificationData | None = None
     quota_mode: str | None = None
     is_degraded: bool = False
     is_passthrough: bool = False
@@ -171,6 +187,17 @@ class RetrievalFeedbackData(BaseModel):
 
 class RetrievalFeedbackResponse(ResponseEnvelope):
     data: RetrievalFeedbackData
+
+
+class MemoryClarificationAnswerData(BaseModel):
+    resolved: bool
+    clarification_id: str
+    conflict_id: str | None = None
+    resolution: Literal["A", "B", "both", "neither"]
+
+
+class MemoryClarificationAnswerResponse(ResponseEnvelope):
+    data: MemoryClarificationAnswerData
 
 
 class UserProfileData(BaseModel):

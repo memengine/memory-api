@@ -16,7 +16,7 @@ test("add forwards Idempotency-Key without adding it to the body", async () => {
   };
   const client = new MemoryOS("mem_test", MemoryOS.DEFAULT_BASE_URL, 30_000, fetchImpl);
 
-  await client.add(
+  const result = await client.add(
     [{
       role: "user",
       content: "I prefer concise answers.",
@@ -34,6 +34,8 @@ test("add forwards Idempotency-Key without adding it to the body", async () => {
   assert.equal(MemoryOS.DEFAULT_BASE_URL, "https://api.memoryo.dev");
   assert.equal(captured.init.headers["Idempotency-Key"], "event-123");
   assert.equal("idempotency_key" in JSON.parse(captured.init.body), false);
+  assert.equal(result.wasQueued, true);
+  assert.equal(result.wasStored, true);
   assert.deepEqual(JSON.parse(captured.init.body).messages, [{
     role: "user",
     content: "I prefer concise answers.",
@@ -70,7 +72,7 @@ test("add preserves explicit proposal and conversation identity", async () => {
   }], "user-1"), /appear verbatim/);
 });
 
-test("get sends asOf and preserves clarificationQuestion", async () => {
+test("get sends asOf and preserves structured clarification", async () => {
   let captured;
   const fetchImpl = async (url, init) => {
     captured = { url, init };
@@ -80,6 +82,16 @@ test("get sends asOf and preserves clarificationQuestion", async () => {
       cached: false,
       system_prompt_addition: "",
       clarification_question: "Which plan should be current?",
+      clarification: {
+        id: "clarification-123",
+        conflict_id: "conflict-123",
+        question: "Which plan should be current?",
+        options: [
+          { answer: "A", label: "Starter", memory_id: "memory-a" },
+          { answer: "B", label: "Scale", memory_id: "memory-b" },
+        ],
+        expires_at: "2026-08-30T00:00:00Z",
+      },
       request_id: "request-123",
       timestamp: "2026-08-29T00:00:00Z",
     }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -94,6 +106,9 @@ test("get sends asOf and preserves clarificationQuestion", async () => {
 
   assert.equal(JSON.parse(captured.init.body).as_of, "2026-08-01T12:00:00Z");
   assert.equal(result.clarificationQuestion, "Which plan should be current?");
+  assert.equal(result.clarification.id, "clarification-123");
+  assert.equal(result.clarification.options[1].answer, "B");
+  assert.equal(result.clarification.options[1].memoryId, "memory-b");
 });
 
 test("getJobStatus and waitForJob expose the asynchronous write lifecycle", async () => {
@@ -110,6 +125,7 @@ test("getJobStatus and waitForJob expose the asynchronous write lifecycle", asyn
         memories_created: completed ? 1 : 0,
         attempts: 1,
         proposal_ids: ["proposal-1"],
+        created_memory_ids: completed ? ["memory-123"] : [],
         operational_metrics: { queue_wait_ms: 12 },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -123,6 +139,39 @@ test("getJobStatus and waitForJob expose the asynchronous write lifecycle", asyn
   const completed = await client.waitForJob("job/123", { timeoutMs: 100, pollIntervalMs: 1 });
   assert.equal(completed.succeeded, true);
   assert.equal(completed.memoriesCreated, 1);
+  assert.deepEqual(completed.createdMemoryIds, ["memory-123"]);
+});
+
+test("answerClarification resolves through the tenant API", async () => {
+  let captured;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return new Response(JSON.stringify({
+      data: {
+        resolved: true,
+        clarification_id: "clarification/123",
+        conflict_id: "conflict-123",
+        resolution: "B",
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const client = new MemoryOS("mem_test", MemoryOS.DEFAULT_BASE_URL, 30_000, fetchImpl);
+
+  const result = await client.answerClarification({
+    clarificationId: "clarification/123",
+    externalUserId: "customer-123",
+    answer: "B",
+    freeText: "The Scale plan is current.",
+  });
+
+  assert.match(captured.url, /\/v1\/memories\/clarifications\/clarification%2F123\/answer$/);
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    external_user_id: "customer-123",
+    answer: "B",
+    free_text: "The Scale plan is current.",
+  });
+  assert.equal(result.resolved, true);
+  assert.equal(result.resolution, "B");
 });
 
 test("list scopes by external user and export uses tenant proxy-user route", async () => {

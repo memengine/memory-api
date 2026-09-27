@@ -81,6 +81,8 @@ export interface AddResult {
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
   nothingToExtract: boolean;
   proposalIds?: string[];
+  readonly wasQueued: boolean;
+  /** @deprecated Queued extraction is not confirmed storage. Use wasQueued. */
   readonly wasStored: boolean;
 }
 
@@ -88,6 +90,7 @@ export interface MemoryJobStatus {
   jobId: string;
   status: string;
   proposalIds?: string[];
+  createdMemoryIds: string[];
   operationalMetrics?: Record<string, number>;
   memoriesCreated: number;
   pendingCandidatesBuffered: number;
@@ -136,7 +139,29 @@ export interface RetrieveResult {
   isDegraded: boolean;
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
   clarificationQuestion: string | null;
+  clarification: MemoryClarification | null;
   readonly hasContext: boolean;
+}
+
+export interface MemoryClarificationOption {
+  answer: "A" | "B" | "both" | "neither";
+  label: string;
+  memoryId: string | null;
+}
+
+export interface MemoryClarification {
+  id: string;
+  conflictId: string | null;
+  question: string;
+  options: MemoryClarificationOption[];
+  expiresAt: string | null;
+}
+
+export interface MemoryClarificationAnswerResult {
+  resolved: boolean;
+  clarificationId: string;
+  conflictId: string | null;
+  resolution: "A" | "B" | "both" | "neither";
 }
 
 export interface RetrievalFeedbackParams {
@@ -311,6 +336,7 @@ interface MemoryJobStatusEnvelope {
     job_id: string;
     status: string;
     proposal_ids?: string[];
+    created_memory_ids?: string[];
     operational_metrics?: Record<string, number>;
     memories_created?: number;
     pending_candidates_buffered?: number;
@@ -352,6 +378,26 @@ interface RetrieveEnvelope {
   memories_from_hot_tier?: number;
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
   clarification_question?: string | null;
+  clarification?: {
+    id: string;
+    conflict_id?: string | null;
+    question: string;
+    options?: Array<{
+      answer: "A" | "B" | "both" | "neither";
+      label: string;
+      memory_id?: string | null;
+    }>;
+    expires_at?: string | null;
+  } | null;
+}
+
+interface MemoryClarificationAnswerEnvelope {
+  data: {
+    resolved: boolean;
+    clarification_id: string;
+    conflict_id?: string | null;
+    resolution: "A" | "B" | "both" | "neither";
+  };
 }
 
 interface RetrievalFeedbackEnvelope {
@@ -808,6 +854,9 @@ export class MemoryOS {
       circuitStatus: circuitStatusFromHeaders(response.headers),
       nothingToExtract: payloadJson.nothing_to_extract ?? false,
       proposalIds: payloadJson.proposal_ids ?? [],
+      get wasQueued() {
+        return payloadJson.status === "queued" && !(payloadJson.nothing_to_extract ?? false);
+      },
       get wasStored() {
         return payloadJson.status === "queued" && !(payloadJson.nothing_to_extract ?? false);
       },
@@ -889,6 +938,19 @@ export class MemoryOS {
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
       clarificationQuestion: payload.clarification_question ?? null,
+      clarification: payload.clarification
+        ? {
+            id: payload.clarification.id,
+            conflictId: payload.clarification.conflict_id ?? null,
+            question: payload.clarification.question,
+            options: (payload.clarification.options ?? []).map((option) => ({
+              answer: option.answer,
+              label: option.label,
+              memoryId: option.memory_id ?? null,
+            })),
+            expiresAt: payload.clarification.expires_at ?? null,
+          }
+        : null,
       get hasContext() {
         return Boolean(payload.system_prompt_addition) && quotaMode !== "PASSTHROUGH";
       },
@@ -906,6 +968,7 @@ export class MemoryOS {
       jobId: data.job_id,
       status: data.status,
       proposalIds: data.proposal_ids ?? [],
+      createdMemoryIds: data.created_memory_ids ?? [],
       operationalMetrics: data.operational_metrics ?? {},
       memoriesCreated: data.memories_created ?? 0,
       pendingCandidatesBuffered: data.pending_candidates_buffered ?? 0,
@@ -970,6 +1033,32 @@ export class MemoryOS {
       get queuedRetrospectiveExtraction() {
         return Boolean(payload.data.correction_job_id);
       },
+    };
+  }
+
+  async answerClarification(params: {
+    clarificationId: string;
+    externalUserId: string;
+    answer: "A" | "B" | "both" | "neither";
+    freeText?: string;
+  }): Promise<MemoryClarificationAnswerResult> {
+    const response = await this.requestResponse(
+      "POST",
+      `/v1/memories/clarifications/${encodeURIComponent(params.clarificationId)}/answer`,
+      {
+        body: JSON.stringify({
+          external_user_id: params.externalUserId,
+          answer: params.answer,
+          ...(params.freeText !== undefined ? { free_text: params.freeText } : {}),
+        }),
+      },
+    );
+    const payload = (await this.parseJson(response)) as MemoryClarificationAnswerEnvelope;
+    return {
+      resolved: payload.data.resolved,
+      clarificationId: payload.data.clarification_id,
+      conflictId: payload.data.conflict_id ?? null,
+      resolution: payload.data.resolution,
     };
   }
 

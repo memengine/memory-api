@@ -83,13 +83,22 @@ result = client.add(
 )
 
 
-if result.was_stored:
+if result.was_queued:
     print(f"Memory queued: {result.job_id}")
 elif result.nothing_to_extract:
     print("Conversation had no storable information")
 elif result.status == "blocked":
     print(f"Blocked: {result.blocked_reason}")
 ```
+
+`was_stored` remains as a deprecated compatibility alias. A queued request is
+not confirmed storage; call `wait_for_job()` and inspect
+`job.created_memory_ids` when you need the exact records created.
+
+When retrieval returns `result.clarification`, show its question in your
+existing chat and send the user's answer back with
+`client.answer_clarification(...)`. MemoryOS validates identity, expiry, and
+the conflict transition on the backend.
 
 ### Filtering by time
 

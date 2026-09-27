@@ -59,6 +59,8 @@ class ApiKeyAuthResult:
     user_id: str | None
     api_key_id: str | None
     key_hash: str
+    permissions: tuple[str, ...] = ()
+    rate_limit_per_minute: int = 60
 
 
 @dataclass(slots=True)
@@ -223,6 +225,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.tenant_id = auth_result.tenant_id
             request.state.user_id = auth_result.user_id
             request.state.api_key_id = auth_result.api_key_id
+            request.state.api_key_permissions = auth_result.permissions
+            request.state.api_key_rate_limit_per_minute = auth_result.rate_limit_per_minute
             request.state.auth_scheme = "apikey"
             return await call_next(request)
 
@@ -562,6 +566,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         user_id=str(api_key.user_id) if api_key.user_id else None,
                         api_key_id=str(api_key.id),
                         key_hash=api_key.key_hash,
+                        permissions=tuple(str(item) for item in (api_key.permissions or [])),
+                        rate_limit_per_minute=max(1, int(api_key.rate_limit_per_minute or 1)),
                     )
                     try:
                         await asyncio.wait_for(
@@ -620,6 +626,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             payload = json.loads(cached_value)
         except json.JSONDecodeError:
             return None
+        if "permissions" not in payload or "rate_limit_per_minute" not in payload:
+            return None
 
         key_hash = str(payload.get("key_hash", ""))
         cached_fingerprint = str(payload.get("api_key_fingerprint", ""))
@@ -643,6 +651,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user_id=str(user_id) if user_id else None,
             api_key_id=str(payload.get("api_key_id")) if payload.get("api_key_id") else None,
             key_hash=key_hash,
+            permissions=tuple(str(item) for item in (payload.get("permissions") or [])),
+            rate_limit_per_minute=max(1, int(payload.get("rate_limit_per_minute") or 60)),
         )
 
     async def _cache_api_key_auth(
@@ -661,6 +671,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         "user_id": auth_result.user_id,
                         "api_key_id": auth_result.api_key_id,
                         "key_hash": auth_result.key_hash,
+                        "permissions": list(auth_result.permissions),
+                        "rate_limit_per_minute": auth_result.rate_limit_per_minute,
                         "api_key_fingerprint": fingerprint_api_key(raw_api_key),
                     }
                 ),

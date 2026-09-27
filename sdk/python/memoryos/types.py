@@ -154,14 +154,20 @@ class AddResult(BaseModel):
     proposal_ids: list[str] = Field(default_factory=list)
 
     @property
-    def was_stored(self) -> bool:
+    def was_queued(self) -> bool:
         return self.status == "queued" and not self.nothing_to_extract
+
+    @property
+    def was_stored(self) -> bool:
+        """Deprecated compatibility alias; queued extraction is not confirmed storage."""
+        return self.was_queued
 
 
 class MemoryJobStatus(BaseModel):
     job_id: str
     status: str
     proposal_ids: list[str] = Field(default_factory=list)
+    created_memory_ids: list[str] = Field(default_factory=list)
     operational_metrics: dict[str, int] = Field(default_factory=dict)
     memories_created: int = 0
     pending_candidates_buffered: int = 0
@@ -212,6 +218,20 @@ class MemoryResult(BaseModel):
         return "stable"
 
 
+class MemoryClarificationOption(BaseModel):
+    answer: Literal["A", "B", "both", "neither"]
+    label: str
+    memory_id: str | None = None
+
+
+class MemoryClarification(BaseModel):
+    id: str
+    conflict_id: str | None = None
+    question: str
+    options: list[MemoryClarificationOption] = Field(default_factory=list)
+    expires_at: datetime | None = None
+
+
 class RetrieveResult(BaseModel):
     retrieval_id: str | None = None
     items: list[MemoryResult] = Field(default_factory=list)
@@ -224,6 +244,7 @@ class RetrieveResult(BaseModel):
     is_degraded: bool = False
     circuit_status: CircuitStatus = "HEALTHY"
     clarification_question: str | None = None
+    clarification: MemoryClarification | None = None
 
     @property
     def has_context(self) -> bool:
@@ -257,6 +278,13 @@ class RetrievalFeedbackResult(BaseModel):
     @property
     def queued_retrospective_extraction(self) -> bool:
         return self.correction_job_id is not None
+
+
+class MemoryClarificationAnswerResult(BaseModel):
+    resolved: bool
+    clarification_id: str
+    conflict_id: str | None = None
+    resolution: Literal["A", "B", "both", "neither"]
 
 
 class MemoryRecord(BaseModel):
@@ -435,10 +463,15 @@ class RetrieveEnvelope(EnvelopeBase):
     memories_from_hot_tier: int = 0
     quota_mode: QuotaMode = "FULL"
     clarification_question: str | None = None
+    clarification: MemoryClarification | None = None
 
 
 class RetrievalFeedbackEnvelope(EnvelopeBase):
     data: RetrievalFeedbackResult
+
+
+class MemoryClarificationAnswerEnvelope(EnvelopeBase):
+    data: MemoryClarificationAnswerResult
 
 
 class MemoryListEnvelope(EnvelopeBase):

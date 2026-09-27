@@ -160,6 +160,27 @@ def test_create_api_key_sets_tenant_id_and_not_user_id() -> None:
     assert response.json()["data"]["raw_key"].startswith("mem_")
 
 
+def test_create_api_key_defaults_to_read_write_and_rejects_unknown_permission() -> None:
+    tenant_id = uuid.uuid4()
+    session = FakeSession([])
+    app = build_test_app(session, str(tenant_id))
+
+    with TestClient(app) as client:
+        default_response = client.post(
+            "/v1/api-keys",
+            json={"name": "Default SDK Key"},
+        )
+        invalid_response = client.post(
+            "/v1/api-keys",
+            json={"name": "Invalid Key", "permissions": ["superuser"]},
+        )
+
+    assert default_response.status_code == 200
+    assert session.api_keys[0].permissions == ["read", "write"]
+    assert invalid_response.status_code == 422
+    assert len(session.api_keys) == 1
+
+
 def test_revoke_api_key_only_allows_current_tenant_key() -> None:
     tenant_id = uuid.uuid4()
     other_tenant_id = uuid.uuid4()

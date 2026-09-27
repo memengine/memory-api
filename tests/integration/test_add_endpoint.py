@@ -103,16 +103,11 @@ class FakeRateLimitRedis:
         self.initial_count = initial_count
         self.counts: dict[str, int] = {}
 
-    async def incr(self, key: str) -> int:
+    async def eval(self, _script: str, key_count: int, key: str, _ttl: int) -> int:
+        assert key_count == 1
         current = self.counts.get(key, self.initial_count) + 1
         self.counts[key] = current
         return current
-
-    async def ttl(self, key: str) -> int:
-        return -1
-
-    async def expire(self, key: str, ttl: int) -> bool:
-        return True
 
 
 async def bypass_api_key_auth(self, request, call_next):

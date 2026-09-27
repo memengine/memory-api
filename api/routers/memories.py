@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 import uuid
+from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from api.dependencies import get_authenticated_user_id
 from api.dependencies import get_authenticated_tenant_id
@@ -31,15 +33,21 @@ from api.dependencies import get_retriever_service
 from api.db.models import ClarificationQueue
 from api.db.models import ClarificationQueueStatus
 from api.db.models import CrossUserConflict
+from api.db.models import CrossUserConflictStatus
 from api.db.models import EdTechMemory
 from api.db.models import Tenant
 from api.db.cache import CacheService
 from api.schemas.requests import MemoryAddRequest
+from api.schemas.requests import MemoryClarificationAnswerRequest
 from api.schemas.requests import MemoryRetrieveRequest
 from api.schemas.requests import MemoryUpdateRequest
 from api.schemas.requests import RetrievalFeedbackRequest
 from api.schemas.responses import CursorPage
 from api.schemas.responses import MemoryAddResponse
+from api.schemas.responses import MemoryClarificationAnswerData
+from api.schemas.responses import MemoryClarificationAnswerResponse
+from api.schemas.responses import MemoryClarificationData
+from api.schemas.responses import MemoryClarificationOption
 from api.schemas.responses import MemoryData
 from api.schemas.responses import MemoryDeleteData
 from api.schemas.responses import MemoryDeleteResponse
@@ -56,6 +64,7 @@ from api.schemas.edtech_schemas import EdTechMemoryView
 from api.schemas.edtech_schemas import EdTechProfileResponse
 from api.errors import APIError
 from api.services.context_builder import ContextBuilder
+from api.services.conflict_resolution_service import apply_conflict_selection
 from api.services.domain_schemas.registry import get_domain_schema
 from api.services.memory_service import MemoryService
 from api.services.proxy_user_service import ProxyUserService
@@ -437,10 +446,11 @@ async def retrieve_memories(
             context_token_count += domain_token_count
     domain_ms = (time.perf_counter() - domain_started) * 1000
     clarification_started = time.perf_counter()
-    clarification_question = await _pop_next_clarification_question(
+    clarification = await _pop_next_clarification(
         session=session,
         proxy_user_id=str(proxy_user.id),
     )
+    clarification_question = clarification.question if clarification is not None else None
     clarification_ms = (time.perf_counter() - clarification_started) * 1000
     retrieval_id = None
     feedback_started = time.perf_counter()
@@ -488,6 +498,7 @@ async def retrieve_memories(
         system_prompt_addition=system_prompt_addition,
         context_token_count=context_token_count,
         clarification_question=clarification_question,
+        clarification=clarification,
         quota_mode=getattr(retriever_service, "last_quota_mode", None),
         is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
         is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",
@@ -535,6 +546,119 @@ async def record_retrieval_feedback(
     )
 
 
+@router.post(
+    "/clarifications/{clarification_id}/answer",
+    response_model=MemoryClarificationAnswerResponse,
+)
+async def answer_memory_clarification(
+    request: Request,
+    clarification_id: str,
+    payload: MemoryClarificationAnswerRequest,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+) -> MemoryClarificationAnswerResponse:
+    """Resolve a user-session conflict from the customer's existing chat flow."""
+    try:
+        parsed_id = uuid.UUID(clarification_id)
+    except ValueError as exc:
+        raise APIError(status_code=404, code="CLR_404", error="clarification_not_found") from exc
+
+    proxy_user = await proxy_user_service.find_existing(
+        tenant_id=tenant_id,
+        external_user_id=payload.external_user_id,
+    )
+    if proxy_user is None:
+        raise APIError(status_code=404, code="CLR_404", error="clarification_not_found")
+    clarification = (
+        await session.execute(
+            select(ClarificationQueue)
+            .where(
+                ClarificationQueue.id == parsed_id,
+                ClarificationQueue.tenant_id == uuid.UUID(str(tenant_id)),
+                ClarificationQueue.proxy_user_id == proxy_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if clarification is None:
+        raise APIError(status_code=404, code="CLR_404", error="clarification_not_found")
+    if clarification.expires_at <= utc_now():
+        clarification.status = ClarificationQueueStatus.expired
+        await session.commit()
+        raise APIError(status_code=409, code="CLR_409", error="clarification_expired")
+    if clarification.status == ClarificationQueueStatus.resolved:
+        raise APIError(status_code=409, code="CLR_409", error="clarification_already_resolved")
+    if clarification.status == ClarificationQueueStatus.expired:
+        raise APIError(status_code=409, code="CLR_409", error="clarification_expired")
+
+    conflict: CrossUserConflict | None = None
+    if clarification.conflict_id is not None:
+        conflict = (
+            await session.execute(
+                select(CrossUserConflict)
+                .options(
+                    selectinload(CrossUserConflict.user_a_memory),
+                    selectinload(CrossUserConflict.user_b_memory),
+                )
+                .where(
+                    CrossUserConflict.id == clarification.conflict_id,
+                    CrossUserConflict.tenant_id == uuid.UUID(str(tenant_id)),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if conflict is None:
+            raise APIError(status_code=404, code="CLR_404", error="clarification_not_found")
+        if conflict.status in {
+            CrossUserConflictStatus.resolved,
+            CrossUserConflictStatus.ignored,
+        }:
+            raise APIError(status_code=409, code="CLR_409", error="clarification_already_resolved")
+        if conflict.resolution_path != "user_session":
+            raise APIError(status_code=400, code="CLR_400", error="conflict_not_user_session")
+
+        reason = payload.free_text or {
+            "A": "User confirmed memory A in the customer chat.",
+            "B": "User confirmed memory B in the customer chat.",
+            "both": "User confirmed both memories in the customer chat.",
+            "neither": "User rejected both memories in the customer chat.",
+        }[payload.answer]
+        try:
+            await apply_conflict_selection(
+                session,
+                conflict=conflict,
+                selection=payload.answer,
+                changed_by="user",
+                reason=reason,
+            )
+        except ValueError as exc:
+            raise APIError(status_code=400, code="CLR_400", error=str(exc)) from exc
+        conflict.status = (
+            CrossUserConflictStatus.ignored
+            if payload.answer == "neither"
+            else CrossUserConflictStatus.resolved
+        )
+        conflict.resolved_at = datetime.now(UTC)
+        conflict.resolved_by = "user_session"
+        conflict.resolution = "both_valid" if payload.answer == "both" else payload.answer
+        conflict.resolution_reason = reason
+        conflict.requires_attention = False
+
+    clarification.status = ClarificationQueueStatus.resolved
+    await session.commit()
+    return MemoryClarificationAnswerResponse(
+        data=MemoryClarificationAnswerData(
+            resolved=True,
+            clarification_id=str(clarification.id),
+            conflict_id=str(conflict.id) if conflict is not None else None,
+            resolution=payload.answer,
+        ),
+        request_id=get_request_id(request),
+        timestamp=utc_now(),
+    )
+
+
 @router.get("/edtech-profile", response_model=EdTechProfileResponse)
 async def get_edtech_profile(
     request: Request,
@@ -562,13 +686,21 @@ async def get_edtech_profile(
     )
 
 
-async def _pop_next_clarification_question(
+async def _pop_next_clarification(
     *,
     session: AsyncSession,
     proxy_user_id: str,
-) -> str | None:
+) -> MemoryClarificationData | None:
     result = await session.execute(
         select(ClarificationQueue)
+        .options(
+            selectinload(ClarificationQueue.conflict).selectinload(
+                CrossUserConflict.user_a_memory
+            ),
+            selectinload(ClarificationQueue.conflict).selectinload(
+                CrossUserConflict.user_b_memory
+            ),
+        )
         .outerjoin(
             CrossUserConflict,
             ClarificationQueue.conflict_id == CrossUserConflict.id,
@@ -595,7 +727,50 @@ async def _pop_next_clarification_question(
 
     clarification.status = ClarificationQueueStatus.triggered
     await session.commit()
-    return f"Quick check: {clarification.question_context}. Has anything changed?"
+    conflict = clarification.conflict
+    options: list[MemoryClarificationOption] = []
+    if conflict is not None:
+        options.extend(
+            [
+                MemoryClarificationOption(
+                    answer="A",
+                    label=conflict.entity_value_a,
+                    memory_id=str(conflict.user_a_memory_id)
+                    if conflict.user_a_memory_id
+                    else None,
+                ),
+                MemoryClarificationOption(
+                    answer="B",
+                    label=conflict.entity_value_b,
+                    memory_id=str(conflict.user_b_memory_id)
+                    if conflict.user_b_memory_id
+                    else None,
+                ),
+                MemoryClarificationOption(answer="both", label="Both are still correct"),
+                MemoryClarificationOption(answer="neither", label="Neither is correct"),
+            ]
+        )
+    question = f"Quick check: {clarification.question_context}. Has anything changed?"
+    return MemoryClarificationData(
+        id=str(clarification.id),
+        conflict_id=str(clarification.conflict_id) if clarification.conflict_id else None,
+        question=question,
+        options=options,
+        expires_at=clarification.expires_at,
+    )
+
+
+async def _pop_next_clarification_question(
+    *,
+    session: AsyncSession,
+    proxy_user_id: str,
+) -> str | None:
+    """Backward-compatible helper for callers that only need display text."""
+    clarification = await _pop_next_clarification(
+        session=session,
+        proxy_user_id=proxy_user_id,
+    )
+    return clarification.question if clarification is not None else None
 
 
 @router.get("/{memory_id}/history")
@@ -752,6 +927,7 @@ async def get_memory_job_status(
             dead_lettered_at=datetime.fromisoformat(job["dead_lettered_at"]) if job.get("dead_lettered_at") else None,
             extraction_metadata=job.get("extraction_metadata") or {},
             proposal_ids=[str(item) for item in job.get("proposal_ids", [])],
+            created_memory_ids=[str(item) for item in job.get("result_memory_ids", [])],
             operational_metrics={
                 str(key): int(value)
                 for key, value in (job.get("operational_metrics") or {}).items()

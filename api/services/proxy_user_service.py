@@ -97,6 +97,29 @@ class ProxyUserService:
             )
         return proxy_user
 
+    async def find_existing(
+        self,
+        tenant_id: str,
+        external_user_id: str,
+    ) -> ProxyUser | None:
+        """Look up an existing tenant user without creating identity state."""
+        external_user_id_hash = self.hash_external_user_id(tenant_id, external_user_id)
+        cache_key = self._cache_key(tenant_id, external_user_id_hash)
+        proxy_user = await self._get_cached_proxy_user(cache_key)
+        if proxy_user is None:
+            proxy_user = await self._get_proxy_user_by_hash(
+                tenant_id=tenant_id,
+                external_user_id_hash=external_user_id_hash,
+            )
+            if proxy_user is not None:
+                await self._cache_proxy_user(cache_key, proxy_user)
+        if proxy_user is not None and proxy_user.is_blocked:
+            raise ProxyUserBlockedError(
+                tenant_id=tenant_id,
+                external_user_id_hash=external_user_id_hash,
+            )
+        return proxy_user
+
     async def block(self, tenant_id: str, external_user_id: str) -> bool:
         proxy_user = await self._get_proxy_user_by_hash(
             tenant_id=tenant_id,

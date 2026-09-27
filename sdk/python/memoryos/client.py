@@ -19,6 +19,8 @@ from memoryos.types import (
     EdTechProfileEnvelope,
     ExportEnvelope,
     MemoryExport,
+    MemoryClarificationAnswerEnvelope,
+    MemoryClarificationAnswerResult,
     MemoryJobStatus,
     MemoryJobStatusEnvelope,
     MemoryListEnvelope,
@@ -109,7 +111,7 @@ class Memory:
 
     def add(
         self,
-        messages: list[dict[str, str]] | list[ConversationMessage],
+        messages: list[ConversationMessage | dict[str, Any]],
         external_user_id: str,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -199,6 +201,7 @@ class Memory:
             is_degraded=quota_mode == "DEGRADED_RETRIEVE",
             circuit_status=self._circuit_status_from_response(response),
             clarification_question=parsed.clarification_question,
+            clarification=parsed.clarification,
         )
 
     def get_job_status(self, job_id: str) -> MemoryJobStatus:
@@ -253,6 +256,30 @@ class Memory:
         )
         parsed = RetrievalFeedbackEnvelope.model_validate(self._parse_json(response))
         return parsed.data
+
+    def answer_clarification(
+        self,
+        clarification_id: str,
+        *,
+        external_user_id: str,
+        answer: str,
+        free_text: str | None = None,
+    ) -> MemoryClarificationAnswerResult:
+        """Resolve a surfaced clarification after the user answers in the customer chat."""
+        if answer not in {"A", "B", "both", "neither"}:
+            raise ValueError("answer must be one of: A, B, both, neither")
+        response = self._request_response(
+            "POST",
+            f"/v1/memories/clarifications/{quote(clarification_id, safe='')}/answer",
+            json={
+                "external_user_id": external_user_id,
+                "answer": answer,
+                "free_text": free_text,
+            },
+        )
+        return MemoryClarificationAnswerEnvelope.model_validate(
+            self._parse_json(response)
+        ).data
 
     def delete(
         self,

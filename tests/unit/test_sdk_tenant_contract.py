@@ -26,6 +26,18 @@ RETRIEVE_RESPONSE = {
     "cached": False,
     "system_prompt_addition": "",
     "clarification_question": "Which plan should be current?",
+    "clarification": {
+        "id": "clarification-123",
+        "conflict_id": "conflict-123",
+        "question": "Which plan should be current?",
+        "options": [
+            {"answer": "A", "label": "Starter", "memory_id": "memory-a"},
+            {"answer": "B", "label": "Scale", "memory_id": "memory-b"},
+            {"answer": "both", "label": "Both are still correct", "memory_id": None},
+            {"answer": "neither", "label": "Neither is correct", "memory_id": None},
+        ],
+        "expires_at": "2026-08-30T00:00:00Z",
+    },
     "request_id": "request-123",
     "timestamp": "2026-08-29T00:00:00Z",
 }
@@ -46,7 +58,7 @@ def test_sync_sdk_forwards_idempotency_header_and_not_body() -> None:
         transport=httpx.MockTransport(handler),
     )
     try:
-        client.add(
+        result = client.add(
             messages=[{"role": "user", "content": "I prefer concise answers."}],
             external_user_id="customer-123",
             idempotency_key="event-123",
@@ -56,6 +68,8 @@ def test_sync_sdk_forwards_idempotency_header_and_not_body() -> None:
 
     assert captured["header"] == "event-123"
     assert "idempotency_key" not in str(captured["body"])
+    assert result.was_queued is True
+    assert result.was_stored is True
 
 
 def test_sync_sdk_sends_as_of_and_preserves_clarification() -> None:
@@ -82,6 +96,10 @@ def test_sync_sdk_sends_as_of_and_preserves_clarification() -> None:
 
     assert '"as_of":"2026-08-01T12:00:00+00:00"' in str(captured["body"])
     assert result.clarification_question == "Which plan should be current?"
+    assert result.clarification is not None
+    assert result.clarification.id == "clarification-123"
+    assert result.clarification.options[1].answer == "B"
+    assert result.clarification.options[1].memory_id == "memory-b"
 
 
 @pytest.mark.asyncio
@@ -135,6 +153,7 @@ def test_sync_sdk_waits_for_memory_job_completion() -> None:
                     "job_id": "job/123",
                     "status": "completed" if completed else "processing",
                     "memories_created": 1 if completed else 0,
+                    "created_memory_ids": ["memory-123"] if completed else [],
                     "attempts": 1,
                 }
             },
@@ -150,6 +169,88 @@ def test_sync_sdk_waits_for_memory_job_completion() -> None:
 
     assert job.succeeded is True
     assert job.memories_created == 1
+    assert job.created_memory_ids == ["memory-123"]
+
+
+def test_sync_sdk_answers_clarification_in_customer_chat() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.raw_path.decode()
+        captured["body"] = request.read().decode()
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "request-clarification-sync",
+                "timestamp": "2026-08-30T00:00:00Z",
+                "data": {
+                    "resolved": True,
+                    "clarification_id": "clarification/123",
+                    "conflict_id": "conflict-123",
+                    "resolution": "B",
+                },
+            },
+        )
+
+    client = Memory("mem_test", base_url="https://api.memoryo.dev")
+    client._client.close()
+    client._client = httpx.Client(base_url=client.base_url, transport=httpx.MockTransport(handler))
+    try:
+        result = client.answer_clarification(
+            "clarification/123",
+            external_user_id="customer-123",
+            answer="B",
+            free_text="The Scale plan is current.",
+        )
+    finally:
+        client.close()
+
+    assert captured["path"] == "/v1/memories/clarifications/clarification%2F123/answer"
+    assert '"external_user_id":"customer-123"' in str(captured["body"])
+    assert '"answer":"B"' in str(captured["body"])
+    assert result.resolved is True
+    assert result.resolution == "B"
+
+
+@pytest.mark.asyncio
+async def test_async_sdk_answers_clarification_in_customer_chat() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.raw_path.decode()
+        captured["body"] = (await request.aread()).decode()
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "request-clarification-async",
+                "timestamp": "2026-08-30T00:00:00Z",
+                "data": {
+                    "resolved": True,
+                    "clarification_id": "clarification-async",
+                    "conflict_id": None,
+                    "resolution": "neither",
+                },
+            },
+        )
+
+    client = AsyncMemory("mem_test", base_url="https://api.memoryo.dev")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client.answer_clarification(
+            "clarification-async",
+            external_user_id="customer-async",
+            answer="neither",
+        )
+    finally:
+        await client.close()
+
+    assert captured["path"] == "/v1/memories/clarifications/clarification-async/answer"
+    assert '"external_user_id":"customer-async"' in str(captured["body"])
+    assert result.resolution == "neither"
 
 
 @pytest.mark.asyncio

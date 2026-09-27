@@ -10,8 +10,9 @@ from api.routers.memories import get_memory_job_status
 
 
 class _JobStatusService:
-    def __init__(self, tenant_id: str | None) -> None:
+    def __init__(self, tenant_id: str | None, *, result_memory_ids: list[str] | None = None) -> None:
         self.tenant_id = tenant_id
+        self.result_memory_ids = result_memory_ids or []
 
     async def get_job_status(self, *, job_id: str) -> dict[str, object]:
         return {
@@ -19,6 +20,7 @@ class _JobStatusService:
             "job_id": job_id,
             "status": "queued",
             "memories_created": 0,
+            "result_memory_ids": self.result_memory_ids,
         }
 
 
@@ -42,3 +44,21 @@ async def test_job_status_hides_missing_or_foreign_tenant_ownership(
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.code == "JOB_404"
+
+
+@pytest.mark.asyncio
+async def test_job_status_returns_exact_created_memory_ids_for_own_tenant() -> None:
+    tenant_id = str(uuid.uuid4())
+    memory_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    request = SimpleNamespace(
+        state=SimpleNamespace(tenant_id=tenant_id, user_id=None, request_id="request-1"),
+        headers={},
+    )
+
+    response = await get_memory_job_status(
+        request=request,
+        job_id=uuid.uuid4(),
+        memory_service=_JobStatusService(tenant_id, result_memory_ids=memory_ids),
+    )
+
+    assert response.data.created_memory_ids == memory_ids

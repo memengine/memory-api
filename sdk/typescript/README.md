@@ -143,6 +143,15 @@ console.log(memories.items[0]?.content ?? "No memories found");
 8. Call `get()` with the same `externalUserId`.
 9. Use `retrieveResult.systemPromptAddition` only when `retrieveResult.quotaMode !== "PASSTHROUGH"`.
 10. Call `list()` to paginate stored memories.
+
+`add().wasQueued` means extraction was queued, not that storage is complete.
+Use `waitForJob()` and `job.createdMemoryIds` when you need exact created
+records. `wasStored` remains as a deprecated compatibility alias.
+
+When retrieval returns `result.clarification`, render its question in your
+existing chat and send the user's selected answer with
+`client.answerClarification(...)`. MemoryOS—not the model—validates identity,
+expiry, and the conflict transition.
 11. Call `delete()` to archive or hard-delete a memory.
 12. Call `export()` to download the user export bundle.
 13. All failures throw typed SDK errors.

@@ -125,6 +125,12 @@ class MemoryRetrieveRequest(BaseModel):
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
 
 
+class MemoryClarificationAnswerRequest(BaseModel):
+    external_user_id: str = Field(min_length=1)
+    answer: Literal["A", "B", "both", "neither"]
+    free_text: str | None = Field(default=None, max_length=2000)
+
+
 RetrievalFeedbackOutcome = Literal[
     "used_successfully",
     "used_partially",
@@ -166,8 +172,16 @@ class UserSettingsUpdateRequest(BaseModel):
 
 class ApiKeyCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    permissions: list[str] = Field(default_factory=list)
+    permissions: list[Literal["read", "write", "delete", "admin"]] = Field(
+        default_factory=lambda: ["read", "write"],
+        min_length=1,
+    )
     rate_limit_per_minute: int = Field(default=60, ge=1, le=10_000)
+
+    @field_validator("permissions")
+    @classmethod
+    def unique_permissions(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
 
 class AgentCreateRequest(BaseModel):

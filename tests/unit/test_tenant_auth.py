@@ -84,11 +84,17 @@ def build_test_app(*, session_factory: FakeSessionFactory, redis_client) -> Fast
     )
 
     @app.get("/private")
-    async def private(request: Request) -> dict[str, str | None]:
+    async def private(request: Request) -> dict[str, object]:
         return {
             "tenant_id": getattr(request.state, "tenant_id", None),
             "user_id": getattr(request.state, "user_id", None),
             "auth_scheme": getattr(request.state, "auth_scheme", None),
+            "permissions": list(getattr(request.state, "api_key_permissions", ())),
+            "rate_limit_per_minute": getattr(
+                request.state,
+                "api_key_rate_limit_per_minute",
+                None,
+            ),
         }
 
     return app
@@ -109,6 +115,8 @@ def test_valid_tenant_api_key_sets_request_state_tenant_id() -> None:
         "tenant_id": str(tenant_id),
         "user_id": None,
         "auth_scheme": "apikey",
+        "permissions": ["write"],
+        "rate_limit_per_minute": 60,
     }
 
 

@@ -174,6 +174,9 @@ export class UniversalMemoryOS {
       circuitStatus: circuitStatusFromHeaders(response.headers),
       nothingToExtract: false,
       proposalIds: [],
+      get wasQueued() {
+        return payload.status === "queued";
+      },
       get wasStored() {
         return payload.status === "queued";
       },
@@ -205,6 +208,7 @@ export class UniversalMemoryOS {
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
       clarificationQuestion: null,
+      clarification: null,
       contextTokenCount: payload.context_token_count ?? 0,
       memoriesFromHotTier: 0,
       get hasContext() {
