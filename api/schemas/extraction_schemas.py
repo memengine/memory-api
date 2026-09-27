@@ -7,6 +7,13 @@ from typing import Any
 from api.schemas.memory_schemas import ExtractedMemory
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryClarificationRequest:
+    """Server-validated request to let the user choose between stored memories."""
+
+    memory_ids: tuple[str, str]
+
+
 @dataclass(slots=True)
 class PendingExtractedMemory:
     content: str
@@ -30,7 +37,12 @@ class ExtractionResult:
     job_id: str
     memories_to_store: list[ExtractedMemory] = field(default_factory=list)
     pending_candidates: list[PendingExtractedMemory] = field(default_factory=list)
+    clarification_request: MemoryClarificationRequest | None = None
     extraction_metadata: dict[str, Any] = field(default_factory=dict)
 
 
-__all__ = ["ExtractionResult", "PendingExtractedMemory"]
+__all__ = [
+    "ExtractionResult",
+    "MemoryClarificationRequest",
+    "PendingExtractedMemory",
+]

@@ -1237,6 +1237,13 @@ def _extract_memories_for_pipeline(
                 "nothing_to_extract": result.nothing_to_extract,
                 "tokens_used": result.tokens_used,
                 "provider_used": result.provider_used,
+                "clarification_request": (
+                    {
+                        "memory_ids": list(result.clarification_request.memory_ids),
+                    }
+                    if result.clarification_request is not None
+                    else None
+                ),
                 "extraction_metadata": dict(result.extraction_metadata or {}),
             },
             False,
@@ -1486,6 +1493,9 @@ def run_extraction_pipeline(
             provenance_snapshot=provenance_snapshot or None,
             domain_schema=domain_schema_name,
         )
+        structured_clarification = dict(
+            extraction_meta.get("clarification_request") or {}
+        )
         stored_memories = resolver.check_and_store(
             extracted_memories,
             user_id=str(backing_user.id),
@@ -1494,8 +1504,32 @@ def run_extraction_pipeline(
             source_conversation_id=str(conversation.id),
             agent_id=str(agent_id) if agent_id else None,
             auto_commit=False,
-            clarification_requested=clarification_requested,
+            clarification_requested=(
+                clarification_requested and not structured_clarification
+            ),
         )
+        clarification_queued = False
+        selected_memory_ids = list(
+            structured_clarification.get("memory_ids") or []
+        )
+        if selected_memory_ids:
+            clarification_queued = resolver.queue_existing_memory_clarification(
+                memory_ids=selected_memory_ids,
+                tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+            )
+            clarification_metadata = dict(
+                (extraction_meta.get("extraction_metadata") or {}).get(
+                    "memory_clarification"
+                )
+                or {}
+            )
+            clarification_metadata["queued"] = clarification_queued
+            extraction_metadata = dict(
+                extraction_meta.get("extraction_metadata") or {}
+            )
+            extraction_metadata["memory_clarification"] = clarification_metadata
+            extraction_meta["extraction_metadata"] = extraction_metadata
 
         conversation.processing_status = ConversationProcessingStatus.done
         session.add(conversation)
@@ -1540,6 +1574,7 @@ def run_extraction_pipeline(
             "pending_candidates_promoted": int(extraction_meta.get("pending_candidates_promoted", 0) or 0),
             "nothing_to_extract": bool(extraction_meta.get("nothing_to_extract", False)),
             "conflicts_resolved": conflicts_resolved,
+            "clarification_queued": clarification_queued,
             "cross_user_conflicts_flagged": int(getattr(resolver, "last_cross_user_conflicts_flagged", 0) or 0),
             "detection_strategies_used": list(getattr(resolver, "last_detection_strategies_used", []) or []),
             "conflict_types_found": list(getattr(resolver, "last_conflict_types_found", []) or []),

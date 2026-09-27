@@ -23,6 +23,7 @@ from api.db.models import CrossUserConflict
 from api.db.models import CrossUserConflictStatus
 from api.db.models import Memory
 from api.db.models import MemoryCategory
+from api.db.models import ProxyUser
 from api.db.models import SharedContextEntityType
 from api.db.models import SharedContextSignal
 from api.infra.llm_providers.openai_provider import DEFAULT_OPENAI_EXTRACT_MODEL
@@ -543,6 +544,168 @@ class ConflictResolver:
         self.last_cross_user_conflicts_flagged = 0
         self.last_detection_strategies_used: list[str] = []
         self.last_conflict_types_found: list[str] = []
+
+    def queue_existing_memory_clarification(
+        self,
+        *,
+        memory_ids: list[str],
+        tenant_id: str,
+        proxy_user_id: str,
+    ) -> bool:
+        """Queue a user clarification between two server-owned memories.
+
+        The extraction model may select only IDs that the backend placed in its
+        bounded prompt context. This method is the final authority boundary: it
+        re-loads and locks the rows, verifies profile ownership and category,
+        and makes retries idempotent before creating any review state.
+        """
+
+        try:
+            parsed_tenant_id = uuid.UUID(str(tenant_id))
+            parsed_proxy_user_id = uuid.UUID(str(proxy_user_id))
+            parsed_memory_ids = [uuid.UUID(str(value)) for value in memory_ids]
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if len(parsed_memory_ids) != 2 or len(set(parsed_memory_ids)) != 2:
+            return False
+
+        proxy_user = self.session.get(ProxyUser, parsed_proxy_user_id)
+        if proxy_user is None or proxy_user.tenant_id != parsed_tenant_id:
+            return False
+
+        ordered_ids = sorted(parsed_memory_ids, key=str)
+        if hasattr(self.session, "execute"):
+            memory_rows = list(
+                self.session.execute(
+                    select(Memory)
+                    .where(Memory.id.in_(ordered_ids))
+                    .order_by(Memory.id)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+        else:
+            memory_rows = [
+                memory
+                for memory_id in ordered_ids
+                if (memory := self.session.get(Memory, memory_id)) is not None
+            ]
+        memories_by_id = {memory.id: memory for memory in memory_rows}
+        if set(memories_by_id) != set(ordered_ids):
+            return False
+        memories = [memories_by_id[memory_id] for memory_id in ordered_ids]
+        if any(memory.is_archived for memory in memories):
+            return False
+        if any(memory.proxy_user_id != parsed_proxy_user_id for memory in memories):
+            return False
+        if memories[0].category != memories[1].category:
+            return False
+
+        existing_conflict = self._existing_open_clarification(
+            tenant_id=parsed_tenant_id,
+            memory_ids=(ordered_ids[0], ordered_ids[1]),
+        )
+        if existing_conflict is not None:
+            return True
+
+        category = memories[0].category.value
+        entity_type = {
+            "preference": SharedContextEntityType.personal_preference,
+            "goal": SharedContextEntityType.individual_goal,
+            "expertise": SharedContextEntityType.personal_skill,
+        }.get(category, SharedContextEntityType.personal_fact)
+        conflict = CrossUserConflict(
+            tenant_id=parsed_tenant_id,
+            user_a_memory_id=memories[0].id,
+            user_b_memory_id=memories[1].id,
+            entity_type=entity_type,
+            entity_value_a=memories[0].content,
+            entity_value_b=memories[1].content,
+            status=CrossUserConflictStatus.clarification_queued,
+            auto_resolution="explicit_existing_memory_clarification",
+            auto_resolution_at=datetime.now(UTC),
+            resolution_path="user_session",
+            requires_attention=False,
+            decision_evidence=review_evidence(
+                action="USER_REVIEW",
+                reason_codes=[
+                    "explicit_user_clarification_request",
+                    "existing_memories_backend_validated",
+                    "clarification_queued",
+                ],
+                explanation=(
+                    "The user asked to choose between two active memories. "
+                    "MemoryOS verified both records belong to the same profile "
+                    "and queued the choice for the existing chat session."
+                ),
+                details={
+                    "category": category,
+                    "scope": "same_proxy_user",
+                    "memory_ids": [str(memory.id) for memory in memories],
+                },
+            ),
+        )
+        conflict.user_a_memory = memories[0]
+        conflict.user_b_memory = memories[1]
+        self.session.add(conflict)
+        if hasattr(self.session, "flush"):
+            self.session.flush()
+        _queue_user_session_clarification(
+            db_session=self.session,
+            conflict=conflict,
+            target_memory=memories[0],
+            question_context=(
+                f"{entity_type.value}: {memories[0].content} vs {memories[1].content}"
+            ),
+        )
+        self.last_cross_user_conflicts_flagged += 1
+        return True
+
+    def _existing_open_clarification(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        memory_ids: tuple[uuid.UUID, uuid.UUID],
+    ) -> CrossUserConflict | None:
+        """Return an open clarification for the unordered memory pair, if any."""
+
+        for item in getattr(self.session, "added", []):
+            if not isinstance(item, CrossUserConflict):
+                continue
+            if item.tenant_id != tenant_id or item.status not in {
+                CrossUserConflictStatus.pending,
+                CrossUserConflictStatus.clarification_queued,
+            }:
+                continue
+            if {item.user_a_memory_id, item.user_b_memory_id} == set(memory_ids):
+                return item
+        if not hasattr(self.session, "execute"):
+            return None
+        first_id, second_id = memory_ids
+        return self.session.execute(
+            select(CrossUserConflict)
+            .where(
+                CrossUserConflict.tenant_id == tenant_id,
+                CrossUserConflict.status.in_(
+                    [
+                        CrossUserConflictStatus.pending,
+                        CrossUserConflictStatus.clarification_queued,
+                    ]
+                ),
+                or_(
+                    and_(
+                        CrossUserConflict.user_a_memory_id == first_id,
+                        CrossUserConflict.user_b_memory_id == second_id,
+                    ),
+                    and_(
+                        CrossUserConflict.user_a_memory_id == second_id,
+                        CrossUserConflict.user_b_memory_id == first_id,
+                    ),
+                ),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
 
     def check_and_store(
         self,

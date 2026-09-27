@@ -99,6 +99,20 @@ class CapturingConflictResolver(FakeConflictResolver):
         CapturingConflictResolver.instance = self
 
 
+class StructuredClarificationResolver(FakeConflictResolver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.clarification_calls: list[dict[str, object]] = []
+
+    def check_and_store(self, memories, **kwargs):
+        self.calls.append({"memories": memories, **kwargs})
+        return []
+
+    def queue_existing_memory_clarification(self, **kwargs) -> bool:
+        self.clarification_calls.append(kwargs)
+        return True
+
+
 def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> None:
     proxy_user = ProxyUser(
         id=uuid.uuid4(),
@@ -345,6 +359,104 @@ def test_explicit_clarification_request_is_forwarded_to_conflict_resolver(monkey
     )
 
     assert resolver.calls[0]["clarification_requested"] is True
+
+
+def test_zero_extraction_structured_clarification_is_queued_without_new_memory(
+    monkeypatch,
+) -> None:
+    proxy_user = ProxyUser(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        external_user_id="ext-structured-clarify",
+        external_user_id_hash="hash-structured-clarify",
+        memory_count=2,
+        metadata_json={},
+        is_blocked=False,
+    )
+    session = FakeSession(proxy_user)
+    resolver = StructuredClarificationResolver()
+    backing_user = User(
+        id=uuid.uuid4(),
+        external_id=f"proxy::{proxy_user.id}",
+        email="proxy@example.test",
+        settings={},
+        memory_count=2,
+        is_active=True,
+    )
+    conversation = Conversation(
+        id=uuid.uuid4(),
+        user_id=backing_user.id,
+        message_count=1,
+        processing_status=ConversationProcessingStatus.processing,
+    )
+    selected_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_extract_memories_for_pipeline",
+        lambda *_args, **_kwargs: (
+            [],
+            {
+                "nothing_to_extract": True,
+                "clarification_request": {"memory_ids": selected_ids},
+                "extraction_metadata": {
+                    "memory_clarification": {"requested": True}
+                },
+            },
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_ensure_proxy_backing_user",
+        lambda *_args: backing_user,
+    )
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_create_source_conversation",
+        lambda *_args, **_kwargs: conversation,
+    )
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_refresh_proxy_user_memory_count",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        extraction_tasks,
+        "_invalidate_proxy_user_cache",
+        lambda *_args: None,
+    )
+
+    result = extraction_tasks.run_extraction_pipeline(
+        {
+            "job_id": "job-structured-clarify",
+            "tenant_id": str(proxy_user.tenant_id),
+            "proxy_user_id": str(proxy_user.id),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Do not decide; ask me to choose.",
+                }
+            ],
+        },
+        session_factory=FakeSessionFactory(session),
+        extractor=FakeExtractor(),
+        scorer=FakeScorer(),
+        qdrant_service=SimpleNamespace(),
+        conflict_resolver=resolver,
+        client=SimpleNamespace(),
+    )
+
+    assert resolver.calls[0]["memories"] == []
+    assert resolver.calls[0]["clarification_requested"] is False
+    assert resolver.clarification_calls == [
+        {
+            "memory_ids": selected_ids,
+            "tenant_id": str(proxy_user.tenant_id),
+            "proxy_user_id": str(proxy_user.id),
+        }
+    ]
+    assert result["memories_created"] == 0
+    assert result["clarification_queued"] is True
 
 def test_pending_candidate_similarity_allows_rephrased_reinforcement() -> None:
     existing = SimpleNamespace(content="User may prefer short replies for difficult topics")

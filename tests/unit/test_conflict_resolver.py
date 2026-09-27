@@ -12,6 +12,7 @@ from api.db.models import ClarificationQueue
 from api.db.models import CrossUserConflict
 from api.db.models import Memory
 from api.db.models import MemoryCategory
+from api.db.models import ProxyUser
 from api.db.models import VectorSyncOperation
 from api.db.models import VectorSyncOutbox
 from api.settings import get_settings
@@ -21,16 +22,25 @@ from api.services.extractor import ExtractedMemory
 
 
 class FakeSession:
-    def __init__(self, existing_memory: Memory | None = None) -> None:
+    def __init__(
+        self,
+        existing_memory: Memory | None = None,
+        proxy_user: ProxyUser | None = None,
+    ) -> None:
         self.memories: dict[str, Memory] = {}
         if existing_memory is not None:
             self.memories[str(existing_memory.id)] = existing_memory
+        self.proxy_users: dict[str, ProxyUser] = {}
+        if proxy_user is not None:
+            self.proxy_users[str(proxy_user.id)] = proxy_user
         self.added: list[object] = []
         self.commits = 0
         self.flushes = 0
 
-    def get(self, _model, _memory_id):
-        return self.memories.get(str(_memory_id))
+    def get(self, model, row_id):
+        if model is ProxyUser:
+            return self.proxy_users.get(str(row_id))
+        return self.memories.get(str(row_id))
 
     def add(self, item) -> None:
         self.added.append(item)
@@ -379,6 +389,105 @@ def test_ambiguous_same_user_preference_queues_a_self_scoped_clarification() -> 
     assert len(clarifications) == 1
     assert clarifications[0].proxy_user_id == existing.proxy_user_id
     assert clarifications[0].conflict_id == conflicts[0].id
+
+
+def test_existing_memory_clarification_is_backend_scoped_and_idempotent() -> None:
+    tenant_id = uuid.uuid4()
+    proxy_user = ProxyUser(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        external_user_id="clarification-user",
+        external_user_id_hash="clarification-user-hash",
+        metadata_json={},
+        is_blocked=False,
+    )
+    first = make_memory(
+        content="User prefers a one-line diagnosis before troubleshooting steps.",
+        category=MemoryCategory.preference,
+    )
+    second = make_memory(
+        content="User prefers detailed troubleshooting explanations.",
+        category=MemoryCategory.preference,
+    )
+    first.proxy_user_id = proxy_user.id
+    second.proxy_user_id = proxy_user.id
+    session = FakeSession(proxy_user=proxy_user)
+    session.memories[str(first.id)] = first
+    session.memories[str(second.id)] = second
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        client=MagicMock(),
+    )
+
+    assert resolver.queue_existing_memory_clarification(
+        memory_ids=[str(second.id), str(first.id)],
+        tenant_id=str(tenant_id),
+        proxy_user_id=str(proxy_user.id),
+    )
+    assert resolver.queue_existing_memory_clarification(
+        memory_ids=[str(first.id), str(second.id)],
+        tenant_id=str(tenant_id),
+        proxy_user_id=str(proxy_user.id),
+    )
+
+    conflicts = [item for item in session.added if isinstance(item, CrossUserConflict)]
+    clarifications = [item for item in session.added if isinstance(item, ClarificationQueue)]
+    assert len(conflicts) == 1
+    assert len(clarifications) == 1
+    assert conflicts[0].status.value == "clarification_queued"
+    assert conflicts[0].resolution_path == "user_session"
+    assert conflicts[0].auto_resolution == "explicit_existing_memory_clarification"
+    assert clarifications[0].proxy_user_id == proxy_user.id
+
+
+def test_existing_memory_clarification_rejects_wrong_scope_or_category() -> None:
+    tenant_id = uuid.uuid4()
+    proxy_user = ProxyUser(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        external_user_id="clarification-user",
+        external_user_id_hash="clarification-user-hash",
+        metadata_json={},
+        is_blocked=False,
+    )
+    first = make_memory(
+        content="User prefers concise explanations.",
+        category=MemoryCategory.preference,
+    )
+    second = make_memory(
+        content="User wants to ship onboarding this quarter.",
+        category=MemoryCategory.goal,
+    )
+    first.proxy_user_id = proxy_user.id
+    second.proxy_user_id = proxy_user.id
+    session = FakeSession(proxy_user=proxy_user)
+    session.memories[str(first.id)] = first
+    session.memories[str(second.id)] = second
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        client=MagicMock(),
+    )
+
+    assert not resolver.queue_existing_memory_clarification(
+        memory_ids=[str(first.id), str(second.id)],
+        tenant_id=str(tenant_id),
+        proxy_user_id=str(proxy_user.id),
+    )
+    assert not resolver.queue_existing_memory_clarification(
+        memory_ids=[str(first.id), str(first.id)],
+        tenant_id=str(tenant_id),
+        proxy_user_id=str(proxy_user.id),
+    )
+    assert not resolver.queue_existing_memory_clarification(
+        memory_ids=[str(first.id), str(uuid.uuid4())],
+        tenant_id=str(tenant_id),
+        proxy_user_id=str(proxy_user.id),
+    )
+    assert session.added == []
 
 
 def test_uncertain_classifier_result_maps_to_user_clarification() -> None:

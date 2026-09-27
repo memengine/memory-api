@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from api.db.cache import CacheService
-from api.schemas.extraction_schemas import ExtractionResult, PendingExtractedMemory
+from api.schemas.extraction_schemas import (
+    ExtractionResult,
+    MemoryClarificationRequest,
+    PendingExtractedMemory,
+)
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.evidence_policy import (
     explicit_proposal_ordinal,
@@ -397,6 +401,13 @@ class ExtractionService:
             for index, message in enumerate(indexed_messages)
             if self._messages_to_text([message]) in user_message
         }
+        visible_existing_memory_ids = {
+            str(getattr(memory, "id", "") or "")
+            for memory, line in self._bounded_existing_memory_context(
+                existing_memories or []
+            )
+            if getattr(memory, "id", None) is not None and line in user_message
+        }
         prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(
             user_message
         )
@@ -411,6 +422,9 @@ class ExtractionService:
             + prompt_context_metrics["primary_user_message_tokens"]
         )
         prompt_context_metrics["visible_turn_count"] = len(visible_turn_indexes)
+        prompt_context_metrics["existing_memories_visible"] = len(
+            visible_existing_memory_ids
+        )
         primary_started = time.perf_counter()
         response = await self.llm_service.complete(
             system_prompt=primary_system_prompt,
@@ -435,6 +449,15 @@ class ExtractionService:
                     "extracted_at": datetime.now(UTC).isoformat(),
                     "extractor_version": "structured-proposal-decision-v1",
                 },
+            )
+        )
+        clarification_request, clarification_rejection = (
+            self._resolve_memory_clarification_request(
+                normalized_response,
+                messages=indexed_messages,
+                visible_turn_indexes=visible_turn_indexes,
+                existing_memories=existing_memories or [],
+                visible_memory_ids=visible_existing_memory_ids,
             )
         )
         kept, pending, filtered_count, nothing_to_extract, rejection_counts = (
@@ -602,6 +625,7 @@ class ExtractionService:
             job_id=str(job_id or ""),
             memories_to_store=kept,
             pending_candidates=pending,
+            clarification_request=clarification_request,
             extraction_metadata={
                 "candidate_validation": {
                     "model_returned_memories": len(kept)
@@ -652,6 +676,15 @@ class ExtractionService:
                         for reason, count in rejection_counts.items()
                         if reason.startswith("proposal_")
                     },
+                },
+                "memory_clarification": {
+                    "requested": clarification_request is not None,
+                    "selected_memory_count": (
+                        len(clarification_request.memory_ids)
+                        if clarification_request is not None
+                        else 0
+                    ),
+                    "rejected_reason": clarification_rejection,
                 },
                 "prompt_context": prompt_context_metrics,
                 "primary_pass": {
@@ -914,6 +947,12 @@ class ExtractionService:
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
+            '  "memory_clarification": null or {\n'
+            '    "requested": true,\n'
+            '    "memory_ids": ["two server-provided existing-memory IDs"],\n'
+            '    "evidence_turn": "zero-based user turn index",\n'
+            '    "selection_evidence": "exact shortest substring from that user turn"\n'
+            "  },\n"
             '  "nothing_to_extract": false,\n'
             '  "extraction_notes": "optional string"\n'
             "}\n\n"
@@ -938,8 +977,15 @@ class ExtractionService:
             "such as 'the user wants to remember that ...'. Preserve the proposal's original language "
             "and reuse its key claim wording instead of translating it; the registered proposal number "
             "shown in the transcript is the server-verified ordinal.\n\n"
+            "If the user explicitly asks the assistant not to decide between two existing "
+            "memories and to ask them to choose, set memory_clarification.requested to true "
+            "and return exactly the two server-provided memory IDs. Cite the direct user turn "
+            "and copy a short exact substring that asks for the choice. Never invent an ID. This "
+            "is a request for review, not a new memory: do not copy either alternative into "
+            "the memories array. If the request or the pair is ambiguous, use null.\n\n"
             "If nothing should be extracted, return:\n"
-            '{"memories":[],"nothing_to_extract":true,"extraction_notes":"reason"}'
+            '{"memories":[],"memory_clarification":null,'
+            '"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
 
     @staticmethod
@@ -951,6 +997,12 @@ class ExtractionService:
             '    "decision": "confirmed|rejected|ambiguous|unrelated",\n'
             '    "target_ordinal": "integer proposal number or null",\n'
             '    "selection_evidence": "exact shortest substring from the user reply or null"\n'
+            "  },\n"
+            '  "memory_clarification": null or {\n'
+            '    "requested": true,\n'
+            '    "memory_ids": ["two server-provided existing-memory IDs"],\n'
+            '    "evidence_turn": "zero-based user turn index",\n'
+            '    "selection_evidence": "exact shortest substring from that user turn"\n'
             "  },\n"
             '  "memories": [\n'
             "    {\n"
@@ -997,8 +1049,15 @@ class ExtractionService:
             "not address a proposal. Do not copy a confirmed proposal into the memories array: "
             "the backend resolves its registered content. Never output transcript turn indexes as "
             "target_ordinal.\n\n"
+            "If the user explicitly asks the assistant not to decide between two existing "
+            "memories and to ask them to choose, set memory_clarification.requested to true "
+            "and return exactly the two server-provided memory IDs. Cite the direct user turn "
+            "and copy a short exact substring that asks for the choice. Never invent an ID. This "
+            "is a request for review, not a new memory: do not copy either alternative into "
+            "the memories array. If the request or the pair is ambiguous, use null.\n\n"
             "If nothing should be extracted, return:\n"
-            '{"proposal_confirmation":null,"memories":[],"nothing_to_extract":true,'
+            '{"proposal_confirmation":null,"memory_clarification":null,'
+            '"memories":[],"nothing_to_extract":true,'
             '"extraction_notes":"reason"}'
         )
 
@@ -1285,49 +1344,29 @@ class ExtractionService:
     def _append_existing_memory_context(
         self, conversation: str, existing_memories: list[Any]
     ) -> str:
-        if not existing_memories:
+        bounded = self._bounded_existing_memory_context(existing_memories)
+        if not bounded:
             return conversation
-        ranked = sorted(
-            existing_memories,
-            key=lambda memory: float(getattr(memory, "importance_score", 0.0) or 0.0),
-            reverse=True,
-        )[:MAX_EXISTING_MEMORIES]
         lines = [
             conversation,
             "",
             "Existing memories for this user (for context - do not re-extract these):",
         ]
-        used_tokens = 0
-        for memory in ranked:
-            category = getattr(
-                getattr(memory, "category", ""),
-                "value",
-                getattr(memory, "category", "unknown"),
-            )
-            content = str(getattr(memory, "content", "")).strip()
-            if content:
-                line = f"- [{category}] {content}"
-                line_tokens = self._count_tokens(line)
-                if used_tokens + line_tokens > MAX_EXISTING_MEMORY_CONTEXT_TOKENS:
-                    break
-                lines.append(line)
-                used_tokens += line_tokens
+        lines.extend(line for _memory, line in bounded)
         return "\n".join(lines)
 
-    def _prompt_context_metrics(
+    def _bounded_existing_memory_context(
         self,
-        *,
-        conversation: str,
-        before_existing_context: str,
-        after_existing_context: str,
         existing_memories: list[Any],
-    ) -> dict[str, int]:
+    ) -> list[tuple[Any, str]]:
         ranked = sorted(
             existing_memories,
-            key=lambda memory: float(getattr(memory, "importance_score", 0.0) or 0.0),
+            key=lambda memory: float(
+                getattr(memory, "importance_score", 0.0) or 0.0
+            ),
             reverse=True,
         )[:MAX_EXISTING_MEMORIES]
-        included = 0
+        bounded: list[tuple[Any, str]] = []
         used_tokens = 0
         for memory in ranked:
             content = str(getattr(memory, "content", "") or "").strip()
@@ -1338,11 +1377,29 @@ class ExtractionService:
                 "value",
                 getattr(memory, "category", "unknown"),
             )
-            line_tokens = self._count_tokens(f"- [{category}] {content}")
+            memory_id = str(getattr(memory, "id", "") or "").strip()
+            identity = (
+                f"memory_id={memory_id} category={category}"
+                if memory_id
+                else f"category={category}"
+            )
+            line = f"- [{identity}] {content}"
+            line_tokens = self._count_tokens(line)
             if used_tokens + line_tokens > MAX_EXISTING_MEMORY_CONTEXT_TOKENS:
                 break
+            bounded.append((memory, line))
             used_tokens += line_tokens
-            included += 1
+        return bounded
+
+    def _prompt_context_metrics(
+        self,
+        *,
+        conversation: str,
+        before_existing_context: str,
+        after_existing_context: str,
+        existing_memories: list[Any],
+    ) -> dict[str, int]:
+        included = len(self._bounded_existing_memory_context(existing_memories))
         before_tokens = self._count_tokens(before_existing_context)
         after_tokens = self._count_tokens(after_existing_context)
         return {
@@ -1354,6 +1411,103 @@ class ExtractionService:
             "existing_memories_available": len(existing_memories),
             "existing_memories_included": included,
         }
+
+    def _resolve_memory_clarification_request(
+        self,
+        raw_content: str,
+        *,
+        messages: list[dict[str, Any]],
+        visible_turn_indexes: set[int],
+        existing_memories: list[Any],
+        visible_memory_ids: set[str],
+    ) -> tuple[MemoryClarificationRequest | None, str | None]:
+        """Bind a model-classified review request to server-owned memories."""
+
+        try:
+            payload = json.loads(raw_content or "{}")
+        except json.JSONDecodeError:
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        decision = payload.get("memory_clarification")
+        if decision is None:
+            return None, None
+        if not isinstance(decision, dict) or decision.get("requested") is not True:
+            return None, "clarification_not_requested"
+
+        evidence_turn = decision.get("evidence_turn")
+        if isinstance(evidence_turn, bool) or not isinstance(evidence_turn, int):
+            return None, "clarification_missing_user_evidence"
+        if evidence_turn not in visible_turn_indexes or not (
+            0 <= evidence_turn < len(messages)
+        ):
+            return None, "clarification_evidence_not_visible"
+        evidence_message = messages[evidence_turn]
+        if str(evidence_message.get("role") or "").strip().lower() != "user":
+            return None, "clarification_evidence_not_user"
+        if (
+            str(evidence_message.get("source_kind") or "direct_user_input")
+            .strip()
+            .lower()
+            not in {"direct_user_input", "client_assertion"}
+        ):
+            return None, "clarification_missing_user_turn"
+        selection_evidence = decision.get("selection_evidence")
+        if not isinstance(selection_evidence, str):
+            return None, "clarification_missing_selection_evidence"
+        normalized_evidence = " ".join(
+            unicodedata.normalize("NFKC", selection_evidence).casefold().split()
+        )
+        normalized_user_text = " ".join(
+            unicodedata.normalize(
+                "NFKC", str(evidence_message.get("content") or "")
+            )
+            .casefold()
+            .split()
+        )
+        if not normalized_evidence or len(normalized_evidence) > 160:
+            return None, "clarification_invalid_selection_evidence"
+        if normalized_evidence not in normalized_user_text:
+            return None, "clarification_evidence_not_in_user_turn"
+
+        raw_ids = decision.get("memory_ids")
+        if not isinstance(raw_ids, list) or len(raw_ids) != 2:
+            return None, "clarification_requires_two_memories"
+        selected_ids = tuple(str(item).strip() for item in raw_ids)
+        if not all(selected_ids) or selected_ids[0] == selected_ids[1]:
+            return None, "clarification_requires_distinct_memories"
+
+        visible_memories = {
+            str(getattr(memory, "id", "") or ""): memory
+            for memory, _line in self._bounded_existing_memory_context(
+                existing_memories
+            )
+            if getattr(memory, "id", None) is not None
+            and str(getattr(memory, "id")) in visible_memory_ids
+        }
+        if any(memory_id not in visible_memories for memory_id in selected_ids):
+            return None, "clarification_memory_not_visible"
+        selected_memories = [visible_memories[memory_id] for memory_id in selected_ids]
+        if any(bool(getattr(memory, "is_archived", False)) for memory in selected_memories):
+            return None, "clarification_memory_archived"
+        categories = {
+            str(
+                getattr(
+                    getattr(memory, "category", ""),
+                    "value",
+                    getattr(memory, "category", ""),
+                )
+            )
+            for memory in selected_memories
+        }
+        if len(categories) != 1:
+            return None, "clarification_category_mismatch"
+        return (
+            MemoryClarificationRequest(
+                memory_ids=(selected_ids[0], selected_ids[1]),
+            ),
+            None,
+        )
 
     def _resolve_structured_proposal_confirmation(
         self,
