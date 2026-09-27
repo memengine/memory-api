@@ -47,6 +47,7 @@ from api.infra.fallbacks import on_redis_open
 from api.services.conflict_resolver import ConflictResolver
 from api.services.domain_schemas.registry import get_domain_schema
 from api.services.embedding_service import EmbeddingService
+from api.services.extraction_service import ExtractionError
 from api.services.extraction_service import ExtractionService
 from api.services.importance_scorer import ImportanceScorer
 from api.services.provenance_service import build_provenance_snapshot
@@ -199,7 +200,10 @@ def classify_error(exc: Exception | str) -> str:
         return "timeout"
     if "connection" in normalized:
         return "connection_error"
-    if "json" in normalized or isinstance(root_cause, json.JSONDecodeError):
+    if (
+        "json" in normalized
+        or isinstance(root_cause, (json.JSONDecodeError, ExtractionError))
+    ):
         return "llm_invalid_response"
     if "extraction_spec" in normalized:
         return "missing_extraction_spec"

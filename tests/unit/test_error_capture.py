@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+from api.services.extraction_service import ExtractionError
 from api.tasks.extraction_tasks import _capture_error_detail
 from api.tasks.extraction_tasks import classify_error
 
@@ -26,6 +27,13 @@ def test_classify_error_detects_timeout() -> None:
 def test_classify_error_detects_json_response_failure() -> None:
     error = json.JSONDecodeError("bad json", doc="{", pos=1)
     assert classify_error(error) == "llm_invalid_response"
+
+
+def test_classify_error_detects_extraction_contract_failure() -> None:
+    assert (
+        classify_error(ExtractionError("inconsistent empty extraction response"))
+        == "llm_invalid_response"
+    )
 
 
 def test_capture_error_detail_preserves_traceback_beginning_and_end() -> None:

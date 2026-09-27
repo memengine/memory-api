@@ -500,6 +500,106 @@ class ExtractionService:
                 rejection_counts[structured_proposal.rejected_reason] = (
                     rejection_counts.get(structured_proposal.rejected_reason, 0) + 1
                 )
+        empty_response_repair_attempted = False
+        empty_response_repair_response: Any | None = None
+        empty_response_repair_error: str | None = None
+        empty_response_repair_wall_latency_ms = 0
+        if (
+            not kept
+            and not pending
+            and clarification_request is None
+            and self._is_empty_extraction_contract_violation(normalized_response)
+        ):
+            if source_context:
+                raise ExtractionError(
+                    "LLM returned an inconsistent empty extraction response"
+                )
+            empty_response_repair_attempted = True
+            try:
+                repair_started = time.perf_counter()
+                repair_evidence_turn = next(
+                    (
+                        int(message.get("_turn_index", index))
+                        for index, message in reversed(
+                            list(enumerate(indexed_messages))
+                        )
+                        if str(message.get("role") or "").strip().lower()
+                        == "user"
+                        and str(
+                            message.get("source_kind") or "direct_user_input"
+                        )
+                        .strip()
+                        .lower()
+                        in {"direct_user_input", "client_assertion"}
+                    ),
+                    None,
+                )
+                if repair_evidence_turn is None:
+                    raise ExtractionError(
+                        "Inconsistent empty response has no eligible user evidence"
+                    )
+                repair_user_message = self._append_existing_memory_context(
+                    self._correction_recovery_user_message(indexed_messages),
+                    existing_memories or [],
+                )
+                empty_response_repair_response = await self.llm_service.complete(
+                    system_prompt=self._build_empty_response_repair_prompt(
+                        repair_evidence_turn
+                    ),
+                    user_message=repair_user_message,
+                    temperature=0.0,
+                    max_tokens=700,
+                    response_format="json",
+                )
+                empty_response_repair_wall_latency_ms = int(
+                    (time.perf_counter() - repair_started) * 1000
+                )
+                tokens_used += int(empty_response_repair_response.total_tokens or 0)
+                provider_used = (
+                    empty_response_repair_response.provider_used or provider_used
+                )
+                await self._record_provider_usage(
+                    empty_response_repair_response.provider_used
+                )
+                repair_content = empty_response_repair_response.content
+                if self._is_empty_extraction_contract_violation(repair_content):
+                    raise ExtractionError(
+                        "LLM repeated an inconsistent empty extraction response"
+                    )
+                (
+                    kept,
+                    pending,
+                    repair_filtered,
+                    nothing_to_extract,
+                    repair_rejections,
+                ) = self._parse_and_validate_response(
+                    repair_content,
+                    messages=indexed_messages,
+                    visible_turn_indexes=visible_turn_indexes,
+                    source_context=None,
+                    evidence_context={
+                        "provider": empty_response_repair_response.provider_used,
+                        "model": empty_response_repair_response.model_used,
+                        "extracted_at": datetime.now(UTC).isoformat(),
+                        "extractor_version": "empty-response-repair-v1",
+                    },
+                    proposal_context=None,
+                )
+                if not kept and not pending and not nothing_to_extract:
+                    raise ExtractionError(
+                        "LLM repair produced no valid extraction decision"
+                    )
+                filtered_count += repair_filtered
+                for reason, count in repair_rejections.items():
+                    rejection_counts[reason] = rejection_counts.get(reason, 0) + count
+            except ExtractionError:
+                empty_response_repair_error = "ExtractionError"
+                raise
+            except Exception as exc:
+                empty_response_repair_error = exc.__class__.__name__
+                raise ExtractionError(
+                    "Unable to repair inconsistent empty extraction response"
+                ) from exc
         correction_recovery_attempted = self._should_attempt_correction_recovery(
             messages=indexed_messages,
             source_context=source_context,
@@ -721,6 +821,34 @@ class ExtractionService:
                     ),
                     "wall_latency_ms": correction_recovery_wall_latency_ms,
                     "error": correction_recovery_error,
+                },
+                "empty_response_repair": {
+                    "attempted": empty_response_repair_attempted,
+                    "completed": empty_response_repair_response is not None,
+                    "provider": getattr(
+                        empty_response_repair_response, "provider_used", None
+                    ),
+                    "model": getattr(
+                        empty_response_repair_response, "model_used", None
+                    ),
+                    "input_tokens": int(
+                        getattr(empty_response_repair_response, "input_tokens", 0)
+                        or 0
+                    ),
+                    "output_tokens": int(
+                        getattr(empty_response_repair_response, "output_tokens", 0)
+                        or 0
+                    ),
+                    "total_tokens": int(
+                        getattr(empty_response_repair_response, "total_tokens", 0)
+                        or 0
+                    ),
+                    "latency_ms": int(
+                        getattr(empty_response_repair_response, "latency_ms", 0)
+                        or 0
+                    ),
+                    "wall_latency_ms": empty_response_repair_wall_latency_ms,
+                    "error": empty_response_repair_error,
                 },
                 "compositional_pass_metrics": {
                     "attempted": composition_prepass_attempted,
@@ -1084,6 +1212,46 @@ class ExtractionService:
             'For no replacement claim return {"memories":[],"nothing_to_extract":true,'
             '"extraction_notes":"no direct replacement claim"}.'
         )
+
+    @staticmethod
+    def _build_empty_response_repair_prompt(evidence_turn: int) -> str:
+        return (
+            "The previous extraction response violated the response contract by "
+            "returning no memories while claiming there was something to extract. "
+            "Re-evaluate only the supplied direct user turn. If it directly states "
+            "a durable fact, preference, goal, procedure, relationship, or expertise "
+            "claim, extract it even when it updates, contradicts, or overlaps an "
+            "existing memory; conflict resolution happens later in the backend. "
+            "Existing memories are context only and must not cause a changed claim "
+            "to be dropped. Do not infer a claim from a question or uncertainty. "
+            f"Cite user turn {evidence_turn} in evidence_turns and use "
+            "evidence_relation direct_user_statement. Return JSON only as "
+            "{\"memories\":[{\"content\":\"string\",\"category\":"
+            "\"preference|fact|goal|procedure|relationship|expertise\","
+            "\"importance_score\":7.0,\"confidence\":0.9,"
+            f"\"evidence_turns\":[{evidence_turn}],\"evidence_relation\":"
+            "\"direct_user_statement\",\"proposal_turn\":null,"
+            "\"reasoning\":\"string\"}],\"nothing_to_extract\":false}. "
+            "If there is no direct durable claim, "
+            "return exactly {\"memories\":[],\"nothing_to_extract\":true,"
+            "\"extraction_notes\":\"no direct durable claim\"}."
+        )
+
+    @staticmethod
+    def _is_empty_extraction_contract_violation(raw_content: str) -> bool:
+        try:
+            payload = json.loads(raw_content or "{}")
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("memory_clarification") is not None:
+            return False
+        if payload.get("proposal_confirmation") is not None:
+            return False
+        return payload.get("memories") == [] and payload.get(
+            "nothing_to_extract"
+        ) is False
 
     @classmethod
     def _should_attempt_correction_recovery(

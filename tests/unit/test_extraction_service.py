@@ -418,6 +418,148 @@ async def test_extract_nothing_to_extract(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inconsistent_empty_response_gets_one_bounded_repair(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        [
+            json.dumps({"memories": [], "nothing_to_extract": False}),
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "content": "User now prefers detailed incident explanations.",
+                            "category": "preference",
+                            "importance_score": 7.0,
+                            "confidence": 0.92,
+                            "evidence_turns": [0],
+                            "evidence_relation": "direct_user_statement",
+                            "proposal_turn": None,
+                            "reasoning": "The user directly changed the preference.",
+                        }
+                    ],
+                    "nothing_to_extract": False,
+                }
+            ),
+        ]
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "user",
+                "source_kind": "direct_user_input",
+                "content": "I now prefer detailed incident explanations.",
+            }
+        ],
+        proxy_user_id="proxy-repair",
+        tenant_id="tenant-repair",
+        job_id="job-repair",
+    )
+
+    assert result.memories_extracted == 1
+    assert result.memories_to_store[0].content == (
+        "User now prefers detailed incident explanations."
+    )
+    assert len(llm.calls) == 2
+    assert "violated the response contract" in str(llm.calls[1]["system_prompt"])
+    assert result.extraction_metadata["empty_response_repair"]["attempted"] is True
+    assert result.extraction_metadata["empty_response_repair"]["completed"] is True
+
+
+@pytest.mark.asyncio
+async def test_empty_response_repair_can_confirm_nothing_to_extract(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        [
+            json.dumps({"memories": [], "nothing_to_extract": False}),
+            json.dumps({"memories": [], "nothing_to_extract": True}),
+        ]
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[{"role": "user", "content": "Hello there."}],
+        proxy_user_id="proxy-repair",
+        tenant_id="tenant-repair",
+        job_id="job-repair-empty",
+    )
+
+    assert result.nothing_to_extract is True
+    assert result.memories_to_store == []
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_inconsistent_empty_response_fails_instead_of_succeeding(
+    tmp_path: Path,
+) -> None:
+    invalid = json.dumps({"memories": [], "nothing_to_extract": False})
+    service = ExtractionService(
+        llm_service=FakeLLMService([invalid, invalid]),
+        spec_path=_spec(tmp_path),
+    )
+
+    with pytest.raises(ExtractionError, match="repeated an inconsistent"):
+        await service.extract(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "I now prefer detailed incident explanations.",
+                }
+            ],
+            proxy_user_id="proxy-repair",
+            tenant_id="tenant-repair",
+            job_id="job-repair-invalid",
+        )
+
+
+@pytest.mark.asyncio
+async def test_empty_response_repair_with_no_valid_candidate_fails(
+    tmp_path: Path,
+) -> None:
+    service = ExtractionService(
+        llm_service=FakeLLMService(
+            [
+                json.dumps({"memories": [], "nothing_to_extract": False}),
+                json.dumps(
+                    {
+                        "memories": [
+                            {
+                                "content": "too short",
+                                "category": "preference",
+                                "importance_score": 7.0,
+                                "confidence": 0.9,
+                                "evidence_turns": [0],
+                                "evidence_relation": "direct_user_statement",
+                                "reasoning": "Invalid candidate.",
+                            }
+                        ],
+                        "nothing_to_extract": False,
+                    }
+                ),
+            ]
+        ),
+        spec_path=_spec(tmp_path),
+    )
+
+    with pytest.raises(ExtractionError, match="no valid extraction decision"):
+        await service.extract(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "I now prefer detailed incident explanations.",
+                }
+            ],
+            proxy_user_id="proxy-repair",
+            tenant_id="tenant-repair",
+            job_id="job-repair-no-candidate",
+        )
+
+
+@pytest.mark.asyncio
 async def test_zero_extraction_can_request_clarification_for_visible_memories(
     tmp_path: Path,
 ) -> None:
