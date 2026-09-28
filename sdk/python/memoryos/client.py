@@ -218,7 +218,12 @@ class Memory:
         timeout: float = 120.0,
         poll_interval: float = 1.0,
     ) -> MemoryJobStatus:
-        """Poll until extraction completes or fails, raising on timeout."""
+        """Poll until extraction reaches a terminal state, raising on timeout.
+
+        ``failed`` is intentionally non-terminal: the backend persists that
+        state while an automatic retry is waiting to run. Exhausted jobs end
+        in ``dead``.
+        """
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
         if poll_interval <= 0:
@@ -226,7 +231,7 @@ class Memory:
         deadline = time.monotonic() + timeout
         while True:
             job = self.get_job_status(job_id)
-            if job.status in {"completed", "failed", "dead_letter", "dead_lettered", "cancelled"}:
+            if job.status in {"completed", "dead", "dead_letter", "dead_lettered", "cancelled"}:
                 return job
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"MemoryOS job {job_id} did not finish within {timeout:g} seconds")

@@ -147,6 +147,8 @@ console.log(memories.items[0]?.content ?? "No memories found");
 `add().wasQueued` means extraction was queued, not that storage is complete.
 Use `waitForJob()` and `job.createdMemoryIds` when you need exact created
 records. `wasStored` remains as a deprecated compatibility alias.
+`waitForJob()` continues polling through the backend's retryable `failed`
+state and returns when the job completes or exhausts retries as `dead`.
 
 When retrieval returns `result.clarification`, render its question in your
 existing chat and send the user's selected answer with

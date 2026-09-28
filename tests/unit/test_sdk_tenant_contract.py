@@ -137,13 +137,15 @@ def test_sdk_defaults_use_canonical_hosted_api() -> None:
 
 def test_sync_sdk_waits_for_memory_job_completion() -> None:
     calls = 0
+    statuses = ["failed", "processing", "completed"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
         assert request.method == "GET"
         assert request.url.path == "/v1/memories/jobs/job/123"
-        completed = calls > 1
+        status = statuses[calls - 1]
+        completed = status == "completed"
         return httpx.Response(
             200,
             json={
@@ -151,7 +153,7 @@ def test_sync_sdk_waits_for_memory_job_completion() -> None:
                 "timestamp": "2026-08-30T00:00:00Z",
                 "data": {
                     "job_id": "job/123",
-                    "status": "completed" if completed else "processing",
+                    "status": status,
                     "memories_created": 1 if completed else 0,
                     "created_memory_ids": ["memory-123"] if completed else [],
                     "attempts": 1,
@@ -170,6 +172,30 @@ def test_sync_sdk_waits_for_memory_job_completion() -> None:
     assert job.succeeded is True
     assert job.memories_created == 1
     assert job.created_memory_ids == ["memory-123"]
+    assert calls == 3
+
+
+def test_sync_sdk_stops_waiting_when_job_is_dead() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "request-job-dead-sync",
+                "timestamp": "2026-08-30T00:00:00Z",
+                "data": {"job_id": "job-dead", "status": "dead", "attempts": 3},
+            },
+        )
+
+    client = Memory("mem_test", base_url="https://api.memoryo.dev")
+    client._client.close()
+    client._client = httpx.Client(base_url=client.base_url, transport=httpx.MockTransport(handler))
+    try:
+        job = client.wait_for_job("job-dead", timeout=1, poll_interval=0.001)
+    finally:
+        client.close()
+
+    assert job.status == "dead"
+    assert job.succeeded is False
 
 
 def test_sync_sdk_answers_clarification_in_customer_chat() -> None:
@@ -256,17 +282,18 @@ async def test_async_sdk_answers_clarification_in_customer_chat() -> None:
 @pytest.mark.asyncio
 async def test_async_sdk_waits_for_memory_job_completion() -> None:
     calls = 0
+    statuses = ["failed", "processing", "completed"]
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        completed = calls > 1
+        status = statuses[calls - 1]
         return httpx.Response(
             200,
             json={
                 "request_id": "request-job-async",
                 "timestamp": "2026-08-30T00:00:00Z",
-                "data": {"job_id": "job-async", "status": "completed" if completed else "queued"},
+                "data": {"job_id": "job-async", "status": status},
             },
         )
 
@@ -279,6 +306,31 @@ async def test_async_sdk_waits_for_memory_job_completion() -> None:
         await client.close()
 
     assert job.succeeded is True
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_async_sdk_stops_waiting_when_job_is_dead() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "request-job-dead-async",
+                "timestamp": "2026-08-30T00:00:00Z",
+                "data": {"job_id": "job-dead-async", "status": "dead", "attempts": 3},
+            },
+        )
+
+    client = AsyncMemory("mem_test", base_url="https://api.memoryo.dev")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url=client.base_url, transport=httpx.MockTransport(handler))
+    try:
+        job = await client.wait_for_job("job-dead-async", timeout=1, poll_interval=0.001)
+    finally:
+        await client.close()
+
+    assert job.status == "dead"
+    assert job.succeeded is False
 
 
 def test_sync_list_scopes_request_to_external_user() -> None:

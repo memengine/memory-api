@@ -1000,7 +1000,10 @@ export class MemoryOS {
       throw new Error("timeoutMs and pollIntervalMs must be positive.");
     }
     const deadline = Date.now() + timeoutMs;
-    const terminalStatuses = new Set(["completed", "failed", "dead_letter", "dead_lettered", "cancelled"]);
+    // The backend exposes `failed` while an automatic retry is waiting to run.
+    // Only an exhausted `dead` job (plus compatibility terminal spellings) is
+    // a terminal failure.
+    const terminalStatuses = new Set(["completed", "dead", "dead_letter", "dead_lettered", "cancelled"]);
     while (true) {
       const job = await this.getJobStatus(jobId);
       if (terminalStatuses.has(job.status)) {

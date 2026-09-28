@@ -113,15 +113,17 @@ test("get sends asOf and preserves structured clarification", async () => {
 
 test("getJobStatus and waitForJob expose the asynchronous write lifecycle", async () => {
   let calls = 0;
+  const statuses = ["queued", "failed", "processing", "completed"];
   const fetchImpl = async (url, init) => {
     calls += 1;
     assert.match(url, /\/v1\/memories\/jobs\/job%2F123$/);
     assert.equal(init.method, "GET");
-    const completed = calls > 1;
+    const status = statuses[calls - 1];
+    const completed = status === "completed";
     return new Response(JSON.stringify({
       data: {
         job_id: "job/123",
-        status: completed ? "completed" : "processing",
+        status,
         memories_created: completed ? 1 : 0,
         attempts: 1,
         proposal_ids: ["proposal-1"],
@@ -140,6 +142,18 @@ test("getJobStatus and waitForJob expose the asynchronous write lifecycle", asyn
   assert.equal(completed.succeeded, true);
   assert.equal(completed.memoriesCreated, 1);
   assert.deepEqual(completed.createdMemoryIds, ["memory-123"]);
+  assert.equal(calls, 4);
+});
+
+test("waitForJob stops when retries are exhausted", async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({
+    data: { job_id: "job-dead", status: "dead", attempts: 3 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const client = new MemoryOS("mem_test", MemoryOS.DEFAULT_BASE_URL, 30_000, fetchImpl);
+
+  const job = await client.waitForJob("job-dead", { timeoutMs: 100, pollIntervalMs: 1 });
+  assert.equal(job.status, "dead");
+  assert.equal(job.succeeded, false);
 });
 
 test("answerClarification resolves through the tenant API", async () => {

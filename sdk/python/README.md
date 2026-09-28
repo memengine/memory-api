@@ -94,6 +94,8 @@ elif result.status == "blocked":
 `was_stored` remains as a deprecated compatibility alias. A queued request is
 not confirmed storage; call `wait_for_job()` and inspect
 `job.created_memory_ids` when you need the exact records created.
+`wait_for_job()` continues polling through the backend's retryable `failed`
+state and returns when the job completes or exhausts retries as `dead`.
 
 When retrieval returns `result.clarification`, show its question in your
 existing chat and send the user's answer back with
