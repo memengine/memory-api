@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
@@ -88,6 +89,7 @@ class StubMemoryService:
     async def get_job_status(self, **kwargs):
         return {
             "job_id": kwargs["job_id"],
+            "tenant_id": "11111111-1111-1111-1111-111111111111",
             "status": "queued",
             "memories_created": 0,
             "attempts": 1,
@@ -252,6 +254,9 @@ class StubAgentService:
 
 
 class StubWebhookService:
+    def _verify_svix_signature(self, **_kwargs) -> None:
+        return None
+
     async def verify_and_process(self, **kwargs):
         return True
 
@@ -373,7 +378,18 @@ def build_test_client(monkeypatch, *, bypass_auth_enabled: bool) -> TestClient:
     circuit_registry = StubCircuitRegistry()
     monkeypatch.setattr("api.main.CircuitBreakerRegistry.reset", lambda: circuit_registry)
     monkeypatch.setattr("api.main.CircuitBreakerRegistry.get_instance", lambda: circuit_registry)
+
+    async def probe_postgres(_session_factory) -> None:
+        return None
+
+    monkeypatch.setattr("api.main.probe_async_session_factory", probe_postgres)
     app = create_app()
+
+    @asynccontextmanager
+    async def isolated_lifespan(_app):
+        yield
+
+    app.router.lifespan_context = isolated_lifespan
     app.state.circuit_breakers = circuit_registry
     app.state.qdrant_service = object()
     app.state.cache_service = object()
@@ -533,7 +549,13 @@ def test_auth_blocks_protected_endpoints_and_allows_public_ones(monkeypatch) -> 
             "/v1/agents": client.get("/v1/agents").status_code,
         }
 
-    assert all(status == 200 for status in public_results.values())
+    assert public_results == {
+        "/health": 200,
+        "/docs": 200,
+        "/redoc": 200,
+        "/openapi.json": 200,
+        "/v1/webhooks/clerk": 200,
+    }
     assert all(status == 401 for status in protected_results.values())
 
     with build_test_client(monkeypatch, bypass_auth_enabled=False) as client:

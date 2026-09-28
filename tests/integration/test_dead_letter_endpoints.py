@@ -66,6 +66,16 @@ def test_dead_letter_list_and_retry(monkeypatch) -> None:
     sent_tasks = []
     monkeypatch.setattr("api.routers.internal.celery_app.send_task", lambda *args, **kwargs: sent_tasks.append((args, kwargs)))
 
+    async def reserve_slot(_self, *, tenant_id: str, job_id: str):
+        return SimpleNamespace(
+            tenant_id=tenant_id,
+            queue_name="starter-extraction",
+            plan_tier="starter",
+            queue_limit=50,
+        )
+
+    monkeypatch.setattr("api.routers.internal.QueueRouter.reserve_extraction_slot", reserve_slot)
+
     job = SimpleNamespace(
         id=uuid.uuid4(),
         tenant_id=uuid.UUID("11111111-1111-1111-1111-111111111111"),

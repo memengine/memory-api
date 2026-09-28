@@ -57,6 +57,16 @@ def build_dead_letter_app(monkeypatch, job):
     sent_tasks = []
     monkeypatch.setattr("api.routers.internal.celery_app.send_task", lambda *args, **kwargs: sent_tasks.append((args, kwargs)))
 
+    async def reserve_slot(_self, *, tenant_id: str, job_id: str):
+        return SimpleNamespace(
+            tenant_id=tenant_id,
+            queue_name="starter-extraction",
+            plan_tier="starter",
+            queue_limit=50,
+        )
+
+    monkeypatch.setattr("api.routers.internal.QueueRouter.reserve_extraction_slot", reserve_slot)
+
     cache_service = CacheService(client=fakeredis.aioredis.FakeRedis(decode_responses=True))
     import asyncio
     asyncio.run(cache_service.client.set("tenant:11111111-1111-1111-1111-111111111111:plan", "starter", ex=300))
