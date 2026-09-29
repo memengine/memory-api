@@ -1,5 +1,5 @@
 {
-  "version": "phase0-v1",
+  "version": "phase0-v2",
   "scenarios": [
     {
       "id": "uncertain_programming_language_change",
@@ -19,30 +19,34 @@
       "verification_query": "Show me a short programming example.",
       "expected": {
         "clarification_required": true,
+        "require_initial_memory": true,
         "must_include_any": ["c++"],
         "must_exclude_all": ["python"]
       }
     },
     {
-      "id": "exam_date_correction",
+      "id": "project_name_correction",
       "initial_messages": [
         {
           "role": "user",
-          "content": "My exam is on October 10."
+          "content": "The software project I am actively building is named Atlas."
         }
       ],
-      "warm_query": "When is my exam?",
+      "warm_query": "What is the software project I am actively building called?",
       "update_messages": [
         {
           "role": "user",
-          "content": "Correction: my exam moved from October 10 to October 18."
+          "content": "Correction: the software project I am actively building was renamed from Atlas to Nova."
         }
       ],
-      "verification_query": "When is my exam?",
+      "verification_query": "What is the software project I am actively building called?",
       "expected": {
         "clarification_required": false,
-        "must_include_any": ["october 18"],
-        "must_exclude_all": ["october 10"]
+        "require_initial_memory": true,
+        "exclude_initial_memory": true,
+        "allow_empty_immediate": true,
+        "must_include_any": ["nova"],
+        "must_exclude_all": []
       }
     }
   ]

@@ -24,6 +24,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = Path(__file__).with_name("fixtures") / "governed_memory_phase0_v1.json"
+DEFAULT_FIXTURE_VERSION = "phase0-v2"
 DEFAULT_BASE_URL = "https://api.memoryo.dev"
 TERMINAL_JOB_STATUSES = {"blocked", "completed", "dead", "dead_letter", "error", "failed"}
 
@@ -62,6 +63,7 @@ def build_add_payload(
     external_user_id: str,
     conversation_id: str,
     phase: str,
+    fixture_version: str = DEFAULT_FIXTURE_VERSION,
 ) -> dict[str, Any]:
     messages_field = "initial_messages" if phase == "initial" else "update_messages"
     return {
@@ -71,7 +73,7 @@ def build_add_payload(
         "evidence_mode": "conversation_evidence",
         "metadata": {
             "traffic_class": "synthetic_phase0_characterization",
-            "fixture_version": "phase0-v1",
+            "fixture_version": fixture_version,
             "scenario_id": scenario["id"],
             "phase": phase,
         },
@@ -90,7 +92,11 @@ def build_retrieve_payload(
 
 
 def evaluate_retrieval(
-    response: dict[str, Any], expected: dict[str, Any], *, check_clarification: bool = True
+    response: dict[str, Any],
+    expected: dict[str, Any],
+    *,
+    check_clarification: bool = True,
+    excluded_memory_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     raw_memories = response.get("data")
     memories: list[dict[str, Any]] = (
@@ -101,11 +107,18 @@ def evaluate_retrieval(
     searchable = "\n".join(str(item.get("content") or "") for item in memories).lower()
     include_terms = [str(item).lower() for item in expected.get("must_include_any", [])]
     exclude_terms = [str(item).lower() for item in expected.get("must_exclude_all", [])]
+    memory_ids = {
+        str(item.get("id") or "") for item in memories if str(item.get("id") or "")
+    }
     clarification_present = bool(response.get("clarification"))
     checks: dict[str, bool] = {
         "required_value": not include_terms or any(term in searchable for term in include_terms),
         "superseded_value_absent": not any(term in searchable for term in exclude_terms),
     }
+    if excluded_memory_ids:
+        checks["superseded_memory_absent"] = memory_ids.isdisjoint(
+            excluded_memory_ids
+        )
     if check_clarification:
         checks["clarification"] = clarification_present == bool(
             expected.get("clarification_required")
@@ -116,6 +129,7 @@ def evaluate_retrieval(
         "observed": {
             "clarification_present": clarification_present,
             "memory_count": len(memories),
+            "memory_ids": sorted(memory_ids),
             "matched_required_terms": [term for term in include_terms if term in searchable],
             "matched_excluded_terms": [term for term in exclude_terms if term in searchable],
         },
@@ -123,12 +137,26 @@ def evaluate_retrieval(
 
 
 def evaluate_scenario(
-    immediate: dict[str, Any], settled: dict[str, Any], expected: dict[str, Any]
+    immediate: dict[str, Any],
+    settled: dict[str, Any],
+    expected: dict[str, Any],
+    *,
+    initial_memory_ids: set[str] | None = None,
 ) -> dict[str, Any]:
+    initial_ids = set(initial_memory_ids or set())
+    excluded_ids = initial_ids if expected.get("exclude_initial_memory") else set()
     immediate_state = evaluate_retrieval(
-        immediate, expected, check_clarification=False
+        immediate,
+        expected,
+        check_clarification=False,
+        excluded_memory_ids=excluded_ids,
     )
-    settled_state = evaluate_retrieval(settled, expected, check_clarification=False)
+    settled_state = evaluate_retrieval(
+        settled,
+        expected,
+        check_clarification=False,
+        excluded_memory_ids=excluded_ids,
+    )
     clarification_observations = [
         bool(immediate.get("clarification")),
         bool(settled.get("clarification")),
@@ -139,11 +167,19 @@ def evaluate_scenario(
         if clarification_required
         else not any(clarification_observations)
     )
-    checks = {
-        "immediate_memory_state": immediate_state["passed"],
+    immediate_empty_is_safe = bool(expected.get("allow_empty_immediate")) and (
+        immediate_state["observed"]["memory_count"] == 0
+        and not immediate_state["observed"]["clarification_present"]
+    )
+    checks: dict[str, bool] = {
+        "immediate_memory_state": (
+            immediate_state["passed"] or immediate_empty_is_safe
+        ),
         "settled_memory_state": settled_state["passed"],
-        "clarification_delivered_at_least_once": clarification_check,
+        "clarification_policy_satisfied": clarification_check,
     }
+    if expected.get("require_initial_memory"):
+        checks["initial_memory_created"] = bool(initial_ids)
     return {
         "passed": all(checks.values()),
         "checks": checks,
@@ -151,6 +187,15 @@ def evaluate_scenario(
         "immediate": immediate_state,
         "settled": settled_state,
     }
+
+
+def created_memory_ids(add_result: dict[str, Any]) -> set[str]:
+    terminal = add_result.get("terminal")
+    job = terminal.get("job") if isinstance(terminal, dict) else None
+    raw_ids = job.get("created_memory_ids") if isinstance(job, dict) else None
+    if not isinstance(raw_ids, list):
+        return set()
+    return {str(item) for item in raw_ids if str(item).strip()}
 
 
 def _request_identity(response: httpx.Response, body: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +324,7 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                     external_user_id=external_user_id,
                     conversation_id=conversation_id,
                     phase="initial",
+                    fixture_version=str(fixture["version"]),
                 ),
                 idempotency_key=f"phase0:{run_id}:{scenario_id}:initial",
                 poll_seconds=args.poll_seconds,
@@ -298,6 +344,7 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                     external_user_id=external_user_id,
                     conversation_id=conversation_id,
                     phase="update",
+                    fixture_version=str(fixture["version"]),
                 ),
                 idempotency_key=f"phase0:{run_id}:{scenario_id}:update",
                 poll_seconds=args.poll_seconds,
@@ -315,6 +362,13 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 external_user_id=external_user_id,
                 query=scenario["verification_query"],
             )
+            initial_memory_ids = created_memory_ids(initial)
+            scenario_evaluation = evaluate_scenario(
+                immediate,
+                settled,
+                scenario["expected"],
+                initial_memory_ids=initial_memory_ids,
+            )
             record = {
                 "scenario_id": scenario_id,
                 "external_user_id": external_user_id,
@@ -326,24 +380,27 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "settled_retrieval": settled,
                 "immediate_evaluation": evaluate_retrieval(immediate, scenario["expected"]),
                 "settled_evaluation": evaluate_retrieval(settled, scenario["expected"]),
-                "scenario_evaluation": evaluate_scenario(
-                    immediate, settled, scenario["expected"]
-                ),
+                "scenario_evaluation": scenario_evaluation,
             }
             artifact["scenarios"].append(record)
             print(
-                f"{scenario_id}: immediate={record['immediate_evaluation']['passed']} "
-                f"settled={record['settled_evaluation']['passed']}"
+                f"{scenario_id}: scenario={scenario_evaluation['passed']} "
+                f"immediate_state={scenario_evaluation['checks']['immediate_memory_state']} "
+                f"settled_state={scenario_evaluation['checks']['settled_memory_state']}"
             )
 
     artifact["completed_at"] = datetime.now(UTC).isoformat()
     artifact["summary"] = {
         "scenario_count": len(artifact["scenarios"]),
         "immediate_passed": sum(
-            1 for item in artifact["scenarios"] if item["immediate_evaluation"]["passed"]
+            1
+            for item in artifact["scenarios"]
+            if item["scenario_evaluation"]["checks"]["immediate_memory_state"]
         ),
         "settled_passed": sum(
-            1 for item in artifact["scenarios"] if item["settled_evaluation"]["passed"]
+            1
+            for item in artifact["scenarios"]
+            if item["scenario_evaluation"]["checks"]["settled_memory_state"]
         ),
         "scenarios_passed": sum(
             1 for item in artifact["scenarios"] if item["scenario_evaluation"]["passed"]
