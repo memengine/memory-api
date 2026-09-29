@@ -566,12 +566,6 @@ variable "phase3a_confirmation_shadow_enabled" {
   default     = false
 }
 
-variable "claim_semantics_shadow_enabled" {
-  description = "Observe validated claim semantics in extraction job metadata without changing memory writes."
-  type        = bool
-  default     = false
-}
-
 variable "embedding_provider" {
   description = "Embedding provider used by the memory retriever."
   type        = string

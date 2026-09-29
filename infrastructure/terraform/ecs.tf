@@ -191,7 +191,6 @@ locals {
     { name = "MEMORY_PASSPORT_ENABLED", value = tostring(var.memory_passport_enabled) },
     { name = "PHASE3A_CONFIRMATION_ENABLED", value = tostring(var.phase3a_confirmation_enabled) },
     { name = "PHASE3A_CONFIRMATION_SHADOW_ENABLED", value = tostring(var.phase3a_confirmation_shadow_enabled) },
-    { name = "CLAIM_SEMANTICS_SHADOW_ENABLED", value = tostring(var.claim_semantics_shadow_enabled) },
     { name = "EMBEDDING_PROVIDER", value = var.embedding_provider },
     { name = "EMBEDDING_MODEL", value = var.embedding_model },
     { name = "EMBEDDING_MODEL_ID", value = var.embedding_model_id },

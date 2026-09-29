@@ -18,12 +18,6 @@ from api.schemas.extraction_schemas import (
     PendingExtractedMemory,
 )
 from api.schemas.memory_schemas import ExtractedMemory
-from api.services.claim_semantics_shadow import (
-    SCHEMA_VERSION as CLAIM_SEMANTICS_SCHEMA_VERSION,
-)
-from api.services.claim_semantics_shadow import (
-    observe_claim_semantics,
-)
 from api.services.evidence_policy import (
     explicit_proposal_ordinal,
     has_explicit_proposal_denial,
@@ -251,7 +245,6 @@ class ExtractionService:
         app_env: str | None = None,
         importance_shadow_service: Any | None = None,
         proposal_confirmation_enabled: bool | None = None,
-        claim_semantics_shadow_enabled: bool | None = None,
     ) -> None:
         self.client = client
         self.llm_service = llm_service or LLMService(
@@ -270,7 +263,6 @@ class ExtractionService:
                 importance_shadow_enabled is None
                 or app_env is None
                 or proposal_confirmation_enabled is None
-                or claim_semantics_shadow_enabled is None
             )
             else None
         )
@@ -296,11 +288,6 @@ class ExtractionService:
             settings.phase3a_confirmation_enabled
             if proposal_confirmation_enabled is None and settings is not None
             else bool(proposal_confirmation_enabled)
-        )
-        self._claim_semantics_shadow_enabled = (
-            settings.claim_semantics_shadow_enabled
-            if claim_semantics_shadow_enabled is None and settings is not None
-            else bool(claim_semantics_shadow_enabled)
         )
         resolved_spec_path = (
             Path(spec_path) if spec_path is not None else self._default_spec_path()
@@ -474,37 +461,6 @@ class ExtractionService:
                 visible_memory_ids=visible_existing_memory_ids,
             )
         )
-        claim_semantics_shadow: dict[str, Any] | None = None
-        if self._claim_semantics_shadow_enabled:
-            try:
-                claim_semantics_shadow = observe_claim_semantics(
-                    normalized_response,
-                    messages=indexed_messages,
-                    visible_turn_indexes=visible_turn_indexes,
-                    visible_memory_ids=visible_existing_memory_ids,
-                    source_context=source_context,
-                )
-            except Exception as exc:  # noqa: BLE001 - shadow path must fail open.
-                claim_semantics_shadow = {
-                    "enabled": True,
-                    "schema_version": CLAIM_SEMANTICS_SCHEMA_VERSION,
-                    "model_returned": 0,
-                    "accepted": 0,
-                    "rejected": 0,
-                    "rejection_counts": {},
-                    "observations": [],
-                    "error": exc.__class__.__name__,
-                }
-                LOGGER.warning(
-                    "claim_semantics_shadow_failed",
-                    extra={
-                        "event": "claim_semantics_shadow_failed",
-                        "tenant_id": tenant_id,
-                        "proxy_user_id": resolved_user_id,
-                        "job_id": job_id,
-                        "error": exc.__class__.__name__,
-                    },
-                )
         kept, pending, filtered_count, nothing_to_extract, rejection_counts = (
             self._parse_and_validate_response(
                 normalized_response,
@@ -831,11 +787,6 @@ class ExtractionService:
                     ),
                     "rejected_reason": clarification_rejection,
                 },
-                **(
-                    {"claim_semantics_shadow": claim_semantics_shadow}
-                    if claim_semantics_shadow is not None
-                    else {}
-                ),
                 "prompt_context": prompt_context_metrics,
                 "primary_pass": {
                     "provider": response.provider_used,
@@ -1089,8 +1040,6 @@ class ExtractionService:
             "preferences remain eligible even when they appear after an unrelated question or request.\n\n"
             f"{response_contract}"
         )
-        if self._claim_semantics_shadow_enabled:
-            prompt += self._claim_semantics_shadow_contract()
         if source_context:
             prompt += (
                 "\n\nAUTHENTICATED SERVICE EVENT MODE\n"
@@ -1112,47 +1061,16 @@ class ExtractionService:
         return prompt
 
     def _primary_response_format(self) -> str | JSONSchemaResponseFormat:
-        if not self._claim_semantics_shadow_enabled:
-            return "json"
         return JSONSchemaResponseFormat(
-            name="memory_extraction_claim_semantics_v1",
+            name="memory_extraction_v1",
             schema=build_extraction_response_schema(
                 proposal_confirmation_enabled=self._proposal_confirmation_enabled,
-                claim_semantics_shadow_enabled=True,
             ),
-        )
-
-    @staticmethod
-    def _claim_semantics_shadow_contract() -> str:
-        return (
-            "\n\nCLAIM SEMANTICS SHADOW CONTRACT\n"
-            "The top-level claim_semantics_shadow field shown in the exact response shape is "
-            "required in every response and may contain at most 8 items. Use an empty list only "
-            "when the transcript contains no governable claim observation. It is diagnostic only "
-            "and never authorizes writes. Include uncertain changes, retractions, corrections, "
-            "and useful bounded facts even when they are omitted from memories. Each item must contain: "
-            "memory_index (matching memories index or null); category; "
-            "predicate (language-neutral lowercase claim.slot); value; "
-            "speech_act (assertion|correction|retraction|uncertain_change|reaffirmation); "
-            "certainty (certain|uncertain); temporal_kind (permanent|bounded|unknown); "
-            "effective_from and effective_until (timezone-aware ISO-8601 or null); "
-            "evidence_turns; evidence_quote (shortest exact quote from a cited user turn); "
-            "and target_memory_ids (zero to four exact memory_id values from the provided existing-memory "
-            "context). Never invent a target ID. Use targets only for corrections, retractions, uncertain "
-            "changes, or reaffirmations that refer to those existing claims. A correction replaces a prior "
-            "state, a retraction withdraws it, an uncertain_change considers a replacement without deciding, "
-            "and a reaffirmation explicitly keeps it. These meanings apply across languages and do not depend "
-            "on exact trigger words. Assertions introduce a claim and must use an empty target list. "
-            "Predicates must name both the domain and stable attribute; avoid generic labels such as date, "
-            "name, likes, knows, or preference. "
-            "The server verifies user roles and the quote. Uncertain replacements are not current "
-            "assertions. Bounded claims require effective_until."
         )
 
     def _legacy_response_contract(self) -> str:
         """Keep disabled Phase 3A extraction behavior prompt-compatible."""
 
-        shadow_field, empty_shadow_field = self._claim_semantics_shadow_shape_fields()
         return (
             "Return exactly this JSON shape:\n"
             "{\n"
@@ -1174,7 +1092,6 @@ class ExtractionService:
             '    "evidence_turn": "zero-based user turn index",\n'
             '    "selection_evidence": "exact shortest substring from that user turn"\n'
             "  },\n"
-            f"{shadow_field}"
             '  "nothing_to_extract": false,\n'
             '  "extraction_notes": "optional string"\n'
             "}\n\n"
@@ -1207,12 +1124,10 @@ class ExtractionService:
             "the memories array. If the request or the pair is ambiguous, use null.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"memory_clarification":null,'
-            f"{empty_shadow_field}"
             '"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
 
     def _structured_proposal_response_contract(self) -> str:
-        shadow_field, empty_shadow_field = self._claim_semantics_shadow_shape_fields()
         return (
             "Return exactly this JSON shape:\n"
             "{\n"
@@ -1239,7 +1154,6 @@ class ExtractionService:
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
-            f"{shadow_field}"
             '  "nothing_to_extract": false,\n'
             '  "extraction_notes": "optional string"\n'
             "}\n\n"
@@ -1282,17 +1196,8 @@ class ExtractionService:
             "If nothing should be extracted, return:\n"
             '{"proposal_confirmation":null,"memory_clarification":null,'
             '"memories":[],'
-            f"{empty_shadow_field}"
             '"nothing_to_extract":true,'
             '"extraction_notes":"reason"}'
-        )
-
-    def _claim_semantics_shadow_shape_fields(self) -> tuple[str, str]:
-        if not self._claim_semantics_shadow_enabled:
-            return "", ""
-        return (
-            '  "claim_semantics_shadow": [claim-semantic objects defined below],\n',
-            '"claim_semantics_shadow":[claim-semantic objects or empty when no governable claim],',
         )
 
     @staticmethod

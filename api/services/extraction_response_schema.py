@@ -15,7 +15,6 @@ CATEGORIES = [
 def build_extraction_response_schema(
     *,
     proposal_confirmation_enabled: bool,
-    claim_semantics_shadow_enabled: bool,
 ) -> dict[str, Any]:
     """Build the strict primary-extraction response schema.
 
@@ -54,13 +53,6 @@ def build_extraction_response_schema(
     }
     required.extend(["memory_clarification", "memories"])
 
-    if claim_semantics_shadow_enabled:
-        properties["claim_semantics_shadow"] = {
-            "type": "array",
-            "items": _claim_semantics_item_schema(),
-        }
-        required.append("claim_semantics_shadow")
-
     properties["nothing_to_extract"] = {"type": "boolean"}
     properties["extraction_notes"] = {"type": ["string", "null"]}
     required.extend(["nothing_to_extract", "extraction_notes"])
@@ -87,48 +79,6 @@ def _memory_item_schema(*, proposal_confirmation_enabled: bool) -> dict[str, Any
         "evidence_relation": {"type": "string", "enum": evidence_relations},
         "proposal_turn": {"type": ["integer", "null"]},
         "reasoning": {"type": "string"},
-    }
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": list(properties),
-        "additionalProperties": False,
-    }
-
-
-def _claim_semantics_item_schema() -> dict[str, Any]:
-    properties = {
-        "memory_index": {"type": ["integer", "null"]},
-        "category": {"type": "string", "enum": CATEGORIES},
-        "predicate": {
-            "type": "string",
-            "pattern": r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
-        },
-        "value": {"type": "string"},
-        "speech_act": {
-            "type": "string",
-            "enum": [
-                "assertion",
-                "correction",
-                "retraction",
-                "uncertain_change",
-                "reaffirmation",
-            ],
-        },
-        "certainty": {"type": "string", "enum": ["certain", "uncertain"]},
-        "temporal_kind": {
-            "type": "string",
-            "enum": ["permanent", "bounded", "unknown"],
-        },
-        "effective_from": {"type": ["string", "null"]},
-        "effective_until": {"type": ["string", "null"]},
-        "evidence_turns": {"type": "array", "items": {"type": "integer"}},
-        "evidence_quote": {"type": "string"},
-        "target_memory_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 4,
-        },
     }
     return {
         "type": "object",
