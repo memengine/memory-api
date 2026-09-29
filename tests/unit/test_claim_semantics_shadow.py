@@ -45,6 +45,9 @@ def test_observer_accepts_bounded_claim_and_hashes_value() -> None:
         "maybe python should replace c++"
     )
     assert "evidence_quote" not in observation
+    assert observation["binding_status"] == "unbound"
+    assert observation["recommended_write_action"] == "hold_pending"
+    assert observation["candidate_write_would_be_blocked"] is False
 
 
 def test_observer_accepts_timezone_aware_bounded_fact() -> None:
@@ -202,3 +205,109 @@ def test_observer_reports_invalid_field_type_without_recording_content() -> None
 
     assert result["accepted"] == 0
     assert result["rejection_counts"] == {"invalid_value_type": 1}
+
+
+def test_observer_binds_correction_only_to_server_visible_memory() -> None:
+    memory_id = "11111111-1111-1111-1111-111111111111"
+    result = observe_claim_semantics(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User now prefers Python.",
+                    }
+                ],
+                "claim_semantics_shadow": [
+                    {
+                        "memory_index": 0,
+                        "category": "preference",
+                        "predicate": "programming.default_language",
+                        "value": "Python",
+                        "speech_act": "correction",
+                        "certainty": "certain",
+                        "temporal_kind": "permanent",
+                        "effective_from": None,
+                        "effective_until": None,
+                        "evidence_turns": [0],
+                        "evidence_quote": "Python should replace C++",
+                        "target_memory_ids": [memory_id],
+                    }
+                ],
+            }
+        ),
+        messages=[{"role": "user", "content": "Python should replace C++."}],
+        visible_turn_indexes={0},
+        visible_memory_ids={memory_id},
+    )
+
+    assert result["accepted"] == 1
+    observation = result["observations"][0]
+    assert observation["target_memory_ids"] == [memory_id]
+    assert observation["binding_status"] == "bound"
+    assert observation["recommended_write_action"] == "resolve_existing_claim"
+    assert observation["candidate_write_would_be_blocked"] is True
+
+
+def test_observer_rejects_model_invented_target_memory() -> None:
+    result = observe_claim_semantics(
+        json.dumps(
+            {
+                "memories": [],
+                "claim_semantics_shadow": [
+                    {
+                        "memory_index": None,
+                        "category": "preference",
+                        "predicate": "programming.default_language",
+                        "value": "Python",
+                        "speech_act": "correction",
+                        "certainty": "certain",
+                        "temporal_kind": "permanent",
+                        "effective_from": None,
+                        "effective_until": None,
+                        "evidence_turns": [0],
+                        "evidence_quote": "Python replaces C++",
+                        "target_memory_ids": ["99999999-9999-9999-9999-999999999999"],
+                    }
+                ],
+            }
+        ),
+        messages=[{"role": "user", "content": "Python replaces C++."}],
+        visible_turn_indexes={0},
+        visible_memory_ids=set(),
+    )
+
+    assert result["accepted"] == 0
+    assert result["rejection_counts"] == {"unavailable_target_memory": 1}
+
+
+def test_certain_assertion_remains_shadow_allowed_without_changing_write_path() -> None:
+    result = observe_claim_semantics(
+        json.dumps(
+            {
+                "memories": [{"content": "User's exam is October 18."}],
+                "claim_semantics_shadow": [
+                    {
+                        "memory_index": 0,
+                        "category": "fact",
+                        "predicate": "education.exam_date",
+                        "value": "2026-10-18",
+                        "speech_act": "assertion",
+                        "certainty": "certain",
+                        "temporal_kind": "bounded",
+                        "effective_from": None,
+                        "effective_until": "2026-10-19T00:00:00+00:00",
+                        "evidence_turns": [0],
+                        "evidence_quote": "exam is October 18",
+                        "target_memory_ids": [],
+                    }
+                ],
+            }
+        ),
+        messages=[{"role": "user", "content": "My exam is October 18."}],
+        visible_turn_indexes={0},
+    )
+
+    observation = result["observations"][0]
+    assert observation["binding_status"] == "not_applicable"
+    assert observation["recommended_write_action"] == "allow_candidate"
+    assert observation["candidate_write_would_be_blocked"] is False

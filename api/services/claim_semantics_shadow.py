@@ -7,7 +7,7 @@ import unicodedata
 from datetime import datetime
 from typing import Any
 
-SCHEMA_VERSION = "claim-semantics-shadow-v1"
+SCHEMA_VERSION = "claim-semantics-shadow-v2"
 MAX_OBSERVATIONS = 8
 MAX_PREDICATE_LENGTH = 120
 MAX_VALUE_LENGTH = 500
@@ -28,6 +28,7 @@ def observe_claim_semantics(
     *,
     messages: list[dict[str, Any]],
     visible_turn_indexes: set[int],
+    visible_memory_ids: set[str] | None = None,
     source_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate model-produced claim semantics without affecting active memory writes."""
@@ -64,13 +65,18 @@ def observe_claim_semantics(
         )
         raw_observations = raw_observations[:MAX_OBSERVATIONS]
 
-    memory_count = len(payload.get("memories") or []) if isinstance(payload.get("memories"), list) else 0
+    memory_count = (
+        len(payload.get("memories") or [])
+        if isinstance(payload.get("memories"), list)
+        else 0
+    )
     for raw in raw_observations:
         observation, reason = _validate_observation(
             raw,
             messages=messages,
             visible_turn_indexes=visible_turn_indexes,
             memory_count=memory_count,
+            visible_memory_ids=visible_memory_ids or set(),
             source_context=source_context,
         )
         if observation is None:
@@ -99,6 +105,7 @@ def _validate_observation(
     messages: list[dict[str, Any]],
     visible_turn_indexes: set[int],
     memory_count: int,
+    visible_memory_ids: set[str],
     source_context: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(raw, dict):
@@ -163,6 +170,15 @@ def _validate_observation(
     ):
         return None, "invalid_temporal_order"
 
+    target_memory_ids, target_error = _validated_target_memory_ids(
+        raw.get("target_memory_ids", []),
+        visible_memory_ids=visible_memory_ids,
+    )
+    if target_error:
+        return None, target_error
+    if speech_act == "assertion" and target_memory_ids:
+        return None, "assertion_has_target_memory"
+
     evidence_turns, evidence_error = _validated_evidence_turns(
         raw.get("evidence_turns"),
         messages=messages,
@@ -181,6 +197,12 @@ def _validate_observation(
         return None, quote_error
 
     value_digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    governance = _shadow_governance_disposition(
+        speech_act=speech_act,
+        certainty=certainty,
+        target_memory_ids=target_memory_ids,
+        memory_index=memory_index,
+    )
     return (
         {
             "memory_index": memory_index,
@@ -194,16 +216,94 @@ def _validate_observation(
             "effective_from": effective_from,
             "effective_until": effective_until,
             "evidence_turns": evidence_turns,
-            "evidence_source": "authenticated_service" if source_context else "user_turns",
+            "evidence_source": "authenticated_service"
+            if source_context
+            else "user_turns",
             "evidence_quote_sha256": (
                 hashlib.sha256(evidence_quote.encode("utf-8")).hexdigest()
                 if evidence_quote
                 else None
             ),
             "evidence_quote_length": len(evidence_quote),
+            "target_memory_ids": target_memory_ids,
+            "target_memory_count": len(target_memory_ids),
+            **governance,
         },
         None,
     )
+
+
+def _validated_target_memory_ids(
+    value: Any,
+    *,
+    visible_memory_ids: set[str],
+) -> tuple[list[str], str | None]:
+    if not isinstance(value, list):
+        return [], "invalid_target_memory_ids"
+    if len(value) > 4:
+        return [], "target_memory_limit_exceeded"
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return [], "invalid_target_memory_id"
+        memory_id = item.strip()
+        if memory_id in normalized:
+            return [], "duplicate_target_memory_id"
+        if memory_id not in visible_memory_ids:
+            return [], "unavailable_target_memory"
+        normalized.append(memory_id)
+    return normalized, None
+
+
+def _shadow_governance_disposition(
+    *,
+    speech_act: str,
+    certainty: str,
+    target_memory_ids: list[str],
+    memory_index: int | None,
+) -> dict[str, Any]:
+    """Recommend a future write action without changing the active write path."""
+
+    reasons: list[str] = []
+    if certainty == "uncertain" or speech_act == "uncertain_change":
+        action = "hold_pending"
+        reasons.append("uncertain_claim")
+    elif speech_act in {"correction", "retraction"}:
+        if target_memory_ids:
+            action = "resolve_existing_claim"
+            reasons.append("verified_existing_target")
+        else:
+            action = "hold_pending"
+            reasons.append("unbound_change")
+    elif speech_act == "reaffirmation":
+        if target_memory_ids:
+            action = "no_new_write"
+            reasons.append("existing_claim_reaffirmed")
+        else:
+            action = "hold_pending"
+            reasons.append("unbound_reaffirmation")
+    else:
+        action = "allow_candidate"
+        reasons.append("certain_assertion")
+
+    blocks_new_write = action != "allow_candidate"
+    return {
+        "binding_status": (
+            "bound"
+            if target_memory_ids
+            else (
+                "unbound"
+                if speech_act
+                in {"correction", "retraction", "uncertain_change", "reaffirmation"}
+                else "not_applicable"
+            )
+        ),
+        "recommended_write_action": action,
+        "write_policy_reason_codes": reasons,
+        "candidate_write_would_be_blocked": bool(
+            blocks_new_write and memory_index is not None
+        ),
+    }
 
 
 def _validated_evidence_turns(
@@ -264,9 +364,9 @@ def _validated_evidence_quote(
         return "", "invalid_evidence_quote"
     for index in evidence_turns:
         content = " ".join(
-            unicodedata.normalize(
-                "NFKC", str(messages[index].get("content") or "")
-            ).casefold().split()
+            unicodedata.normalize("NFKC", str(messages[index].get("content") or ""))
+            .casefold()
+            .split()
         )
         if quote in content:
             return quote, None

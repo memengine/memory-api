@@ -124,6 +124,11 @@ def _claim_semantics_item_schema() -> dict[str, Any]:
         "effective_until": {"type": ["string", "null"]},
         "evidence_turns": {"type": "array", "items": {"type": "integer"}},
         "evidence_quote": {"type": "string"},
+        "target_memory_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+        },
     }
     return {
         "type": "object",

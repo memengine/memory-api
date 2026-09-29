@@ -955,6 +955,7 @@ async def test_claim_semantics_shadow_is_observed_without_writing_memory(
                         "effective_until": "2026-10-19T00:00:00Z",
                         "evidence_turns": [0],
                         "evidence_quote": "exam moved from October 10 to October 18",
+                        "target_memory_ids": [],
                     }
                 ],
                 "nothing_to_extract": True,
@@ -984,12 +985,88 @@ async def test_claim_semantics_shadow_is_observed_without_writing_memory(
     shadow = result.extraction_metadata["claim_semantics_shadow"]
     assert shadow["accepted"] == 1
     assert shadow["observations"][0]["predicate"] == "education.exam_date"
+    assert shadow["observations"][0]["recommended_write_action"] == "hold_pending"
     assert "value" not in shadow["observations"][0]
     assert "CLAIM SEMANTICS SHADOW CONTRACT" in llm.calls[0]["system_prompt"]
     response_format = llm.calls[0]["response_format"]
     assert isinstance(response_format, JSONSchemaResponseFormat)
     assert "claim_semantics_shadow" in response_format.schema["required"]
     assert result.extraction_metadata["primary_pass"]["schema_enforced"] is True
+
+
+@pytest.mark.asyncio
+async def test_claim_semantics_shadow_verifies_existing_target_without_gating_write(
+    tmp_path: Path,
+) -> None:
+    memory_id = "11111111-1111-1111-1111-111111111111"
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User now prefers Python examples.",
+                        "category": "preference",
+                        "importance_score": 7.0,
+                        "confidence": 0.95,
+                        "evidence_turns": [0],
+                        "evidence_relation": "direct_user_statement",
+                        "proposal_turn": None,
+                        "reasoning": "The user directly corrected the preference.",
+                    }
+                ],
+                "memory_clarification": None,
+                "claim_semantics_shadow": [
+                    {
+                        "memory_index": 0,
+                        "category": "preference",
+                        "predicate": "programming.default_language",
+                        "value": "Python",
+                        "speech_act": "correction",
+                        "certainty": "certain",
+                        "temporal_kind": "permanent",
+                        "effective_from": None,
+                        "effective_until": None,
+                        "evidence_turns": [0],
+                        "evidence_quote": "Python replaces C++",
+                        "target_memory_ids": [memory_id],
+                    }
+                ],
+                "nothing_to_extract": False,
+                "extraction_notes": None,
+            }
+        )
+    )
+    service = ExtractionService(
+        llm_service=llm,
+        spec_path=_spec(tmp_path),
+        claim_semantics_shadow_enabled=True,
+    )
+
+    result = await service.extract(
+        messages=[{"role": "user", "content": "Python replaces C++."}],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-1",
+        existing_memories=[
+            SimpleNamespace(
+                id=memory_id,
+                content="User prefers C++ examples.",
+                category="preference",
+                importance_score=8,
+                is_archived=False,
+            )
+        ],
+    )
+
+    # Phase 1B remains diagnostic: the ordinary candidate is still returned.
+    assert result.memories_extracted == 1
+    observation = result.extraction_metadata["claim_semantics_shadow"][
+        "observations"
+    ][0]
+    assert observation["target_memory_ids"] == [memory_id]
+    assert observation["binding_status"] == "bound"
+    assert observation["recommended_write_action"] == "resolve_existing_claim"
+    assert observation["candidate_write_would_be_blocked"] is True
 
 
 @pytest.mark.asyncio

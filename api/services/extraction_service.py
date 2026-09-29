@@ -481,6 +481,7 @@ class ExtractionService:
                     normalized_response,
                     messages=indexed_messages,
                     visible_turn_indexes=visible_turn_indexes,
+                    visible_memory_ids=visible_existing_memory_ids,
                     source_context=source_context,
                 )
             except Exception as exc:  # noqa: BLE001 - shadow path must fail open.
@@ -1135,7 +1136,15 @@ class ExtractionService:
             "speech_act (assertion|correction|retraction|uncertain_change|reaffirmation); "
             "certainty (certain|uncertain); temporal_kind (permanent|bounded|unknown); "
             "effective_from and effective_until (timezone-aware ISO-8601 or null); "
-            "evidence_turns; and evidence_quote (shortest exact quote from a cited user turn). "
+            "evidence_turns; evidence_quote (shortest exact quote from a cited user turn); "
+            "and target_memory_ids (zero to four exact memory_id values from the provided existing-memory "
+            "context). Never invent a target ID. Use targets only for corrections, retractions, uncertain "
+            "changes, or reaffirmations that refer to those existing claims. A correction replaces a prior "
+            "state, a retraction withdraws it, an uncertain_change considers a replacement without deciding, "
+            "and a reaffirmation explicitly keeps it. These meanings apply across languages and do not depend "
+            "on exact trigger words. Assertions introduce a claim and must use an empty target list. "
+            "Predicates must name both the domain and stable attribute; avoid generic labels such as date, "
+            "name, likes, knows, or preference. "
             "The server verifies user roles and the quote. Uncertain replacements are not current "
             "assertions. Bounded claims require effective_until."
         )

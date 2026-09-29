@@ -96,7 +96,16 @@ def test_summarize_reports_exact_and_field_accuracy() -> None:
                 "passed": True,
                 "field_matches": {field: True for field in EXPECTED},
             },
-            "shadow": {"rejection_counts": {}},
+            "shadow": {
+                "rejection_counts": {},
+                "observations": [
+                    {
+                        "recommended_write_action": "allow_candidate",
+                        "binding_status": "not_applicable",
+                        "candidate_write_would_be_blocked": False,
+                    }
+                ],
+            },
             "primary_pass": {"latency_ms": 10, "input_tokens": 20, "output_tokens": 5},
             "acknowledgement_ms": 2.0,
             "processing_ms": 12.0,
@@ -112,7 +121,16 @@ def test_summarize_reports_exact_and_field_accuracy() -> None:
                     "temporal_kind": True,
                 },
             },
-            "shadow": {"rejection_counts": {"invalid_evidence_quote": 1}},
+            "shadow": {
+                "rejection_counts": {"invalid_evidence_quote": 1},
+                "observations": [
+                    {
+                        "recommended_write_action": "hold_pending",
+                        "binding_status": "unbound",
+                        "candidate_write_would_be_blocked": True,
+                    }
+                ],
+            },
             "primary_pass": {
                 "latency_ms": 30,
                 "input_tokens": 22,
@@ -131,3 +149,8 @@ def test_summarize_reports_exact_and_field_accuracy() -> None:
     assert result["tokens"]["total"] == 53
     assert result["rejection_counts"] == {"invalid_evidence_quote": 1}
     assert result["schema_enforcement"] == {"enforced": 1, "total": 2}
+    assert result["governance_shadow"] == {
+        "write_actions": {"allow_candidate": 1, "hold_pending": 1},
+        "binding_statuses": {"not_applicable": 1, "unbound": 1},
+        "candidate_writes_blocked": 1,
+    }

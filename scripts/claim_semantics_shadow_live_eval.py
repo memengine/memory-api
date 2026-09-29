@@ -242,6 +242,9 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     provider_latencies: list[float] = []
     input_tokens = output_tokens = 0
     schema_enforced = 0
+    write_actions = Counter()
+    binding_statuses = Counter()
+    candidate_writes_blocked = 0
     for record in records:
         evaluation = record["evaluation"]
         languages[record["language"]].append(bool(evaluation["passed"]))
@@ -250,6 +253,18 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         )
         shadow = record.get("shadow") or {}
         rejection_counts.update(shadow.get("rejection_counts") or {})
+        for observation in shadow.get("observations") or []:
+            if not isinstance(observation, dict):
+                continue
+            write_actions.update(
+                [str(observation.get("recommended_write_action") or "missing")]
+            )
+            binding_statuses.update(
+                [str(observation.get("binding_status") or "missing")]
+            )
+            candidate_writes_blocked += int(
+                bool(observation.get("candidate_write_would_be_blocked"))
+            )
         acknowledgement_latencies.append(record["acknowledgement_ms"])
         processing_latencies.append(record["processing_ms"])
         primary = record.get("primary_pass") or {}
@@ -278,6 +293,11 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "schema_enforcement": {"enforced": schema_enforced, "total": total},
+        "governance_shadow": {
+            "write_actions": dict(sorted(write_actions.items())),
+            "binding_statuses": dict(sorted(binding_statuses.items())),
+            "candidate_writes_blocked": candidate_writes_blocked,
+        },
         "latency_ms": {
             "acknowledgement_p50": _percentile(acknowledgement_latencies, 0.50),
             "acknowledgement_p95": _percentile(acknowledgement_latencies, 0.95),

@@ -27,6 +27,7 @@ def test_strict_schema_requires_complete_root_and_shadow_shape(
         "uncertain_change",
         "reaffirmation",
     ]
+    assert shadow_item["properties"]["target_memory_ids"]["maxItems"] == 4
 
 
 def test_schema_omits_shadow_when_feature_is_disabled() -> None:
