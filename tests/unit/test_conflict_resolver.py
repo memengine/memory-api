@@ -16,9 +16,10 @@ from api.db.models import ProxyUser
 from api.db.models import VectorSyncOperation
 from api.db.models import VectorSyncOutbox
 from api.settings import get_settings
-from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.conflict_resolver import ConflictResolver
+from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.extractor import ExtractedMemory
+from api.services.llm_service import JSONSchemaResponseFormat
 
 
 class FakeSession:
@@ -494,6 +495,84 @@ def test_uncertain_classifier_result_maps_to_user_clarification() -> None:
     assert ConflictResolver._action_from_payload({"type": "uncertain", "keep": "both"}) == "CLARIFY"
 
 
+def test_production_classifier_uses_strict_relation_schema() -> None:
+    existing = make_existing_memory()
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(
+        content=json.dumps(
+            {
+                "relation": "supersedes",
+                "reasoning": "The newer statement replaces the old value.",
+                "merged_memory": None,
+            }
+        )
+    )
+    resolver = ConflictResolver(
+        session=FakeSession(existing_memory=existing),
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        llm_service=llm_service,
+    )
+
+    decision = resolver._classify_conflict(make_new_memory(), existing)
+
+    assert decision.action == "UPDATE"
+    response_format = llm_service.complete_sync.call_args.kwargs["response_format"]
+    assert isinstance(response_format, JSONSchemaResponseFormat)
+    assert response_format.name == "memory_conflict_relation_v1"
+    assert response_format.schema["properties"]["relation"]["enum"] == [
+        "supersedes",
+        "mergeable",
+        "coexists",
+        "duplicate",
+        "ambiguous",
+    ]
+
+
+def test_invalid_classifier_response_fails_safe_to_clarification() -> None:
+    existing = make_existing_memory()
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(content="not-json")
+    resolver = ConflictResolver(
+        session=FakeSession(existing_memory=existing),
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        llm_service=llm_service,
+    )
+
+    decision = resolver._classify_conflict(make_new_memory(), existing)
+
+    assert decision.action == "CLARIFY"
+    assert decision.decision_evidence is not None
+    assert "invalid_classifier_response" in decision.decision_evidence["reason_codes"]
+
+
+def test_merge_relation_without_merged_memory_fails_safe() -> None:
+    existing = make_existing_memory()
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(
+        content=json.dumps(
+            {
+                "relation": "mergeable",
+                "reasoning": "The claims could be combined.",
+                "merged_memory": None,
+            }
+        )
+    )
+    resolver = ConflictResolver(
+        session=FakeSession(existing_memory=existing),
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        llm_service=llm_service,
+    )
+
+    decision = resolver._classify_conflict(make_new_memory(), existing)
+
+    assert decision.action == "CLARIFY"
+    assert decision.decision_evidence is not None
+    assert "invalid_classifier_response" in decision.decision_evidence["reason_codes"]
+
+
 def test_temporal_conflicts_keep_both_without_llm_classification() -> None:
     existing = make_existing_memory()
     existing.content = "User used Python heavily in 2024"
@@ -528,6 +607,8 @@ def test_conflict_prompt_contains_required_resolution_rules() -> None:
     assert "INPUT FORMAT:" in prompt
     assert '"existing"' in prompt
     assert '"new"' in prompt
+    assert '"relation"' in prompt
+    assert "you do not directly authorize a write" in prompt
     assert "confidence is below 0.5" in prompt
     assert "do not reject simply because the new memory is less specific" in prompt
     assert "specificity priority for overlapping subject matter is: expertise > fact > preference" in prompt

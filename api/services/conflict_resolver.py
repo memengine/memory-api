@@ -29,6 +29,7 @@ from api.db.models import SharedContextSignal
 from api.infra.llm_providers.openai_provider import DEFAULT_OPENAI_EXTRACT_MODEL
 from api.infra.llm_router import LLMRouter
 from api.services.llm_service import AllProvidersFailedError
+from api.services.llm_service import JSONSchemaResponseFormat
 from api.services.llm_service import LLMService
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.embedding_service import EmbeddingResult
@@ -58,50 +59,114 @@ from api.settings import get_settings
 PROMPT_PATH = Path(__file__).with_name("prompts") / "conflict_prompt.txt"
 SIMILARITY_THRESHOLD = SEMANTIC_CONFLICT_THRESHOLD
 
+CONFLICT_RELATION_TO_ACTION: dict[str, str] = {
+    "supersedes": "UPDATE",
+    "mergeable": "MERGE",
+    "coexists": "KEEP_BOTH",
+    "duplicate": "REJECT",
+    "ambiguous": "CLARIFY",
+}
+
+CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
+    name="memory_conflict_relation_v1",
+    schema={
+        "type": "object",
+        "properties": {
+            "relation": {
+                "type": "string",
+                "enum": list(CONFLICT_RELATION_TO_ACTION),
+            },
+            "reasoning": {"type": "string", "minLength": 1},
+            "merged_memory": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "minLength": 1},
+                            "category": {
+                                "type": "string",
+                                "enum": [
+                                    "preference",
+                                    "fact",
+                                    "goal",
+                                    "procedure",
+                                    "relationship",
+                                    "expertise",
+                                ],
+                            },
+                            "importance_score": {
+                                "type": "number",
+                                "minimum": 1.0,
+                                "maximum": 10.0,
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0.0,
+                                "maximum": 1.0,
+                            },
+                            "expiry": {
+                                "type": "string",
+                                "enum": ["permanent", "temporary"],
+                            },
+                            "reasoning": {"type": "string", "minLength": 1},
+                        },
+                        "required": [
+                            "content",
+                            "category",
+                            "importance_score",
+                            "confidence",
+                            "expiry",
+                            "reasoning",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {"type": "null"},
+                ]
+            },
+        },
+        "required": ["relation", "reasoning", "merged_memory"],
+        "additionalProperties": False,
+    },
+)
+
 
 TYPE_SPECIFIC_PROMPTS: dict[ConflictType, str] = {
     ConflictType.FACT_UPDATE: (
         "Memory A: {existing} (stored {days_ago} days ago)\n"
         "Memory B: {new} (just extracted)\n"
         "These appear to be about the same fact at different times.\n"
-        "Has the fact changed or is B more specific than A?\n"
-        'Return JSON: {{"type":"updated|same","keep":"B|A|both","reason":"one sentence"}}'
+        "Has the fact changed or is B more specific than A?"
     ),
     ConflictType.PREFERENCE_CHANGE: (
         "Memory A: {existing}\n"
         "Memory B: {new}\n"
         "Has this person's preference changed or are these about different things?\n"
         "If the two statements cannot be safely treated as an update or different contexts, "
-        "ask the user to choose.\n"
-        'Return JSON: {{"type":"changed|different_context|uncertain","keep":"B|A|both|clarify","reason":"one sentence"}}'
+        "ask the user to choose."
     ),
     ConflictType.NEGATION: (
         "Memory A: {existing}\n"
         "Memory B: {new}\n"
         "Memory B appears to negate or supersede Memory A.\n"
-        "Confirm: should A be archived?\n"
-        'Return JSON: {{"archive_A":true|false,"reason":"one sentence"}}'
+        "Confirm whether B supersedes A."
     ),
     ConflictType.SKILL_PROGRESSION: (
         "Memory A: {existing}\n"
         "Memory B: {new}\n"
         "Memory B may represent skill progression from learning to knowing.\n"
-        "Should B supersede A, should both be kept, or are they duplicates?\n"
-        'Return JSON: {{"type":"progressed|same|different_context","keep":"B|A|both","reason":"one sentence"}}'
+        "Should B supersede A, should both be kept, or are they duplicates?"
     ),
     ConflictType.NUMERIC_UPDATE: (
         "Memory A: {existing}\n"
         "Memory B: {new}\n"
         "These memories contain numeric values that may represent an updated score, percentage, or metric.\n"
-        "Should the newer number supersede the older one?\n"
-        'Return JSON: {{"type":"updated|same|different_context","keep":"B|A|both","reason":"one sentence"}}'
+        "Should the newer number supersede the older one?"
     ),
     ConflictType.TEMPORAL_SHIFT: (
         "Memory A: {existing}\n"
         "Memory B: {new}\n"
         "Memory B contains temporal language such as now, recently, yesterday, or last week.\n"
-        "Does B supersede A or should both be kept with temporal context?\n"
-        'Return JSON: {{"type":"updated|temporal_context|different_context","keep":"B|A|both","reason":"one sentence"}}'
+        "Does B supersede A or should both be kept with temporal context?"
     ),
 }
 
@@ -1103,42 +1168,87 @@ class ConflictResolver:
                     user_message=content,
                     temperature=0.0,
                     max_tokens=200,
-                    response_format="json",
+                    response_format=CONFLICT_RESPONSE_FORMAT,
                 )
                 raw_content = response.content
             except AllProvidersFailedError:
-                raw_content = "{}"
+                return self._classifier_failure_decision(
+                    conflict_type=conflict_type,
+                    reason_code="provider_unavailable",
+                )
 
-        payload = json.loads(raw_content or "{}")
-        action = self._action_from_payload(payload)
-        reasoning = str(payload.get("reasoning") or payload.get("reason") or "").strip() or "No reasoning provided."
-        merged_payload = payload.get("merged_memory")
+        try:
+            payload = json.loads(raw_content or "")
+            if not isinstance(payload, dict):
+                raise ValueError("conflict response must be an object")
+            relation = str(payload.get("relation") or "").strip().lower()
+            if relation:
+                action = CONFLICT_RELATION_TO_ACTION.get(relation, "")
+                raw_action = relation
+            else:
+                # Backward compatibility for explicitly injected legacy clients.
+                action = self._action_from_payload(payload)
+                raw_action = str(payload.get("action") or payload.get("keep") or "")
+            if action not in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"}:
+                raise ValueError("unsupported conflict relation")
+            reasoning = str(
+                payload.get("reasoning") or payload.get("reason") or ""
+            ).strip()
+            if not reasoning:
+                raise ValueError("conflict reasoning is required")
 
-        merged_memory = None
-        if merged_payload:
-            merged_memory = ExtractedMemory(
-                content=str(merged_payload["content"]).strip(),
-                category=str(merged_payload["category"]).strip().lower(),
-                importance_score=float(merged_payload["importance_score"]),
-                confidence=float(merged_payload["confidence"]),
-                expiry=str(merged_payload["expiry"]).strip().lower(),  # type: ignore[arg-type]
-                reasoning=str(merged_payload["reasoning"]).strip(),
+            merged_memory = None
+            if action == "MERGE":
+                merged_payload = payload.get("merged_memory")
+                if not isinstance(merged_payload, dict):
+                    raise ValueError("mergeable relation requires merged_memory")
+                merged_memory = ExtractedMemory(
+                    content=str(merged_payload["content"]).strip(),
+                    category=str(merged_payload["category"]).strip().lower(),
+                    importance_score=float(merged_payload["importance_score"]),
+                    confidence=float(merged_payload["confidence"]),
+                    expiry=str(merged_payload["expiry"]).strip().lower(),  # type: ignore[arg-type]
+                    reasoning=str(merged_payload["reasoning"]).strip(),
+                )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return self._classifier_failure_decision(
+                conflict_type=conflict_type,
+                reason_code="invalid_classifier_response",
             )
 
-        normalized_action = (
-            action
-            if action in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"}
-            else "KEEP_BOTH"
-        )
         return ConflictDecision(
-            action=normalized_action,
+            action=action,  # type: ignore[arg-type]
             reasoning=reasoning,
             merged_memory=merged_memory,
             decision_evidence=self._classifier_decision_evidence(
-                action=normalized_action,
+                action=action,
                 conflict_type=conflict_type,
-                raw_action=action,
+                raw_action=raw_action,
                 reasoning=reasoning,
+            ),
+        )
+
+    @staticmethod
+    def _classifier_failure_decision(
+        *,
+        conflict_type: ConflictType,
+        reason_code: str,
+    ) -> ConflictDecision:
+        reasoning = (
+            "MemoryOS could not safely determine how these memories relate, "
+            "so it preserved the current memory and requested clarification."
+        )
+        return ConflictDecision(
+            action="CLARIFY",
+            reasoning=reasoning,
+            decision_evidence=review_evidence(
+                action="USER_REVIEW",
+                reason_codes=[reason_code, "safe_clarification_fallback"],
+                explanation=reasoning,
+                details={
+                    "classifier": "llm",
+                    "conflict_type": conflict_type.value,
+                },
             ),
         )
 
@@ -1198,13 +1308,7 @@ class ConflictResolver:
         )
 
     def _system_prompt_for_conflict_type(self, conflict_type: ConflictType) -> str:
-        if conflict_type == ConflictType.UNKNOWN:
-            return self.system_prompt
-        return (
-            "You are the MemoryOS conflict resolution engine. "
-            "Return only valid JSON matching the requested schema. "
-            "Do not include markdown or explanation outside JSON."
-        )
+        return f"{self.system_prompt}\n\nDetected conflict type: {conflict_type.value}."
 
     def _complete_with_legacy_client(self, *, system_prompt: str, user_message: str) -> str | None:
         """Support older tests/integrations that inject a Gemini-style client."""
@@ -1248,7 +1352,7 @@ class ConflictResolver:
             return "REJECT"
         if keep == "BOTH":
             return "KEEP_BOTH"
-        return "KEEP_BOTH"
+        return ""
 
     @staticmethod
     def _days_since_created(memory: Memory) -> int:
