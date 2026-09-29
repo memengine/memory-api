@@ -912,6 +912,57 @@ def test_system_prompt_includes_schema_and_categories(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_uncertain_change_is_routed_out_of_active_memories(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": (
+                            "User is considering Python as the programming default "
+                            "but has not decided between Python and C++."
+                        ),
+                        "category": "preference",
+                        "importance_score": 8.0,
+                        "confidence": 0.9,
+                        "commitment": "uncertain_change",
+                        "evidence_turns": [0],
+                        "evidence_relation": "direct_user_statement",
+                        "proposal_turn": None,
+                        "reasoning": "The user explicitly left the new default undecided.",
+                    }
+                ],
+                "memory_clarification": None,
+                "nothing_to_extract": False,
+                "extraction_notes": None,
+            }
+        )
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Python may replace my C++ default, but I have not decided "
+                    "which should remain current."
+                ),
+            }
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-uncertain-change",
+    )
+
+    assert result.memories_to_store == []
+    assert result.pending_candidates_count == 1
+    assert result.pending_candidates[0].candidate_reason == "uncertain_change"
+
+
+@pytest.mark.asyncio
 async def test_explicit_service_event_enables_authoritative_observation_mode(
     tmp_path: Path,
 ) -> None:

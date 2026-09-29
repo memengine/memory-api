@@ -3,10 +3,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import pytest
-
-from api.tasks.extraction_tasks import _requests_memory_clarification
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "governed_memory_phase0_replay.py"
 SPEC = importlib.util.spec_from_file_location("governed_memory_phase0_replay", SCRIPT)
@@ -113,22 +109,3 @@ def test_phase0_scenario_accepts_one_successful_clarification_delivery() -> None
 
     assert result["passed"] is True
     assert result["clarification_observations"] == [True, False]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 0 characterization: natural uncertainty still depends on fixed phrases",
-)
-def test_natural_uncertainty_requests_clarification_without_magic_phrase() -> None:
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "My default language for every programming example is Python. "
-                "This conflicts with my earlier C++ default, and I have not decided "
-                "which should remain current."
-            ),
-        }
-    ]
-
-    assert _requests_memory_clarification(messages) is True

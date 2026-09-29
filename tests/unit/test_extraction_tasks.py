@@ -310,7 +310,7 @@ def test_source_event_authority_is_not_overwritten_by_submission_policy(monkeypa
     assert provenance["external_conversation_id"] == "release-check-001"
 
 
-def test_explicit_clarification_request_is_forwarded_to_conflict_resolver(monkeypatch) -> None:
+def test_phrase_alone_does_not_bypass_structured_uncertainty_routing(monkeypatch) -> None:
     proxy_user = ProxyUser(
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
@@ -358,7 +358,7 @@ def test_explicit_clarification_request_is_forwarded_to_conflict_resolver(monkey
         client=SimpleNamespace(),
     )
 
-    assert resolver.calls[0]["clarification_requested"] is True
+    assert resolver.calls[0]["clarification_requested"] is False
 
 
 def test_zero_extraction_structured_clarification_is_queued_without_new_memory(
@@ -486,44 +486,33 @@ def test_pending_candidate_polarity_guard_blocks_opposite_meaning() -> None:
     assert extraction_tasks._can_reinforce_candidate(existing, candidate) is False
 
 
-def test_pending_candidate_promotes_after_reinforcement_count() -> None:
-    candidate = SimpleNamespace(
-        content="User may prefer short replies for difficult topics",
+def test_uncertain_change_routes_to_governance_without_generic_buffering() -> None:
+    uncertain = extraction_tasks.PendingExtractedMemory(
+        content="User may replace C++ with Python but has not decided.",
         category="preference",
-        importance_score=6.0,
-        confidence_score=0.58,
-        reasoning="Repeated weak preference",
-        reinforcement_count=2,
+        importance_score=8.0,
+        confidence=0.58,
+        reasoning="The replacement is explicitly undecided.",
+        candidate_reason="uncertain_change",
+        validated_evidence={"relation": "direct_user_statement"},
     )
-
-    assert extraction_tasks._should_promote_pending_candidate(candidate) is True
-    promoted = extraction_tasks._promoted_memory_from_candidate(candidate)
-    assert promoted.content == candidate.content
-    assert promoted.category == "preference"
-    assert promoted.confidence == 0.58
-
-
-def test_ambiguous_confirmation_never_auto_promotes() -> None:
-    candidate = SimpleNamespace(
-        confidence_score=0.99,
-        reinforcement_count=10,
-        candidate_reason="ambiguous_proposal_reference",
-    )
-
-    assert extraction_tasks._should_promote_pending_candidate(candidate) is False
-
-
-def test_pending_candidate_does_not_promote_single_weak_signal() -> None:
-    candidate = SimpleNamespace(
-        content="User may prefer short replies for difficult topics",
+    ordinary = extraction_tasks.PendingExtractedMemory(
+        content="User may prefer short explanations.",
         category="preference",
-        importance_score=6.0,
-        confidence_score=0.58,
-        reasoning="Single weak preference",
-        reinforcement_count=1,
+        importance_score=5.0,
+        confidence=0.58,
+        reasoning="Borderline preference.",
     )
 
-    assert extraction_tasks._should_promote_pending_candidate(candidate) is False
+    regular, routed = extraction_tasks._route_uncertain_changes(
+        [uncertain, ordinary]
+    )
+
+    assert regular == [ordinary]
+    assert len(routed) == 1
+    assert routed[0].validated_evidence["governance_directive"] == (
+        "clarify_if_conflict"
+    )
 
 
 

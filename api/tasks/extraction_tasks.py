@@ -580,7 +580,6 @@ _NEGATION_TOKENS = {
     "without",
 }
 _PENDING_SIMILARITY_THRESHOLD = 0.82
-_PENDING_PROMOTION_REINFORCEMENT_COUNT = 2
 
 
 def _candidate_similarity(left: str, right: str) -> float:
@@ -652,24 +651,30 @@ def _find_matching_pending_candidate(
     return None, False
 
 
-def _promoted_memory_from_candidate(candidate: PendingExtractionCandidate) -> ExtractedMemory:
-    return ExtractedMemory(
-        content=candidate.content,
-        category=_memory_category_value(candidate.category),  # type: ignore[arg-type]
-        importance_score=max(1.0, min(10.0, float(candidate.importance_score or 1.0))),
-        confidence=max(0.0, min(1.0, float(candidate.confidence_score or 0.0))),
-        expiry="permanent",
-        reasoning=str(candidate.reasoning or "Promoted after repeated borderline extraction."),
-    )
-
-
-def _should_promote_pending_candidate(candidate: PendingExtractionCandidate, *, store_threshold: float = 0.65) -> bool:
-    reason = str(getattr(candidate, "candidate_reason", "") or "")
-    if reason == "ambiguous_proposal_reference" or reason.startswith("proposal_reference_"):
-        return False
-    return int(candidate.reinforcement_count or 0) >= _PENDING_PROMOTION_REINFORCEMENT_COUNT or float(
-        candidate.confidence_score or 0.0
-    ) >= store_threshold
+def _route_uncertain_changes(
+    candidates: list[PendingExtractedMemory],
+) -> tuple[list[PendingExtractedMemory], list[ExtractedMemory]]:
+    regular: list[PendingExtractedMemory] = []
+    routed: list[ExtractedMemory] = []
+    for candidate in candidates:
+        if candidate.candidate_reason != "uncertain_change":
+            regular.append(candidate)
+            continue
+        routed.append(
+            ExtractedMemory(
+                content=candidate.content,
+                category=_memory_category_value(candidate.category),  # type: ignore[arg-type]
+                importance_score=candidate.importance_score,
+                confidence=candidate.confidence,
+                expiry="permanent",
+                reasoning=candidate.reasoning,
+                validated_evidence={
+                    **candidate.validated_evidence,
+                    "governance_directive": "clarify_if_conflict",
+                },
+            )
+        )
+    return regular, routed
 
 
 def _persist_pending_extraction_candidates(
@@ -680,9 +685,9 @@ def _persist_pending_extraction_candidates(
     proxy_user_id: str,
     extraction_job_id: str | None,
     source_event_id: str | None,
-) -> tuple[int, list[ExtractedMemory]]:
+) -> int:
     if not candidates:
-        return 0, []
+        return 0
 
     tenant_uuid = uuid.UUID(str(tenant_id))
     proxy_user_uuid = uuid.UUID(str(proxy_user_id))
@@ -690,7 +695,6 @@ def _persist_pending_extraction_candidates(
     event_uuid = uuid.UUID(str(source_event_id)) if source_event_id else None
     now = datetime.now(UTC)
     buffered = 0
-    promoted: list[ExtractedMemory] = []
 
     for candidate in candidates:
         fingerprint = _candidate_fingerprint(candidate)
@@ -737,19 +741,10 @@ def _persist_pending_extraction_candidates(
             if existing.status != "pending":
                 existing.status = "pending"
 
-        if _should_promote_pending_candidate(existing):
-            existing.status = "promoted"
-            existing.updated_at = now
-            metadata = dict(existing.metadata_json or {})
-            metadata["promoted_at"] = now.isoformat()
-            metadata["promotion_reason"] = "reinforced_borderline_candidate"
-            existing.metadata_json = metadata
-            promoted.append(_promoted_memory_from_candidate(existing))
-
         session.add(existing)
         buffered += 1
 
-    return buffered, promoted
+    return buffered
 
 def _claim_confirmed_proposals(
     session: Session,
@@ -1260,26 +1255,6 @@ def _extract_memories_for_pipeline(
     return list(extracted), {}, True
 
 
-_CLARIFICATION_INTENT_PHRASES = (
-    "i am unsure whether",
-    "i'm unsure whether",
-    "ask me to choose",
-    "do not decide",
-    "don't decide",
-    "need you to ask",
-)
-
-
-def _requests_memory_clarification(messages: list[dict[str, Any]]) -> bool:
-    """Preserve an explicit user request to decide a matched memory later."""
-    user_text = " ".join(
-        str(message.get("content") or "")
-        for message in messages
-        if str(message.get("role") or "").lower() == "user"
-    ).lower()
-    return any(phrase in user_text for phrase in _CLARIFICATION_INTENT_PHRASES)
-
-
 def run_extraction_pipeline(
     job_payload: dict[str, Any],
     *,
@@ -1295,7 +1270,6 @@ def run_extraction_pipeline(
     agent_id = job_payload.get("agent_id")
     source_event_id = job_payload.get("source_event_id")
     messages = list(job_payload.get("messages", []))
-    clarification_requested = _requests_memory_clarification(messages)
 
     if not tenant_id or not proxy_user_id:
         raise ValueError("Extraction job requires tenant_id and proxy_user_id.")
@@ -1420,15 +1394,21 @@ def run_extraction_pipeline(
             )
 
         stage = "persist_pending_candidates"
-        pending_candidates_buffered, promoted_pending_memories = _persist_pending_extraction_candidates(
+        pending_candidates = list(extraction_meta.get("pending_candidates", []) or [])
+        regular_pending, uncertain_changes = _route_uncertain_changes(
+            pending_candidates
+        )
+        pending_candidates_buffered = _persist_pending_extraction_candidates(
             session,
-            candidates=list(extraction_meta.get("pending_candidates", []) or []),
+            candidates=regular_pending,
             tenant_id=tenant_id,
             proxy_user_id=proxy_user_id,
             extraction_job_id=str(job_payload.get("job_id") or "") or None,
             source_event_id=str(source_event.id) if source_event is not None else None,
         )
         extraction_meta["pending_candidates_buffered"] = pending_candidates_buffered
+        extraction_meta["uncertain_changes_routed"] = len(uncertain_changes)
+        extracted_memories.extend(uncertain_changes)
 
         if should_apply_scorer:
             for memory in extracted_memories:
@@ -1508,9 +1488,7 @@ def run_extraction_pipeline(
             source_conversation_id=str(conversation.id),
             agent_id=str(agent_id) if agent_id else None,
             auto_commit=False,
-            clarification_requested=(
-                clarification_requested and not structured_clarification
-            ),
+            clarification_requested=False,
         )
         clarification_queued = False
         selected_memory_ids = list(

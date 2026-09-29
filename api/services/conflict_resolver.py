@@ -789,6 +789,10 @@ class ConflictResolver:
         self.last_conflict_types_found = []
 
         for new_memory in new_memories:
+            governance_directive = str(
+                (new_memory.validated_evidence or {}).get("governance_directive")
+                or ""
+            )
             embedding = self._coerce_embedding_result(self.embedder(new_memory.content))
             search_kwargs: dict[str, Any] = {
                 "query_embedding": embedding.vector,
@@ -852,6 +856,29 @@ class ConflictResolver:
                                 "Two registered services with equal authority disagree, so "
                                 "MemoryOS preserved both claims and routed the decision for review."
                             ),
+                        ),
+                    )
+                if (
+                    decision is None
+                    and governance_directive == "clarify_if_conflict"
+                ):
+                    decision = ConflictDecision(
+                        action="CLARIFY",
+                        reasoning=(
+                            "The user introduced a competing value without choosing "
+                            "which value should remain current."
+                        ),
+                        decision_evidence=review_evidence(
+                            action="USER_REVIEW",
+                            reason_codes=[
+                                "uncertain_change",
+                                "matched_personal_memory_candidate",
+                            ],
+                            explanation=(
+                                "MemoryOS matched an uncertain replacement to an active "
+                                "memory and routed the choice back to the user."
+                            ),
+                            details={"scope": "same_proxy_user"},
                         ),
                     )
                 if decision is None:
@@ -1048,6 +1075,12 @@ class ConflictResolver:
                     self._track_candidate_metadata(candidate, new_memory, existing_memory)
                     decision_applied = True
                     break
+
+            if (
+                not decision_applied
+                and governance_directive == "clarify_if_conflict"
+            ):
+                continue
 
             if not decision_applied:
                 stored_memories.append(

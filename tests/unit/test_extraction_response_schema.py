@@ -18,6 +18,10 @@ def test_strict_schema_requires_complete_root_shape(
     assert ("proposal_confirmation" in schema["properties"]) is proposal_enabled
     assert "claim_semantics_shadow" not in schema["properties"]
     assert "claim_semantics_shadow" not in schema["required"]
+    commitment = schema["properties"]["memories"]["items"]["properties"][
+        "commitment"
+    ]
+    assert commitment["enum"] == ["asserted", "uncertain_change"]
 
 
 def test_proposal_mode_does_not_allow_model_to_emit_confirmed_memory_directly() -> None:
