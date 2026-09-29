@@ -63,6 +63,18 @@ def load_cases(path: Path) -> dict[str, Any]:
     return payload
 
 
+def select_cases(dataset: dict[str, Any], case_ids: list[str]) -> dict[str, Any]:
+    if not case_ids:
+        return dataset
+    requested = set(case_ids)
+    selected = [case for case in dataset["cases"] if case["id"] in requested]
+    found = {case["id"] for case in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise ValueError(f"Unknown case ids: {', '.join(missing)}")
+    return {**dataset, "cases": selected}
+
+
 def evaluate_shadow(
     metadata: dict[str, Any], expected: dict[str, str]
 ) -> dict[str, Any]:
@@ -280,7 +292,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def execute(args: argparse.Namespace) -> dict[str, Any]:
-    dataset = load_cases(Path(args.dataset))
+    dataset = select_cases(load_cases(Path(args.dataset)), args.case_id)
     api_key = os.environ.get("MEMORYOS_API_KEY", "").strip()
     if not api_key:
         raise SystemExit("MEMORYOS_API_KEY is required with --execute")
@@ -338,6 +350,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
+    parser.add_argument("--case-id", action="append", default=[])
     parser.add_argument(
         "--base-url", default=os.environ.get("MEMORYOS_API_BASE_URL", DEFAULT_BASE_URL)
     )
@@ -351,7 +364,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    dataset = load_cases(Path(args.dataset))
+    dataset = select_cases(load_cases(Path(args.dataset)), args.case_id)
     if not args.execute:
         print(
             json.dumps(

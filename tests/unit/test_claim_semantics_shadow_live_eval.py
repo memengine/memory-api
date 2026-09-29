@@ -8,6 +8,7 @@ from scripts.claim_semantics_shadow_live_eval import (
     TERMINAL_JOB_STATUSES,
     evaluate_shadow,
     load_cases,
+    select_cases,
     summarize,
 )
 
@@ -66,6 +67,25 @@ def test_load_cases_rejects_incomplete_expectation(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="expected"):
         load_cases(path)
+
+
+def test_select_cases_preserves_dataset_order_and_rejects_unknown_ids() -> None:
+    dataset = {
+        "cases": [
+            {"id": "en_assertion"},
+            {"id": "hi_uncertain"},
+            {"id": "hinglish_bounded"},
+        ]
+    }
+
+    selected = select_cases(dataset, ["hinglish_bounded", "en_assertion"])
+
+    assert [case["id"] for case in selected["cases"]] == [
+        "en_assertion",
+        "hinglish_bounded",
+    ]
+    with pytest.raises(ValueError, match="unknown"):
+        select_cases(dataset, ["unknown"])
 
 
 def test_summarize_reports_exact_and_field_accuracy() -> None:
