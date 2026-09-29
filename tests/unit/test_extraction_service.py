@@ -898,6 +898,110 @@ def test_system_prompt_includes_schema_and_categories(tmp_path: Path) -> None:
     assert "after an unrelated question or request" in prompt
     assert "rejects an assistant proposal but states a different" in prompt
     assert "Extract only the independently stated correction" in prompt
+    assert "CLAIM SEMANTICS SHADOW CONTRACT" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_claim_semantics_shadow_is_observed_without_writing_memory(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [],
+                "claim_semantics_shadow": [
+                    {
+                        "memory_index": None,
+                        "category": "fact",
+                        "predicate": "education.exam_date",
+                        "value": "2026-10-18",
+                        "speech_act": "correction",
+                        "certainty": "certain",
+                        "temporal_kind": "bounded",
+                        "effective_from": "2026-09-29T00:00:00Z",
+                        "effective_until": "2026-10-19T00:00:00Z",
+                        "evidence_turns": [0],
+                        "evidence_quote": "exam moved from October 10 to October 18",
+                    }
+                ],
+                "nothing_to_extract": True,
+            }
+        )
+    )
+    service = ExtractionService(
+        llm_service=llm,
+        spec_path=_spec(tmp_path),
+        claim_semantics_shadow_enabled=True,
+    )
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "user",
+                "content": "Correction: my exam moved from October 10 to October 18.",
+            }
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-1",
+    )
+
+    assert result.memories_extracted == 0
+    assert result.pending_candidates_count == 0
+    shadow = result.extraction_metadata["claim_semantics_shadow"]
+    assert shadow["accepted"] == 1
+    assert shadow["observations"][0]["predicate"] == "education.exam_date"
+    assert "value" not in shadow["observations"][0]
+    assert "CLAIM SEMANTICS SHADOW CONTRACT" in llm.calls[0]["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_claim_semantics_shadow_failure_does_not_block_active_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User prefers concise Python examples.",
+                        "category": "preference",
+                        "importance_score": 7.0,
+                        "confidence": 0.92,
+                        "evidence_turns": [0],
+                        "evidence_relation": "direct_user_statement",
+                        "reasoning": "Direct durable preference.",
+                    }
+                ],
+                "nothing_to_extract": False,
+            }
+        )
+    )
+    service = ExtractionService(
+        llm_service=llm,
+        spec_path=_spec(tmp_path),
+        claim_semantics_shadow_enabled=True,
+    )
+
+    def fail_observer(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("observer failed")
+
+    monkeypatch.setattr(
+        "api.services.extraction_service.observe_claim_semantics",
+        fail_observer,
+    )
+    result = await service.extract(
+        messages=[{"role": "user", "content": "I prefer concise Python examples."}],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-1",
+    )
+
+    assert result.memories_extracted == 1
+    assert result.extraction_metadata["claim_semantics_shadow"]["error"] == (
+        "RuntimeError"
+    )
 
 
 @pytest.mark.asyncio

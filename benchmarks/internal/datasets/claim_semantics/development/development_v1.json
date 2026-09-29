@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "split": "development",
+  "cases": [
+    {"id":"en_assertion","language":"en","utterance":"Use C++ for every programming example by default.","expected":{"predicate":"programming.default_language","speech_act":"assertion","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"en_correction","language":"en","utterance":"Correction: Python replaces C++ as my default programming language.","expected":{"predicate":"programming.default_language","speech_act":"correction","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"en_uncertain","language":"en","utterance":"I may switch my default from C++ to Python, but I have not decided yet.","expected":{"predicate":"programming.default_language","speech_act":"uncertain_change","certainty":"uncertain","temporal_kind":"permanent"}},
+    {"id":"en_retraction","language":"en","utterance":"Remove my programming-language default; I no longer have one.","expected":{"predicate":"programming.default_language","speech_act":"retraction","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"en_bounded","language":"en","utterance":"My exam is on October 18, 2026.","expected":{"predicate":"education.exam_date","speech_act":"assertion","certainty":"certain","temporal_kind":"bounded"}},
+    {"id":"en_reaffirmation","language":"en","utterance":"C++ is still my default language for programming examples.","expected":{"predicate":"programming.default_language","speech_act":"reaffirmation","certainty":"certain","temporal_kind":"permanent"}},
+
+    {"id":"hi_assertion","language":"hi","utterance":"हर प्रोग्रामिंग उदाहरण के लिए C++ को मेरी डिफ़ॉल्ट भाषा मानिए।","expected":{"predicate":"programming.default_language","speech_act":"assertion","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"hi_correction","language":"hi","utterance":"सुधार: अब C++ की जगह Python मेरी डिफ़ॉल्ट प्रोग्रामिंग भाषा है।","expected":{"predicate":"programming.default_language","speech_act":"correction","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"hi_uncertain","language":"hi","utterance":"शायद मैं C++ से Python पर जाऊं, लेकिन अभी तय नहीं किया है।","expected":{"predicate":"programming.default_language","speech_act":"uncertain_change","certainty":"uncertain","temporal_kind":"permanent"}},
+    {"id":"hi_retraction","language":"hi","utterance":"मेरी डिफ़ॉल्ट प्रोग्रामिंग भाषा हटा दीजिए; अब कोई डिफ़ॉल्ट नहीं है।","expected":{"predicate":"programming.default_language","speech_act":"retraction","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"hi_bounded","language":"hi","utterance":"मेरी परीक्षा 18 अक्टूबर 2026 को है।","expected":{"predicate":"education.exam_date","speech_act":"assertion","certainty":"certain","temporal_kind":"bounded"}},
+    {"id":"hi_reaffirmation","language":"hi","utterance":"प्रोग्रामिंग उदाहरणों के लिए C++ अभी भी मेरी डिफ़ॉल्ट भाषा है।","expected":{"predicate":"programming.default_language","speech_act":"reaffirmation","certainty":"certain","temporal_kind":"permanent"}},
+
+    {"id":"hinglish_assertion","language":"hinglish","utterance":"Har programming example ke liye C++ mera default rakho.","expected":{"predicate":"programming.default_language","speech_act":"assertion","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"hinglish_correction","language":"hinglish","utterance":"Correction: ab C++ nahi, Python meri default programming language hai.","expected":{"predicate":"programming.default_language","speech_act":"correction","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"hinglish_uncertain","language":"hinglish","utterance":"Main shayad C++ se Python par switch karun, par abhi decide nahi kiya.","expected":{"predicate":"programming.default_language","speech_act":"uncertain_change","certainty":"uncertain","temporal_kind":"permanent"}},
+    {"id":"hinglish_retraction","language":"hinglish","utterance":"Mera programming language default hata do; ab koi default nahi hai.","expected":{"predicate":"programming.default_language","speech_act":"retraction","certainty":"certain","temporal_kind":"permanent"}},
+    {"id":"hinglish_bounded","language":"hinglish","utterance":"Mera exam 18 October 2026 ko hai.","expected":{"predicate":"education.exam_date","speech_act":"assertion","certainty":"certain","temporal_kind":"bounded"}},
+    {"id":"hinglish_reaffirmation","language":"hinglish","utterance":"Programming examples ke liye C++ abhi bhi mera default hai.","expected":{"predicate":"programming.default_language","speech_act":"reaffirmation","certainty":"certain","temporal_kind":"permanent"}}
+  ]
+}
