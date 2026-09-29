@@ -313,6 +313,7 @@ def test_resolver_uses_type_specific_prompts_for_fact_and_preference() -> None:
             confidence=0.95,
             expiry="permanent",
             reasoning="Updated date",
+            validated_evidence={"claim_state": "correction"},
         ),
         existing_memory=existing_fact,
         conflict_type=ConflictType.FACT_UPDATE,
@@ -331,5 +332,6 @@ def test_resolver_uses_type_specific_prompts_for_fact_and_preference() -> None:
     )
 
     assert "same fact at different times" in fact_prompt
+    assert "Incoming claim state: correction" in fact_prompt
     assert "preference changed" in preference_prompt
     assert fact_prompt != preference_prompt

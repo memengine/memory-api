@@ -927,7 +927,7 @@ async def test_uncertain_change_is_routed_out_of_active_memories(
                         "category": "preference",
                         "importance_score": 8.0,
                         "confidence": 0.9,
-                        "commitment": "uncertain_change",
+                        "claim_state": "uncertain_change",
                         "evidence_turns": [0],
                         "evidence_relation": "direct_user_statement",
                         "proposal_turn": None,
@@ -960,6 +960,55 @@ async def test_uncertain_change_is_routed_out_of_active_memories(
     assert result.memories_to_store == []
     assert result.pending_candidates_count == 1
     assert result.pending_candidates[0].candidate_reason == "uncertain_change"
+    assert result.pending_candidates[0].validated_evidence["claim_state"] == (
+        "uncertain_change"
+    )
+
+
+@pytest.mark.asyncio
+async def test_correction_state_is_preserved_for_conflict_resolution(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps(
+            {
+                "memories": [
+                    {
+                        "content": "User's exam is on October 18.",
+                        "category": "fact",
+                        "importance_score": 6.0,
+                        "confidence": 0.95,
+                        "claim_state": "correction",
+                        "evidence_turns": [0],
+                        "evidence_relation": "direct_user_statement",
+                        "proposal_turn": None,
+                        "reasoning": "The user corrected the earlier exam date.",
+                    }
+                ],
+                "memory_clarification": None,
+                "nothing_to_extract": False,
+                "extraction_notes": None,
+            }
+        )
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "user",
+                "content": "Correction: my exam moved from October 10 to October 18.",
+            }
+        ],
+        proxy_user_id="proxy-1",
+        tenant_id="tenant-1",
+        job_id="job-correction",
+    )
+
+    assert result.memories_extracted == 1
+    assert result.memories_to_store[0].validated_evidence["claim_state"] == (
+        "correction"
+    )
 
 
 @pytest.mark.asyncio

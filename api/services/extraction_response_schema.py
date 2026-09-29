@@ -75,9 +75,9 @@ def _memory_item_schema(*, proposal_confirmation_enabled: bool) -> dict[str, Any
         "category": {"type": "string", "enum": CATEGORIES},
         "importance_score": {"type": "number", "minimum": 1.0, "maximum": 10.0},
         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "commitment": {
+        "claim_state": {
             "type": "string",
-            "enum": ["asserted", "uncertain_change"],
+            "enum": ["asserted", "correction", "uncertain_change"],
         },
         "evidence_turns": {"type": "array", "items": {"type": "integer"}},
         "evidence_relation": {"type": "string", "enum": evidence_relations},

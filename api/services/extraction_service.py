@@ -1024,10 +1024,12 @@ class ExtractionService:
             "and which the user is not considering is not a present goal and must be discarded. "
             "Do not use pending confidence as a substitute for temporal validity. "
             "Do not default every plausible memory to 0.70 or 0.80.\n\n"
-            "Set commitment to asserted only when the user presents the candidate as current. Set it to "
-            "uncertain_change when the user introduces a value that competes with an earlier/current value "
-            "but has not decided which should remain current. Classify the meaning across languages and tones; "
-            "do not depend on trigger phrases. Preserve that uncertainty in content and confidence.\n\n"
+            "Set claim_state to asserted for an ordinary current claim, correction when the user explicitly "
+            "replaces or corrects an earlier value, and uncertain_change when the user introduces a competing "
+            "value but has not decided which should remain current. Classify meaning across languages and tones; "
+            "do not depend on trigger phrases. An uncertain change to a provided existing memory is governance-"
+            "relevant: return it as uncertain_change with nothing_to_extract=false even though it must not become "
+            "current automatically. Preserve uncertainty in content and confidence.\n\n"
             "Use importance 1-3 for narrow project-only or occasionally useful context; 4-6 for "
             "regularly useful operating context; and 7-9 only for identity-level facts, committed priorities, "
             "or capabilities that should shape most responses. Do not default every memory to 5.\n\n"
@@ -1084,7 +1086,7 @@ class ExtractionService:
             '      "category": "preference|fact|goal|procedure|relationship|expertise",\n'
             '      "importance_score": float between 1.0 and 10.0,\n'
             '      "confidence": float between 0.0 and 1.0,\n'
-            '      "commitment": "asserted|uncertain_change",\n'
+            '      "claim_state": "asserted|correction|uncertain_change",\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
             '      "evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal",\n'
             '      "proposal_turn": "integer for a confirmed registered proposal, otherwise null",\n'
@@ -1153,7 +1155,7 @@ class ExtractionService:
             '      "category": "preference|fact|goal|procedure|relationship|expertise",\n'
             '      "importance_score": float between 1.0 and 10.0,\n'
             '      "confidence": float between 0.0 and 1.0,\n'
-            '      "commitment": "asserted|uncertain_change",\n'
+            '      "claim_state": "asserted|correction|uncertain_change",\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
             '      "evidence_relation": "direct_user_statement",\n'
             '      "proposal_turn": null,\n'
@@ -2038,8 +2040,8 @@ class ExtractionService:
                         "category": memory_category,
                     }
             candidate, rejection_reason = self._coerce_memory(candidate_payload)
-            commitment = (
-                str(raw_memory.get("commitment") or "asserted").strip().lower()
+            claim_state = (
+                str(raw_memory.get("claim_state") or "asserted").strip().lower()
                 if isinstance(raw_memory, dict)
                 else "asserted"
             )
@@ -2133,7 +2135,18 @@ class ExtractionService:
                         )
                         continue
                 candidate.validated_evidence = validated_evidence
-            if commitment == "uncertain_change":
+            if claim_state not in {"asserted", "correction", "uncertain_change"}:
+                invalid_count += 1
+                rejection_counts["invalid_claim_state"] = (
+                    rejection_counts.get("invalid_claim_state", 0) + 1
+                )
+                continue
+            candidate.validated_evidence = {
+                **candidate.validated_evidence,
+                "claim_state": claim_state,
+            }
+            validated_evidence = candidate.validated_evidence
+            if claim_state == "uncertain_change":
                 candidate.candidate_reason = "uncertain_change"
                 pending.append(candidate)
                 continue

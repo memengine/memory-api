@@ -1324,6 +1324,9 @@ class ConflictResolver:
         existing_memory: Memory,
         conflict_type: ConflictType,
     ) -> str:
+        claim_state = str(
+            (new_memory.validated_evidence or {}).get("claim_state") or "asserted"
+        )
         template = TYPE_SPECIFIC_PROMPTS.get(conflict_type)
         if template is None:
             return json.dumps(
@@ -1331,13 +1334,17 @@ class ConflictResolver:
                     "existing": self._serialize_memory(existing_memory),
                     "new": self._serialize_extracted_memory(new_memory),
                     "conflict_type": conflict_type.value,
+                    "claim_state": claim_state,
                 }
             )
 
-        return template.format(
-            existing=existing_memory.content,
-            new=new_memory.content,
-            days_ago=self._days_since_created(existing_memory),
+        return (
+            f"Incoming claim state: {claim_state}\n"
+            + template.format(
+                existing=existing_memory.content,
+                new=new_memory.content,
+                days_ago=self._days_since_created(existing_memory),
+            )
         )
 
     def _system_prompt_for_conflict_type(self, conflict_type: ConflictType) -> str:
