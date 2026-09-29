@@ -32,7 +32,8 @@ from api.services.evidence_policy import (
     structured_proposal_denied,
     validate_conversational_evidence,
 )
-from api.services.llm_service import LLMService
+from api.services.extraction_response_schema import build_extraction_response_schema
+from api.services.llm_service import JSONSchemaResponseFormat, LLMService
 from api.settings import get_settings
 
 try:  # pragma: no cover - exercised implicitly when dependency is installed.
@@ -444,7 +445,7 @@ class ExtractionService:
             user_message=user_message,
             temperature=0.0 if proposal_context else 0.1,
             max_tokens=1500,
-            response_format="json",
+            response_format=self._primary_response_format(),
         )
         primary_wall_latency_ms = int((time.perf_counter() - primary_started) * 1000)
         tokens_used += int(response.total_tokens or 0)
@@ -843,6 +844,9 @@ class ExtractionService:
                     "total_tokens": int(response.total_tokens or 0),
                     "latency_ms": int(response.latency_ms or primary_wall_latency_ms),
                     "wall_latency_ms": primary_wall_latency_ms,
+                    "schema_enforced": bool(
+                        getattr(response, "schema_enforced", False)
+                    ),
                 },
                 "correction_recovery": {
                     "attempted": correction_recovery_attempted,
@@ -1105,6 +1109,17 @@ class ExtractionService:
                 "into clean, atomic memories and discard unsupported hints."
             )
         return prompt
+
+    def _primary_response_format(self) -> str | JSONSchemaResponseFormat:
+        if not self._claim_semantics_shadow_enabled:
+            return "json"
+        return JSONSchemaResponseFormat(
+            name="memory_extraction_claim_semantics_v1",
+            schema=build_extraction_response_schema(
+                proposal_confirmation_enabled=self._proposal_confirmation_enabled,
+                claim_semantics_shadow_enabled=True,
+            ),
+        )
 
     @staticmethod
     def _claim_semantics_shadow_contract() -> str:

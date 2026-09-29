@@ -112,8 +112,9 @@ def _validate_observation(
         "certainty",
         "temporal_kind",
     )
-    if any(not isinstance(raw.get(field), str) for field in text_fields):
-        return None, "invalid_text_field"
+    for field in text_fields:
+        if not isinstance(raw.get(field), str):
+            return None, f"invalid_{field}_type"
     predicate = raw["predicate"].strip().lower()
     value = raw["value"].strip()
     category = raw["category"].strip().lower()

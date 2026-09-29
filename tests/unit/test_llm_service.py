@@ -3,14 +3,16 @@ from __future__ import annotations
 import pytest
 
 import api.services.llm_service as llm_service_module
-
-from api.services.llm_service import AllProvidersFailedError
-from api.services.llm_service import LLMProvider
-from api.services.llm_service import LLMResponse
-from api.services.llm_service import LLMService
-from api.services.llm_service import ProviderAuthError
-from api.services.llm_service import ProviderUnavailableError
-from api.services.llm_service import get_llm_provider_health
+from api.services.llm_service import (
+    AllProvidersFailedError,
+    JSONSchemaResponseFormat,
+    LLMProvider,
+    LLMResponse,
+    LLMService,
+    ProviderAuthError,
+    ProviderUnavailableError,
+    get_llm_provider_health,
+)
 from api.settings import get_settings
 
 
@@ -172,6 +174,87 @@ async def test_all_providers_failed_reports_tried_providers():
 
     assert exc_info.value.providers_tried == ["gemini", "openai", "anthropic"]
     assert len(exc_info.value.errors) == 3
+
+
+@pytest.mark.asyncio
+async def test_openai_uses_strict_json_schema_without_a_second_call(monkeypatch):
+    service = LLMService(
+        provider_clients={LLMProvider.OPENAI: object()},
+        state_client=None,
+        require_provider=True,
+        use_state_store=False,
+    )
+    captured = {}
+
+    async def fake_post_json(url, api_key, payload):
+        captured.update({"url": url, "api_key": api_key, "payload": payload})
+        return {
+            "choices": [{"message": {"content": '{"ok":true}'}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        }
+
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+
+    response = await service._call_openai(
+        "system",
+        "user",
+        0.0,
+        100,
+        JSONSchemaResponseFormat(name="test_response", schema=schema),
+    )
+
+    assert captured["payload"]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "test_response", "strict": True, "schema": schema},
+    }
+    assert response.schema_enforced is True
+    assert response.content == '{"ok":true}'
+
+
+@pytest.mark.asyncio
+async def test_openai_structured_refusal_is_not_reported_as_enforced(monkeypatch):
+    service = LLMService(
+        provider_clients={LLMProvider.OPENAI: object()},
+        state_client=None,
+        require_provider=True,
+        use_state_store=False,
+    )
+
+    async def fake_post_json(_url, _api_key, _payload):
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": None, "refusal": "cannot comply"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    with pytest.raises(ProviderUnavailableError, match="refused"):
+        await service._call_openai(
+            "system",
+            "user",
+            0.0,
+            100,
+            JSONSchemaResponseFormat(
+                name="test_response",
+                schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
 
 def test_provider_state_client_has_bounded_network_waits(monkeypatch):
     from unittest.mock import MagicMock

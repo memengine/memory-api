@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -17,10 +15,12 @@ import redis
 from redis.backoff import NoBackoff
 from redis.retry import Retry
 
+from api.infra.benchmark_provider import (
+    benchmark_provider_enabled,
+    deterministic_completion,
+)
 from api.infra.circuit_breaker import CircuitBreaker
 from api.settings import get_settings
-from api.infra.benchmark_provider import benchmark_provider_enabled
-from api.infra.benchmark_provider import deterministic_completion
 
 
 LOGGER = logging.getLogger(__name__)
@@ -41,6 +41,17 @@ class LLMResponse:
     output_tokens: int
     total_tokens: int
     latency_ms: int
+    schema_enforced: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class JSONSchemaResponseFormat:
+    name: str
+    schema: dict[str, Any]
+    strict: bool = True
+
+
+ResponseFormat = str | JSONSchemaResponseFormat
 
 
 @dataclass(slots=True)
@@ -209,7 +220,7 @@ class LLMService:
         user_message: str,
         temperature: float = 0.1,
         max_tokens: int = 2000,
-        response_format: str = "json",
+        response_format: ResponseFormat = "json",
     ) -> LLMResponse:
         if benchmark_provider_enabled():
             started = time.perf_counter()
@@ -319,7 +330,7 @@ class LLMService:
         user_message: str,
         temperature: float = 0.1,
         max_tokens: int = 2000,
-        response_format: str = "json",
+        response_format: ResponseFormat = "json",
     ) -> LLMResponse:
         try:
             asyncio.get_running_loop()
@@ -355,7 +366,7 @@ class LLMService:
         user_message: str,
         temperature: float,
         max_tokens: int,
-        response_format: str,
+        response_format: ResponseFormat,
     ) -> LLMResponse:
         if provider == LLMProvider.GEMINI:
             return await self._call_gemini(system_prompt, user_message, temperature, max_tokens, response_format)
@@ -371,7 +382,7 @@ class LLMService:
         user_message: str,
         temperature: float,
         max_tokens: int,
-        response_format: str,
+        response_format: ResponseFormat,
     ) -> LLMResponse:
         config = self._require_config(LLMProvider.GEMINI)
         started = time.perf_counter()
@@ -388,7 +399,11 @@ class LLMService:
                     config=types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=max_tokens,
-                        response_mime_type="application/json" if response_format == "json" else "text/plain",
+                        response_mime_type=(
+                            "application/json"
+                            if self._json_requested(response_format)
+                            else "text/plain"
+                        ),
                     ),
                 )
 
@@ -402,7 +417,11 @@ class LLMService:
                 config=types.GenerateContentConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens,
-                    response_mime_type="application/json" if response_format == "json" else "text/plain",
+                    response_mime_type=(
+                        "application/json"
+                        if self._json_requested(response_format)
+                        else "text/plain"
+                    ),
                 ),
             )
 
@@ -430,7 +449,7 @@ class LLMService:
         user_message: str,
         temperature: float,
         max_tokens: int,
-        response_format: str,
+        response_format: ResponseFormat,
     ) -> LLMResponse:
         config = self._require_config(LLMProvider.OPENAI)
         started = time.perf_counter()
@@ -443,7 +462,16 @@ class LLMService:
                 {"role": "user", "content": user_message},
             ],
         }
-        if response_format == "json":
+        if isinstance(response_format, JSONSchemaResponseFormat):
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_format.name,
+                    "strict": response_format.strict,
+                    "schema": response_format.schema,
+                },
+            }
+        elif response_format == "json":
             payload["response_format"] = {"type": "json_object"}
 
         try:
@@ -459,15 +487,27 @@ class LLMService:
             self._raise_mapped_provider_error(error)
 
         choice = (response.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        if isinstance(response_format, JSONSchemaResponseFormat):
+            if message.get("refusal"):
+                raise ProviderUnavailableError(
+                    "OpenAI refused the structured extraction response"
+                )
+            finish_reason = choice.get("finish_reason")
+            if finish_reason not in {None, "stop"}:
+                raise ProviderUnavailableError(
+                    f"OpenAI structured extraction ended with {finish_reason}"
+                )
         usage = response.get("usage") or {}
         return LLMResponse(
-            content=str(((choice.get("message") or {}).get("content")) or "{}"),
+            content=str(message.get("content") or "{}"),
             provider_used=LLMProvider.OPENAI.value,
             model_used=config.model,
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
             total_tokens=int(usage.get("total_tokens") or 0),
             latency_ms=int((time.perf_counter() - started) * 1000),
+            schema_enforced=isinstance(response_format, JSONSchemaResponseFormat),
         )
 
     async def _call_anthropic(
@@ -476,11 +516,11 @@ class LLMService:
         user_message: str,
         temperature: float,
         max_tokens: int,
-        response_format: str,
+        response_format: ResponseFormat,
     ) -> LLMResponse:
         config = self._require_config(LLMProvider.ANTHROPIC)
         started = time.perf_counter()
-        if response_format == "json":
+        if self._json_requested(response_format):
             system_prompt = f"{system_prompt}\n\nRespond with valid JSON only. No markdown, no explanation."
         payload = {
             "model": config.model,
@@ -518,6 +558,12 @@ class LLMService:
             output_tokens=output_tokens,
             total_tokens=input_tokens + output_tokens,
             latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    @staticmethod
+    def _json_requested(response_format: ResponseFormat) -> bool:
+        return response_format == "json" or isinstance(
+            response_format, JSONSchemaResponseFormat
         )
 
     async def _post_json(self, url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -674,6 +720,7 @@ def get_llm_provider_health() -> list[dict[str, object]]:
 
 __all__ = [
     "AllProvidersFailedError",
+    "JSONSchemaResponseFormat",
     "LLMProvider",
     "LLMResponse",
     "LLMService",

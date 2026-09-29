@@ -8,7 +8,7 @@ import pytest
 
 from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.services.extraction_service import ExtractionError, ExtractionService
-from api.services.llm_service import LLMResponse
+from api.services.llm_service import JSONSchemaResponseFormat, LLMResponse
 
 
 class FakeLLMService:
@@ -27,6 +27,9 @@ class FakeLLMService:
             output_tokens=7,
             total_tokens=18,
             latency_ms=1,
+            schema_enforced=isinstance(
+                kwargs.get("response_format"), JSONSchemaResponseFormat
+            ),
         )
 
 
@@ -983,6 +986,10 @@ async def test_claim_semantics_shadow_is_observed_without_writing_memory(
     assert shadow["observations"][0]["predicate"] == "education.exam_date"
     assert "value" not in shadow["observations"][0]
     assert "CLAIM SEMANTICS SHADOW CONTRACT" in llm.calls[0]["system_prompt"]
+    response_format = llm.calls[0]["response_format"]
+    assert isinstance(response_format, JSONSchemaResponseFormat)
+    assert "claim_semantics_shadow" in response_format.schema["required"]
+    assert result.extraction_metadata["primary_pass"]["schema_enforced"] is True
 
 
 @pytest.mark.asyncio

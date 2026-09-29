@@ -241,6 +241,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     processing_latencies: list[float] = []
     provider_latencies: list[float] = []
     input_tokens = output_tokens = 0
+    schema_enforced = 0
     for record in records:
         evaluation = record["evaluation"]
         languages[record["language"]].append(bool(evaluation["passed"]))
@@ -252,6 +253,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         acknowledgement_latencies.append(record["acknowledgement_ms"])
         processing_latencies.append(record["processing_ms"])
         primary = record.get("primary_pass") or {}
+        schema_enforced += int(bool(primary.get("schema_enforced")))
         if isinstance(primary.get("latency_ms"), (int, float)):
             provider_latencies.append(float(primary["latency_ms"]))
         input_tokens += int(primary.get("input_tokens") or 0)
@@ -275,6 +277,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             for language, results in sorted(languages.items())
         },
         "rejection_counts": dict(sorted(rejection_counts.items())),
+        "schema_enforcement": {"enforced": schema_enforced, "total": total},
         "latency_ms": {
             "acknowledgement_p50": _percentile(acknowledgement_latencies, 0.50),
             "acknowledgement_p95": _percentile(acknowledgement_latencies, 0.95),

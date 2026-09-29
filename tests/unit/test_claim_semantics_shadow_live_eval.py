@@ -113,7 +113,12 @@ def test_summarize_reports_exact_and_field_accuracy() -> None:
                 },
             },
             "shadow": {"rejection_counts": {"invalid_evidence_quote": 1}},
-            "primary_pass": {"latency_ms": 30, "input_tokens": 22, "output_tokens": 6},
+            "primary_pass": {
+                "latency_ms": 30,
+                "input_tokens": 22,
+                "output_tokens": 6,
+                "schema_enforced": True,
+            },
             "acknowledgement_ms": 4.0,
             "processing_ms": 32.0,
         },
@@ -125,3 +130,4 @@ def test_summarize_reports_exact_and_field_accuracy() -> None:
     assert result["field_accuracy"]["speech_act"] == 0.5
     assert result["tokens"]["total"] == 53
     assert result["rejection_counts"] == {"invalid_evidence_quote": 1}
+    assert result["schema_enforcement"] == {"enforced": 1, "total": 2}

@@ -177,3 +177,28 @@ def test_observer_rejects_non_object_root_without_raising() -> None:
 
     assert result["accepted"] == 0
     assert result["rejection_counts"] == {"invalid_root": 1}
+
+
+def test_observer_reports_invalid_field_type_without_recording_content() -> None:
+    result = observe_claim_semantics(
+        json.dumps(
+            {
+                "claim_semantics_shadow": [
+                    {
+                        "memory_index": None,
+                        "category": "preference",
+                        "predicate": "programming.default_language",
+                        "value": None,
+                        "speech_act": "uncertain_change",
+                        "certainty": "uncertain",
+                        "temporal_kind": "permanent",
+                    }
+                ]
+            }
+        ),
+        messages=[{"role": "user", "content": "I have not decided."}],
+        visible_turn_indexes={0},
+    )
+
+    assert result["accepted"] == 0
+    assert result["rejection_counts"] == {"invalid_value_type": 1}
