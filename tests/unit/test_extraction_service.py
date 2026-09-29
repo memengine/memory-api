@@ -899,6 +899,36 @@ def test_system_prompt_includes_schema_and_categories(tmp_path: Path) -> None:
     assert "rejects an assistant proposal but states a different" in prompt
     assert "Extract only the independently stated correction" in prompt
     assert "CLAIM SEMANTICS SHADOW CONTRACT" not in prompt
+    assert '"claim_semantics_shadow"' not in prompt
+
+
+@pytest.mark.parametrize("proposal_confirmation_enabled", [False, True])
+def test_enabled_claim_semantics_shadow_is_in_exact_response_shapes(
+    tmp_path: Path,
+    proposal_confirmation_enabled: bool,
+) -> None:
+    service = ExtractionService(
+        llm_service=FakeLLMService('{"memories":[]}'),
+        spec_path=_spec(tmp_path),
+        proposal_confirmation_enabled=proposal_confirmation_enabled,
+        claim_semantics_shadow_enabled=True,
+    )
+
+    prompt = service._build_system_prompt()
+    exact_contract, shadow_contract = prompt.split(
+        "CLAIM SEMANTICS SHADOW CONTRACT", maxsplit=1
+    )
+
+    assert (
+        '"claim_semantics_shadow": [claim-semantic objects defined below]'
+        in exact_contract
+    )
+    assert (
+        '"claim_semantics_shadow":[claim-semantic objects or empty when no governable claim]'
+        in exact_contract
+    )
+    assert "required in every response" in shadow_contract
+    assert "even when they are omitted from memories" in shadow_contract
 
 
 @pytest.mark.asyncio

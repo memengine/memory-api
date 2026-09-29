@@ -1110,9 +1110,11 @@ class ExtractionService:
     def _claim_semantics_shadow_contract() -> str:
         return (
             "\n\nCLAIM SEMANTICS SHADOW CONTRACT\n"
-            "Add top-level claim_semantics_shadow (maximum 8 items). It is diagnostic only "
+            "The top-level claim_semantics_shadow field shown in the exact response shape is "
+            "required in every response and may contain at most 8 items. Use an empty list only "
+            "when the transcript contains no governable claim observation. It is diagnostic only "
             "and never authorizes writes. Include uncertain changes, retractions, corrections, "
-            "and useful bounded facts omitted from memories. Each item must contain: "
+            "and useful bounded facts even when they are omitted from memories. Each item must contain: "
             "memory_index (matching memories index or null); category; "
             "predicate (language-neutral lowercase claim.slot); value; "
             "speech_act (assertion|correction|retraction|uncertain_change|reaffirmation); "
@@ -1123,10 +1125,10 @@ class ExtractionService:
             "assertions. Bounded claims require effective_until."
         )
 
-    @staticmethod
-    def _legacy_response_contract() -> str:
+    def _legacy_response_contract(self) -> str:
         """Keep disabled Phase 3A extraction behavior prompt-compatible."""
 
+        shadow_field, empty_shadow_field = self._claim_semantics_shadow_shape_fields()
         return (
             "Return exactly this JSON shape:\n"
             "{\n"
@@ -1148,6 +1150,7 @@ class ExtractionService:
             '    "evidence_turn": "zero-based user turn index",\n'
             '    "selection_evidence": "exact shortest substring from that user turn"\n'
             "  },\n"
+            f"{shadow_field}"
             '  "nothing_to_extract": false,\n'
             '  "extraction_notes": "optional string"\n'
             "}\n\n"
@@ -1180,11 +1183,12 @@ class ExtractionService:
             "the memories array. If the request or the pair is ambiguous, use null.\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"memory_clarification":null,'
+            f"{empty_shadow_field}"
             '"nothing_to_extract":true,"extraction_notes":"reason"}'
         )
 
-    @staticmethod
-    def _structured_proposal_response_contract() -> str:
+    def _structured_proposal_response_contract(self) -> str:
+        shadow_field, empty_shadow_field = self._claim_semantics_shadow_shape_fields()
         return (
             "Return exactly this JSON shape:\n"
             "{\n"
@@ -1211,6 +1215,7 @@ class ExtractionService:
             '      "reasoning": "one sentence why this was extracted"\n'
             "    }\n"
             "  ],\n"
+            f"{shadow_field}"
             '  "nothing_to_extract": false,\n'
             '  "extraction_notes": "optional string"\n'
             "}\n\n"
@@ -1252,8 +1257,18 @@ class ExtractionService:
             "the memories array. If the request or the pair is ambiguous, use null.\n\n"
             "If nothing should be extracted, return:\n"
             '{"proposal_confirmation":null,"memory_clarification":null,'
-            '"memories":[],"nothing_to_extract":true,'
+            '"memories":[],'
+            f"{empty_shadow_field}"
+            '"nothing_to_extract":true,'
             '"extraction_notes":"reason"}'
+        )
+
+    def _claim_semantics_shadow_shape_fields(self) -> tuple[str, str]:
+        if not self._claim_semantics_shadow_enabled:
+            return "", ""
+        return (
+            '  "claim_semantics_shadow": [claim-semantic objects defined below],\n',
+            '"claim_semantics_shadow":[claim-semantic objects or empty when no governable claim],',
         )
 
     @staticmethod
