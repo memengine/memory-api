@@ -1,0 +1,49 @@
+{
+  "version": "phase0-v1",
+  "scenarios": [
+    {
+      "id": "uncertain_programming_language_change",
+      "initial_messages": [
+        {
+          "role": "user",
+          "content": "My default language for every programming example is C++."
+        }
+      ],
+      "warm_query": "Show me a short programming example.",
+      "update_messages": [
+        {
+          "role": "user",
+          "content": "My default language for every programming example is Python. This conflicts with my earlier C++ default, and I have not decided which should remain current."
+        }
+      ],
+      "verification_query": "Show me a short programming example.",
+      "expected": {
+        "clarification_required": true,
+        "must_include_any": ["c++"],
+        "must_exclude_all": ["python"]
+      }
+    },
+    {
+      "id": "exam_date_correction",
+      "initial_messages": [
+        {
+          "role": "user",
+          "content": "My exam is on October 10."
+        }
+      ],
+      "warm_query": "When is my exam?",
+      "update_messages": [
+        {
+          "role": "user",
+          "content": "Correction: my exam moved from October 10 to October 18."
+        }
+      ],
+      "verification_query": "When is my exam?",
+      "expected": {
+        "clarification_required": false,
+        "must_include_any": ["october 18"],
+        "must_exclude_all": ["october 10"]
+      }
+    }
+  ]
+}
