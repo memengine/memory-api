@@ -505,12 +505,27 @@ class ExtractionService:
         empty_response_repair_response: Any | None = None
         empty_response_repair_error: str | None = None
         empty_response_repair_wall_latency_ms = 0
+        empty_response_repair_reason: str | None = None
         if (
             not kept
             and not pending
             and clarification_request is None
             and self._is_empty_extraction_contract_violation(normalized_response)
         ):
+            empty_response_repair_reason = "inconsistent_empty_response"
+        elif (
+            not kept
+            and not pending
+            and clarification_request is None
+            and clarification_rejection is not None
+            and bool(existing_memories)
+            and source_context is None
+        ):
+            # The primary model detected a review-worthy relationship but did
+            # not produce a backend-valid pair. Recover the user-stated claim;
+            # the normal evidence and conflict gates still decide its effect.
+            empty_response_repair_reason = "invalid_memory_clarification"
+        if empty_response_repair_reason is not None:
             if source_context:
                 raise ExtractionError(
                     "LLM returned an inconsistent empty extraction response"
@@ -545,7 +560,8 @@ class ExtractionService:
                 )
                 empty_response_repair_response = await self.llm_service.complete(
                     system_prompt=self._build_empty_response_repair_prompt(
-                        repair_evidence_turn
+                        repair_evidence_turn,
+                        repair_reason=empty_response_repair_reason,
                     ),
                     user_message=repair_user_message,
                     temperature=0.0,
@@ -828,6 +844,7 @@ class ExtractionService:
                 },
                 "empty_response_repair": {
                     "attempted": empty_response_repair_attempted,
+                    "reason": empty_response_repair_reason,
                     "completed": empty_response_repair_response is not None,
                     "provider": getattr(
                         empty_response_repair_response, "provider_used", None
@@ -1233,21 +1250,41 @@ class ExtractionService:
         )
 
     @staticmethod
-    def _build_empty_response_repair_prompt(evidence_turn: int) -> str:
+    def _build_empty_response_repair_prompt(
+        evidence_turn: int,
+        *,
+        repair_reason: str = "inconsistent_empty_response",
+    ) -> str:
+        if repair_reason == "invalid_memory_clarification":
+            opening = (
+                "The previous extraction response requested memory review but "
+                "did not provide a backend-valid pair. Recover only the durable "
+                "claim directly stated by the user; do not create a clarification "
+                "or choose which memory wins. "
+            )
+        else:
+            opening = (
+                "The previous extraction response violated the response contract "
+                "by returning no memories while claiming there was something to "
+                "extract. "
+            )
         return (
-            "The previous extraction response violated the response contract by "
-            "returning no memories while claiming there was something to extract. "
-            "Re-evaluate only the supplied direct user turn. If it directly states "
+            opening
+            + "Re-evaluate only the supplied direct user turn. If it directly states "
             "a durable fact, preference, goal, procedure, relationship, or expertise "
             "claim, extract it even when it updates, contradicts, or overlaps an "
             "existing memory; conflict resolution happens later in the backend. "
             "Existing memories are context only and must not cause a changed claim "
-            "to be dropped. Do not infer a claim from a question or uncertainty. "
+            "to be dropped. Set claim_state to correction for an explicit replacement, "
+            "uncertain_change when the user states a competing value but has not "
+            "decided which remains current, and asserted otherwise. Do not infer a "
+            "claim from a question or invent a value that the user did not state. "
             f"Cite user turn {evidence_turn} in evidence_turns and use "
             "evidence_relation direct_user_statement. Return JSON only as "
             "{\"memories\":[{\"content\":\"string\",\"category\":"
             "\"preference|fact|goal|procedure|relationship|expertise\","
             "\"importance_score\":7.0,\"confidence\":0.9,"
+            "\"claim_state\":\"asserted|correction|uncertain_change\","
             f"\"evidence_turns\":[{evidence_turn}],\"evidence_relation\":"
             "\"direct_user_statement\",\"proposal_turn\":null,"
             "\"reasoning\":\"string\"}],\"nothing_to_extract\":false}. "

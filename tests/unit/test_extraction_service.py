@@ -565,6 +565,92 @@ async def test_empty_response_repair_with_no_valid_candidate_fails(
 
 
 @pytest.mark.asyncio
+async def test_invalid_single_memory_clarification_recovers_uncertain_candidate(
+    tmp_path: Path,
+) -> None:
+    existing_id = "11111111-1111-1111-1111-111111111111"
+    llm = FakeLLMService(
+        [
+            json.dumps(
+                {
+                    "memories": [],
+                    "nothing_to_extract": True,
+                    "memory_clarification": {
+                        "requested": True,
+                        "memory_ids": [existing_id],
+                        "evidence_turn": 0,
+                        "selection_evidence": "not decided whether",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "memories": [
+                        {
+                            "content": (
+                                "User is considering Python as their default language "
+                                "but has not decided whether it should replace C++."
+                            ),
+                            "category": "preference",
+                            "importance_score": 7.0,
+                            "confidence": 0.9,
+                            "claim_state": "uncertain_change",
+                            "evidence_turns": [0],
+                            "evidence_relation": "direct_user_statement",
+                            "proposal_turn": None,
+                            "reasoning": "The user stated a competing but undecided default.",
+                        }
+                    ],
+                    "nothing_to_extract": False,
+                }
+            ),
+        ]
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "user",
+                "source_kind": "direct_user_input",
+                "content": (
+                    "My default language is Python, but I have not decided whether "
+                    "it should replace my earlier C++ default."
+                ),
+            }
+        ],
+        proxy_user_id="proxy-clarify-repair",
+        tenant_id="tenant-clarify-repair",
+        job_id="job-clarify-repair",
+        existing_memories=[
+            SimpleNamespace(
+                id=existing_id,
+                content="User's default programming language is C++.",
+                category="preference",
+                importance_score=8,
+                is_archived=False,
+            )
+        ],
+    )
+
+    assert result.memories_to_store == []
+    assert result.pending_candidates_count == 1
+    assert result.pending_candidates[0].candidate_reason == "uncertain_change"
+    assert result.pending_candidates[0].validated_evidence["claim_state"] == (
+        "uncertain_change"
+    )
+    assert len(llm.calls) == 2
+    assert "uncertain_change" in str(llm.calls[1]["system_prompt"])
+    assert result.extraction_metadata["empty_response_repair"]["reason"] == (
+        "invalid_memory_clarification"
+    )
+    assert (
+        result.extraction_metadata["memory_clarification"]["rejected_reason"]
+        == "clarification_requires_two_memories"
+    )
+
+
+@pytest.mark.asyncio
 async def test_zero_extraction_can_request_clarification_for_visible_memories(
     tmp_path: Path,
 ) -> None:
