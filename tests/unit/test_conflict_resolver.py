@@ -394,19 +394,35 @@ def test_ambiguous_same_user_preference_queues_a_self_scoped_clarification() -> 
     assert clarifications[0].conflict_id == conflicts[0].id
 
 
-def test_uncertain_change_directive_queues_clarification_without_llm_action() -> None:
+def test_uncertain_change_directive_queues_canonical_clarification_option() -> None:
     existing = make_existing_memory()
     existing.content = "User's programming default is C++."
     existing.category = MemoryCategory.preference
     session = FakeSession(existing_memory=existing)
     qdrant = MagicMock()
     qdrant.search_memories.return_value = [make_qdrant_point(existing)]
-    client = make_llm_client("UPDATE")
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(
+        content=json.dumps(
+            {
+                "relation": "coexists",
+                "reasoning": "Python is being considered but is not adopted.",
+                "commitment_status": "tentative",
+                "requires_user_choice": True,
+                "clarification_option_memory": {
+                    "attribute": "default programming language",
+                    "value": "Python",
+                    "category": "preference",
+                },
+                "merged_memory": None,
+            }
+        )
+    )
     resolver = ConflictResolver(
         session=session,
         qdrant_service=qdrant,
         embedder=lambda _text: [0.1] * 3,
-        client=client,
+        llm_service=llm_service,
     )
     resolver._temporal_conflict_decision = MagicMock()  # type: ignore[method-assign]
     uncertain = ExtractedMemory(
@@ -428,9 +444,49 @@ def test_uncertain_change_directive_queues_clarification_without_llm_action() ->
 
     assert len(stored) == 1
     assert stored[0].resolution == "CLARIFICATION_PENDING"
+    assert stored[0].content == "User's default programming language is Python."
     assert existing.is_archived is False
     resolver._temporal_conflict_decision.assert_not_called()
-    client.models.generate_content.assert_not_called()
+    llm_service.complete_sync.assert_called_once()
+
+
+def test_uncertain_change_without_canonical_option_preserves_current_memory() -> None:
+    existing = make_existing_memory()
+    existing.content = "User's programming default is C++."
+    existing.category = MemoryCategory.preference
+    session = FakeSession(existing_memory=existing)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing)]
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(content="not-json")
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=qdrant,
+        embedder=lambda _text: [0.1] * 3,
+        llm_service=llm_service,
+    )
+    uncertain = ExtractedMemory(
+        content="User may replace C++ with Python but has not decided.",
+        category="preference",
+        importance_score=8.0,
+        confidence=0.58,
+        expiry="permanent",
+        reasoning="The replacement remains undecided.",
+        validated_evidence={"governance_directive": "clarify_if_conflict"},
+    )
+
+    stored = resolver.check_and_store(
+        [uncertain],
+        user_id=str(existing.user_id),
+        tenant_id=str(uuid.uuid4()),
+        proxy_user_id=str(existing.proxy_user_id),
+    )
+
+    assert stored == []
+    assert existing.is_archived is False
+    assert not any(isinstance(item, ClarificationQueue) for item in session.added)
+    assert not any(isinstance(item, Memory) for item in session.added)
+    llm_service.complete_sync.assert_called_once()
 
 
 def test_unmatched_uncertain_change_is_not_activated() -> None:

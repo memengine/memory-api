@@ -905,25 +905,39 @@ class ConflictResolver:
                     decision is None
                     and governance_directive == "clarify_if_conflict"
                 ):
-                    decision = ConflictDecision(
-                        action="CLARIFY",
-                        reasoning=(
-                            "The user introduced a competing value without choosing "
-                            "which value should remain current."
-                        ),
-                        decision_evidence=review_evidence(
-                            action="USER_REVIEW",
-                            reason_codes=[
-                                "uncertain_change",
-                                "matched_personal_memory_candidate",
-                            ],
-                            explanation=(
-                                "MemoryOS matched an uncertain replacement to an active "
-                                "memory and routed the choice back to the user."
-                            ),
-                            details={"scope": "same_proxy_user"},
-                        ),
+                    classified = self._classify_conflict(
+                        new_memory,
+                        existing_memory,
+                        candidate,
                     )
+                    if (
+                        classified.action == "CLARIFY"
+                        and classified.clarification_option_memory is not None
+                    ):
+                        decision = classified
+                    else:
+                        decision = ConflictDecision(
+                            action="REJECT",
+                            reasoning=(
+                                "MemoryOS could not construct a grounded canonical "
+                                "alternative for the uncertain change, so it preserved "
+                                "the current memory."
+                            ),
+                            decision_evidence=automatic_evidence(
+                                action="REJECT",
+                                reason_codes=[
+                                    "uncertain_change",
+                                    "canonical_alternative_unavailable",
+                                    "safe_current_preserved",
+                                ],
+                                explanation=(
+                                    "An uncertain candidate cannot become a selectable "
+                                    "current memory unless its alternative value is "
+                                    "grounded and canonicalized."
+                                ),
+                                details={"scope": "same_proxy_user"},
+                            ),
+                        )
                 if decision is None:
                     decision = self._temporal_conflict_decision(new_memory, existing_memory)
                 if decision is None and clarification_requested:

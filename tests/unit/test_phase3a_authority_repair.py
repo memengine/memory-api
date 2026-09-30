@@ -672,6 +672,45 @@ async def test_plain_proposal_rejection_does_not_trigger_correction_recovery() -
     assert result.extraction_metadata["correction_recovery"]["attempted"] is False
 
 
+@pytest.mark.asyncio
+async def test_structured_hinglish_rejection_cannot_be_recovered_as_memory() -> None:
+    messages, active = _transcript(
+        "Nahi, ye wrong hai. Evening preference save mat karo."
+    )
+    llm = _SequencedLLM(
+        [
+            {
+                "proposal_confirmation": {
+                    "decision": "rejected",
+                    "target_ordinal": 1,
+                    "selection_evidence": "save mat karo",
+                    "reasoning": "The user rejected the proposal.",
+                },
+                "memory_clarification": None,
+                "memories": [],
+                "nothing_to_extract": True,
+                "extraction_notes": "The user rejected the proposal.",
+            }
+        ]
+    )
+    service = ExtractionService(
+        llm_service=llm,
+        proposal_confirmation_enabled=True,
+        importance_shadow_enabled=False,
+        app_env="test",
+    )
+
+    result = await service.extract(messages=messages, proposal_context=active)
+
+    assert len(llm.calls) == 1
+    assert result.memories_extracted == 0
+    assert result.nothing_to_extract is True
+    assert result.extraction_metadata["proposal_confirmation"]["decision_contract"] == (
+        "rejected"
+    )
+    assert result.extraction_metadata["correction_recovery"]["attempted"] is False
+
+
 def _structured_transcript(
     claims: list[str],
     user_text: str,

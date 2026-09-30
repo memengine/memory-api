@@ -621,6 +621,7 @@ class ExtractionService:
             messages=indexed_messages,
             source_context=source_context,
             proposal_context=proposal_context,
+            structured_proposal=structured_proposal,
             kept=kept,
             pending=pending,
         )
@@ -1316,10 +1317,20 @@ class ExtractionService:
         messages: list[dict[str, Any]],
         source_context: dict[str, Any] | None,
         proposal_context: list[dict[str, Any]] | None,
+        structured_proposal: StructuredProposalResolution | None,
         kept: list[ExtractedMemory],
         pending: list[PendingExtractedMemory],
     ) -> bool:
         if source_context or not proposal_context:
+            return False
+        if structured_proposal is not None and structured_proposal.decision in {
+            "rejected",
+            "ambiguous",
+            "unrelated",
+        }:
+            # A structured proposal decision is the semantic authority for this
+            # turn. Recovery must not reinterpret a rejection, ambiguity, or
+            # unrelated reply as a separate durable user claim.
             return False
         if any(
             item.validated_evidence.get("relation") == "direct_user_statement"
