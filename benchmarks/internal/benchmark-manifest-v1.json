@@ -59,6 +59,12 @@
       "acceptance": {"exit_code": 0}, "component_status": "production-active plus benchmark-only crash barrier"
     },
     {
+      "name": "governed-memory-development-contract", "version": "1.0", "tier": "fast", "classification": "development",
+      "dataset": "benchmarks/internal/datasets/governed_memory/development/journeys_v1.json", "runner": ["{python}", "-m", "pytest", "tests/unit/test_governed_memory_phase0_replay.py", "tests/unit/test_governed_memory_development_journeys.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/reports/governed-memory-phase0-characterization.md",
+      "acceptance": {"exit_code": 0}, "component_status": "production-active public API contract with development-only live replay"
+    },
+    {
       "name": "fault-injection-reliability", "version": "3.0", "tier": "integration", "classification": "development",
       "dataset": "benchmarks/internal/datasets/fault_injection/development/extension_v3.jsonl", "runner": ["{python}", "-m", "benchmarks.internal.fault_injection_runner", "--output", "{output}"],
       "services": ["postgresql", "redis"], "provider_calls": false, "mode": "live", "baseline": "benchmarks/internal/baselines/fault-injection-reliability-development.json",

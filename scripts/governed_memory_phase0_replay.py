@@ -1,4 +1,4 @@
-"""Characterize governed-memory consistency through the public MemoryOS API.
+"""Evaluate governed-memory journeys through the public MemoryOS API.
 
 This is a read/write diagnostic for fresh synthetic users. It does not modify
 production behavior and never writes the API key to its artifact.
@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
+import statistics
 import time
 import uuid
 from datetime import UTC, datetime
@@ -28,6 +30,7 @@ DEFAULT_FIXTURE = (
 )
 DEFAULT_FIXTURE_VERSION = "phase0-v3"
 DEFAULT_BASE_URL = "https://api.memoryo.dev"
+ALLOWED_LANGUAGES = {"en", "hi", "hinglish", "system"}
 TERMINAL_JOB_STATUSES = {
     "blocked",
     "completed",
@@ -39,6 +42,10 @@ TERMINAL_JOB_STATUSES = {
 
 def load_fixture(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    return validate_fixture(payload)
+
+
+def validate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
     scenarios = payload.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("Fixture must contain at least one scenario")
@@ -48,12 +55,25 @@ def load_fixture(path: Path) -> dict[str, Any]:
         if not scenario_id or scenario_id in seen:
             raise ValueError("Each scenario must have a unique non-empty id")
         seen.add(scenario_id)
+        language = str(scenario.get("language") or "").strip().lower()
+        family = str(scenario.get("family") or "").strip()
+        if language and language not in ALLOWED_LANGUAGES:
+            raise ValueError(f"{scenario_id}.language is unsupported")
+        if "language" in scenario and not language:
+            raise ValueError(f"{scenario_id}.language must be non-empty")
+        if "family" in scenario and not family:
+            raise ValueError(f"{scenario_id}.family must be non-empty")
+        if "safety_critical" in scenario and not isinstance(
+            scenario["safety_critical"], bool
+        ):
+            raise TypeError(f"{scenario_id}.safety_critical must be boolean")
         for field in ("initial_messages", "update_messages"):
             messages = scenario.get(field)
             if not isinstance(messages, list) or not messages:
                 raise ValueError(f"{scenario_id}.{field} must contain messages")
             if any(
-                message.get("role") not in {"user", "assistant"} for message in messages
+                message.get("role") not in {"user", "assistant", "system"}
+                for message in messages
             ):
                 raise ValueError(f"{scenario_id}.{field} contains an unsupported role")
         for field in ("warm_query", "verification_query"):
@@ -67,9 +87,17 @@ def load_fixture(path: Path) -> dict[str, Any]:
         after_resolution = expected.get("after_resolution")
         if after_resolution is not None and not isinstance(after_resolution, dict):
             raise TypeError(f"{scenario_id}.expected.after_resolution is invalid")
-        if bool(expected.get("resolve_to_label_contains")) != bool(after_resolution):
+        resolve_with_answer = expected.get("resolve_with_answer")
+        if resolve_with_answer not in {None, "A", "B", "both", "neither"}:
+            raise ValueError(f"{scenario_id}.resolve_with_answer is invalid")
+        if resolve_with_answer and expected.get("resolve_to_label_contains"):
+            raise ValueError(f"{scenario_id} has multiple resolution selectors")
+        has_resolution = bool(resolve_with_answer) or bool(
+            expected.get("resolve_to_label_contains")
+        )
+        if has_resolution != bool(after_resolution):
             raise ValueError(
-                f"{scenario_id} must define both resolve_to_label_contains and after_resolution"
+                f"{scenario_id} must define a resolution selector and after_resolution"
             )
     return payload
 
@@ -121,6 +149,9 @@ def evaluate_retrieval(
     )
     searchable = "\n".join(str(item.get("content") or "") for item in memories).lower()
     include_terms = [str(item).lower() for item in expected.get("must_include_any", [])]
+    include_all_terms = [
+        str(item).lower() for item in expected.get("must_include_all", [])
+    ]
     exclude_terms = [str(item).lower() for item in expected.get("must_exclude_all", [])]
     memory_ids = {
         str(item.get("id") or "") for item in memories if str(item.get("id") or "")
@@ -133,6 +164,10 @@ def evaluate_retrieval(
             term in searchable for term in exclude_terms
         ),
     }
+    if "must_include_all" in expected:
+        checks["all_required_values"] = all(
+            term in searchable for term in include_all_terms
+        )
     if excluded_memory_ids:
         checks["superseded_memory_absent"] = memory_ids.isdisjoint(excluded_memory_ids)
     if check_clarification:
@@ -240,8 +275,31 @@ def select_clarification_option(
     return matches[0]
 
 
+def select_clarification_answer(
+    clarification: dict[str, Any], answer: str
+) -> dict[str, Any]:
+    options = clarification.get("options")
+    matches = (
+        [
+            option
+            for option in options
+            if isinstance(option, dict) and option.get("answer") == answer
+        ]
+        if isinstance(options, list)
+        else []
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one clarification option with answer {answer!r}; found {len(matches)}"
+        )
+    return matches[0]
+
+
 def evaluate_provenance(
-    response: dict[str, Any], *, expected_conversation_id: str
+    response: dict[str, Any], *, expected_conversation_id: str,
+    expected_authority_label: str | None = None,
+    expected_authority_level: int | None = None,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     memories = (
         [item for item in response.get("data", []) if isinstance(item, dict)]
@@ -271,6 +329,14 @@ def evaluate_provenance(
                 for reference in references
             ),
         }
+        if expected_authority_label is not None:
+            checks["authority_label_matches"] = (
+                authority.get("label") == expected_authority_label
+            )
+        if expected_authority_level is not None:
+            checks["authority_level_matches"] = (
+                authority.get("level") == expected_authority_level
+            )
         item_checks.append(
             {
                 "memory_id": str(memory.get("id") or ""),
@@ -279,7 +345,8 @@ def evaluate_provenance(
             }
         )
     return {
-        "passed": bool(item_checks) and all(item["passed"] for item in item_checks),
+        "passed": (allow_empty or bool(item_checks))
+        and all(item["passed"] for item in item_checks),
         "memory_count": len(memories),
         "items": item_checks,
     }
@@ -407,9 +474,16 @@ async def answer_clarification(
     *,
     external_user_id: str,
     clarification: dict[str, Any],
-    label_contains: str,
+    label_contains: str | None = None,
+    answer: str | None = None,
 ) -> dict[str, Any]:
-    option = select_clarification_option(clarification, label_contains)
+    if bool(label_contains) == bool(answer):
+        raise ValueError("Provide exactly one clarification selector")
+    option = (
+        select_clarification_option(clarification, str(label_contains))
+        if label_contains
+        else select_clarification_answer(clarification, str(answer))
+    )
     clarification_id = str(clarification.get("id") or "")
     started = time.perf_counter()
     response = await client.post(
@@ -448,7 +522,12 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
         headers=headers,
         timeout=args.request_timeout,
     ) as client:
-        for scenario in fixture["scenarios"]:
+        selected_scenarios = select_scenarios(
+            fixture,
+            scenario_ids=args.scenario,
+            max_cases=args.max_cases,
+        )
+        for scenario in selected_scenarios:
             scenario_id = scenario["id"]
             external_user_id = f"phase0-{scenario_id}-{run_id}"
             conversation_id = f"phase0:{scenario_id}:{run_id}"
@@ -528,7 +607,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             post_resolution = None
             post_resolution_evaluation = None
             resolve_to = scenario["expected"].get("resolve_to_label_contains")
-            if resolve_to:
+            resolve_answer = scenario["expected"].get("resolve_with_answer")
+            if resolve_to or resolve_answer:
                 clarification = immediate.get("clarification") or settled.get(
                     "clarification"
                 )
@@ -537,7 +617,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                         client,
                         external_user_id=external_user_id,
                         clarification=clarification,
-                        label_contains=str(resolve_to),
+                        label_contains=str(resolve_to) if resolve_to else None,
+                        answer=str(resolve_answer) if resolve_answer else None,
                     )
                     if args.index_settle_seconds:
                         await asyncio.sleep(args.index_settle_seconds)
@@ -558,9 +639,18 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                         else set(),
                     )
                     post_ids = set(post_resolution_evaluation["observed"]["memory_ids"])
-                    post_resolution_evaluation["checks"]["selected_memory_present"] = (
-                        bool(selected_memory_id) and selected_memory_id in post_ids
-                    )
+                    if selected_memory_id:
+                        post_resolution_evaluation["checks"][
+                            "selected_memory_present"
+                        ] = selected_memory_id in post_ids
+                    if resolve_answer:
+                        resolution_data = resolution.get("data")
+                        post_resolution_evaluation["checks"][
+                            "resolution_matches"
+                        ] = (
+                            isinstance(resolution_data, dict)
+                            and resolution_data.get("resolution") == resolve_answer
+                        )
                     post_resolution_evaluation["passed"] = all(
                         post_resolution_evaluation["checks"].values()
                     )
@@ -573,6 +663,15 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             provenance_evaluation = evaluate_provenance(
                 provenance_source,
                 expected_conversation_id=conversation_id,
+                expected_authority_label=scenario["expected"].get(
+                    "authority_label"
+                ),
+                expected_authority_level=scenario["expected"].get(
+                    "authority_level"
+                ),
+                allow_empty=bool(
+                    scenario["expected"].get("allow_empty_provenance")
+                ),
             )
             isolation_retrieval = None
             isolation_evaluation = None
@@ -608,6 +707,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             }
             record = {
                 "scenario_id": scenario_id,
+                "language": scenario.get("language", "legacy"),
+                "family": scenario.get("family", "legacy"),
+                "safety_critical": bool(scenario.get("safety_critical")),
                 "external_user_id": external_user_id,
                 "conversation_id": conversation_id,
                 "initial_add": initial,
@@ -662,8 +764,116 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             for item in artifact["scenarios"]
             if item["provenance_evaluation"]["passed"]
         ),
+        "safety_critical_failures": [
+            item["scenario_id"]
+            for item in artifact["scenarios"]
+            if item["safety_critical"] and not item["journey_evaluation"]["passed"]
+        ],
+        "by_language": _slice_summary(artifact["scenarios"], "language"),
+        "by_family": _slice_summary(artifact["scenarios"], "family"),
+        "timing_ms": _timing_summary(artifact["scenarios"]),
     }
     return artifact
+
+
+def _slice_summary(
+    scenarios: list[dict[str, Any]], field: str
+) -> dict[str, dict[str, int]]:
+    values = sorted({str(item.get(field) or "unknown") for item in scenarios})
+    return {
+        value: {
+            "total": sum(
+                1
+                for item in scenarios
+                if str(item.get(field) or "unknown") == value
+            ),
+            "passed": sum(
+                1
+                for item in scenarios
+                if str(item.get(field) or "unknown") == value
+                and item["journey_evaluation"]["passed"]
+            ),
+        }
+        for value in values
+    }
+
+
+def _timing_stats(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "p50": None, "p95": None, "max": None}
+    ordered = sorted(values)
+    p95_index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1))
+    return {
+        "count": len(ordered),
+        "p50": round(statistics.median(ordered), 2),
+        "p95": round(ordered[p95_index], 2),
+        "max": round(ordered[-1], 2),
+    }
+
+
+def _timing_summary(
+    scenarios: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int | None]]:
+    acknowledgements: list[float] = []
+    job_polling: list[float] = []
+    retrievals: list[float] = []
+    clarifications: list[float] = []
+    for scenario in scenarios:
+        for field in ("initial_add", "update_add", "idempotency_replay"):
+            operation = scenario.get(field)
+            if not isinstance(operation, dict):
+                continue
+            acknowledgement = operation.get("acknowledgement_ms")
+            if isinstance(acknowledgement, (int, float)):
+                acknowledgements.append(float(acknowledgement))
+            terminal = operation.get("terminal")
+            if isinstance(terminal, dict) and isinstance(
+                terminal.get("latency_ms"), (int, float)
+            ):
+                job_polling.append(float(terminal["latency_ms"]))
+        for field in (
+            "warm_retrieval",
+            "immediate_retrieval",
+            "settled_retrieval",
+            "post_resolution_retrieval",
+            "isolation_retrieval",
+        ):
+            operation = scenario.get(field)
+            if isinstance(operation, dict) and isinstance(
+                operation.get("latency_ms"), (int, float)
+            ):
+                retrievals.append(float(operation["latency_ms"]))
+        resolution = scenario.get("resolution")
+        if isinstance(resolution, dict) and isinstance(
+            resolution.get("latency_ms"), (int, float)
+        ):
+            clarifications.append(float(resolution["latency_ms"]))
+    return {
+        "add_acknowledgement": _timing_stats(acknowledgements),
+        "job_polling": _timing_stats(job_polling),
+        "retrieval": _timing_stats(retrievals),
+        "clarification_answer": _timing_stats(clarifications),
+    }
+
+
+def select_scenarios(
+    fixture: dict[str, Any],
+    *,
+    scenario_ids: list[str] | None,
+    max_cases: int | None,
+) -> list[dict[str, Any]]:
+    scenarios = list(fixture["scenarios"])
+    if scenario_ids:
+        by_id = {str(item["id"]): item for item in scenarios}
+        missing = [scenario_id for scenario_id in scenario_ids if scenario_id not in by_id]
+        if missing:
+            raise ValueError(f"Unknown scenario IDs: {', '.join(missing)}")
+        scenarios = [by_id[scenario_id] for scenario_id in scenario_ids]
+    if max_cases is not None:
+        if max_cases < 1:
+            raise ValueError("max_cases must be at least 1")
+        scenarios = scenarios[:max_cases]
+    return scenarios
 
 
 def write_artifact(payload: dict[str, Any], output: Path) -> None:
@@ -684,6 +894,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-timeout", type=float, default=120.0)
     parser.add_argument("--index-settle-seconds", type=float, default=6.0)
     parser.add_argument("--request-timeout", type=float, default=30.0)
+    parser.add_argument("--max-cases", type=int)
+    parser.add_argument("--scenario", action="append")
     return parser.parse_args()
 
 
@@ -691,13 +903,23 @@ def main() -> int:
     args = parse_args()
     fixture = load_fixture(Path(args.fixture))
     if not args.execute:
+        selected_scenarios = select_scenarios(
+            fixture,
+            scenario_ids=args.scenario,
+            max_cases=args.max_cases,
+        )
         print(
             json.dumps(
                 {
                     "mode": "dry_run",
                     "base_url": args.base_url.rstrip("/"),
                     "fixture_version": fixture["version"],
-                    "scenario_ids": [item["id"] for item in fixture["scenarios"]],
+                    "scenario_ids": [item["id"] for item in selected_scenarios],
+                    "scenario_count": len(selected_scenarios),
+                    "safety_critical_count": sum(
+                        bool(item.get("safety_critical"))
+                        for item in selected_scenarios
+                    ),
                     "note": "Pass --execute with MEMORYOS_API_KEY set to create fresh synthetic users.",
                 },
                 indent=2,

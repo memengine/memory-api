@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "benchmarks" / "internal" / "benchmark-manifest-v1.json"
 HARNESS_MARKERS = (
@@ -93,7 +92,25 @@ def _run_suite(suite: dict[str, Any], run_dir: Path, *, use_docker: bool) -> dic
         container_command = ["python" if index == 0 else part for index, part in enumerate(command)]
         command = ["docker", "compose", "exec", "-T", "api", *container_command]
         execution = "docker-compose-api"
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    environment = os.environ.copy()
+    if execution == "host":
+        temporary_root = run_dir / "tmp" / suite["name"]
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        environment.update(
+            {
+                "TEMP": str(temporary_root),
+                "TMP": str(temporary_root),
+                "TMPDIR": str(temporary_root),
+            }
+        )
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     combined = result.stdout + result.stderr
     result_payload = _load_json(output if output.exists() else None)
     gate_failures = _evaluate(result_payload, suite.get("acceptance", {}))

@@ -30,6 +30,39 @@ The provider tier is never part of ordinary PR CI. Holdout is excluded from all 
 requires a separately reviewed manual command plus dual authorization. Aggregate JSON and Markdown
 reports are written under `artifacts/internal-benchmarks/aggregate/<run-id>/`.
 
+## Governed-memory public API development journeys
+
+`datasets/governed_memory/development/journeys_v1.json` is an inspectable development set, not a
+blind holdout. It contains 42 stateful journeys: 10 English, 10 Hindi, 10 Hinglish, and 12
+language-independent authority, evidence, identity, idempotency, proposal-selection, and
+clarification-resolution boundaries.
+
+The deterministic contract tests validate the fixture against the real public `MemoryAddRequest`
+schema and verify evaluator behavior without network calls:
+
+```powershell
+python -m pytest tests/unit/test_governed_memory_phase0_replay.py tests/unit/test_governed_memory_development_journeys.py -q
+```
+
+Inspect the bounded live plan before creating synthetic users:
+
+```powershell
+python scripts/governed_memory_phase0_replay.py --fixture benchmarks/internal/datasets/governed_memory/development/journeys_v1.json
+```
+
+The live replay requires `MEMORYOS_API_KEY` and an explicit `--execute`. Use `--max-cases` for the
+first canary, and write raw results only below the ignored `artifacts/internal-benchmarks` tree.
+The artifact separates add acknowledgement, asynchronous job completion, retrieval, and
+clarification-answer timings; do not combine job completion time with the customer's answer-path
+latency. Provider-token cost remains measured by the Phase 3A provider evaluator because the public
+API does not return provider usage. Moderate concurrency belongs in the existing disposable scale
+harness, never in an ad hoc production load run.
+
+Every safety-critical journey must pass. Aggregate success cannot excuse an authority violation,
+foreign-user leak, forged evidence acceptance, tool/document promotion, duplicate idempotent write,
+or superseded-memory leak. Failures are development evidence and may be diagnosed; they are not
+public benchmark claims and must not be repaired with case-specific phrases or regexes.
+
 ## Sealed holdout release protocol
 
 The holdout pack is not a CI fixture and must never be restored from Git. The command below is a
