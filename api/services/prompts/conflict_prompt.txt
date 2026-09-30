@@ -29,7 +29,8 @@ Return ONLY valid JSON with this schema:
   "commitment_status": "committed_current | tentative | historical_or_contextual | unclear",
   "requires_user_choice": true,
   "clarification_option_memory": {
-    "content": "canonical current claim if the user selects the new option",
+    "attribute": "short English noun phrase for the single-value property, without User or User's",
+    "value": "the new alternative value exactly as supported by Memory B",
     "category": "preference|fact|goal|procedure|relationship|expertise"
   },
   "reasoning": "short explanation",
@@ -61,8 +62,9 @@ Rules:
 - classify commitment by meaning across languages and tones, not by matching a fixed phrase
 - requires_user_choice must be true when a tentative or unclear new value competes with an existing current single-value memory
 - do not treat an undecided alternative as a second active preference merely because its uncertainty is preserved in the text
-- when requires_user_choice is true, clarification_option_memory must express only the new alternative as a concise current claim that becomes true if the user selects it
-- clarification_option_memory must remove uncertainty and references to the old alternative, but must not add any value not directly presented by the new memory
+- when requires_user_choice is true, clarification_option_memory must identify the single-value attribute and only the new alternative value that becomes current if the user selects it
+- value must be a concise exact value present in Memory B and must not repeat Memory A's current value
+- attribute must describe the property in neutral English without including User, User's, uncertainty, or either value
 - otherwise set clarification_option_memory to null
 - do not reject simply because the new memory is less specific than the existing one
 - do not use coexists merely because a correction happened later; explicit replacement of a current value supersedes

@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from api.db.models import AuditAction
 from api.db.models import AuditLog
 from api.db.models import ClarificationQueue
@@ -592,7 +594,7 @@ def test_production_classifier_uses_strict_relation_schema() -> None:
     assert decision.action == "UPDATE"
     response_format = llm_service.complete_sync.call_args.kwargs["response_format"]
     assert isinstance(response_format, JSONSchemaResponseFormat)
-    assert response_format.name == "memory_conflict_relation_v3"
+    assert response_format.name == "memory_conflict_relation_v4"
     assert response_format.schema["properties"]["relation"]["enum"] == [
         "supersedes",
         "mergeable",
@@ -621,7 +623,8 @@ def test_tentative_competing_value_forces_user_clarification() -> None:
                 "commitment_status": "tentative",
                 "requires_user_choice": True,
                 "clarification_option_memory": {
-                    "content": "User's default programming language is Python.",
+                    "attribute": "default programming language",
+                    "value": "Python",
                     "category": "preference",
                 },
                 "merged_memory": None,
@@ -664,7 +667,8 @@ def test_tentative_competing_value_stays_inactive_until_user_choice() -> None:
                 "commitment_status": "tentative",
                 "requires_user_choice": True,
                 "clarification_option_memory": {
-                    "content": "User's default programming language is Python.",
+                    "attribute": "default programming language",
+                    "value": "Python",
                     "category": "preference",
                 },
                 "merged_memory": None,
@@ -697,6 +701,28 @@ def test_tentative_competing_value_stays_inactive_until_user_choice() -> None:
     assert len(
         [item for item in session.added if isinstance(item, ClarificationQueue)]
     ) == 1
+
+
+@pytest.mark.parametrize("unsupported_value", ["Rust", "C++"])
+def test_clarification_option_rejects_unsupported_or_existing_value(
+    unsupported_value: str,
+) -> None:
+    existing = make_existing_memory()
+    existing.content = "User's default programming language is C++."
+    candidate = make_new_memory(
+        "User is considering Python but has not decided between C++ and Python."
+    )
+
+    with pytest.raises(ValueError):
+        ConflictResolver._build_clarification_option_memory(
+            payload={
+                "attribute": "default programming language",
+                "value": unsupported_value,
+                "category": "preference",
+            },
+            new_memory=candidate,
+            existing_memory=existing,
+        )
 
 
 def test_invalid_classifier_response_fails_safe_to_clarification() -> None:

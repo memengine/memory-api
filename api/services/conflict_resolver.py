@@ -68,7 +68,7 @@ CONFLICT_RELATION_TO_ACTION: dict[str, str] = {
 }
 
 CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
-    name="memory_conflict_relation_v3",
+    name="memory_conflict_relation_v4",
     schema={
         "type": "object",
         "properties": {
@@ -92,7 +92,8 @@ CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
                     {
                         "type": "object",
                         "properties": {
-                            "content": {"type": "string", "minLength": 1},
+                            "attribute": {"type": "string", "minLength": 1},
+                            "value": {"type": "string", "minLength": 1},
                             "category": {
                                 "type": "string",
                                 "enum": [
@@ -105,7 +106,7 @@ CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
                                 ],
                             },
                         },
-                        "required": ["content", "category"],
+                        "required": ["attribute", "value", "category"],
                         "additionalProperties": False,
                     },
                     {"type": "null"},
@@ -1289,19 +1290,12 @@ class ConflictResolver:
                     option_payload = payload.get("clarification_option_memory")
                     if not isinstance(option_payload, dict):
                         raise ValueError("clarification option memory is required")
-                    clarification_option_memory = ExtractedMemory(
-                        content=str(option_payload["content"]).strip(),
-                        category=str(option_payload["category"]).strip().lower(),
-                        importance_score=new_memory.importance_score,
-                        confidence=new_memory.confidence,
-                        expiry=new_memory.expiry,
-                        reasoning=(
-                            "Canonical current claim offered only if the user selects "
-                            "this clarification option."
-                        ),
-                        validated_evidence=dict(
-                            getattr(new_memory, "validated_evidence", {}) or {}
-                        ),
+                    clarification_option_memory = (
+                        self._build_clarification_option_memory(
+                            payload=option_payload,
+                            new_memory=new_memory,
+                            existing_memory=existing_memory,
+                        )
                     )
                 else:
                     clarification_option_memory = None
@@ -1499,6 +1493,46 @@ class ConflictResolver:
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=UTC)
         return max(0, (datetime.now(UTC) - created_at).days)
+
+    @staticmethod
+    def _build_clarification_option_memory(
+        *,
+        payload: dict[str, Any],
+        new_memory: ExtractedMemory,
+        existing_memory: Memory,
+    ) -> ExtractedMemory:
+        attribute = " ".join(str(payload["attribute"]).split()).strip(" .:;")
+        value = " ".join(str(payload["value"]).split()).strip(" .:;")
+        category = str(payload["category"]).strip().lower()
+        if not attribute or not value:
+            raise ValueError("clarification option requires attribute and value")
+        lowered_attribute = attribute.casefold()
+        for prefix in ("the user's ", "user's "):
+            if lowered_attribute.startswith(prefix):
+                attribute = attribute[len(prefix):].strip()
+                break
+        if not attribute:
+            raise ValueError("clarification option attribute is empty")
+        new_content = new_memory.content.casefold()
+        existing_content = existing_memory.content.casefold()
+        if value.casefold() not in new_content:
+            raise ValueError("clarification option value lacks candidate evidence")
+        if value.casefold() in existing_content:
+            raise ValueError("clarification option repeats the existing value")
+        return ExtractedMemory(
+            content=f"User's {attribute} is {value}.",
+            category=category,  # type: ignore[arg-type]
+            importance_score=new_memory.importance_score,
+            confidence=new_memory.confidence,
+            expiry=new_memory.expiry,
+            reasoning=(
+                "Canonical current claim offered only if the user selects "
+                "this clarification option."
+            ),
+            validated_evidence=dict(
+                getattr(new_memory, "validated_evidence", {}) or {}
+            ),
+        )
 
     @staticmethod
     def _build_merged_memory(
