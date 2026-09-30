@@ -573,6 +573,8 @@ def test_production_classifier_uses_strict_relation_schema() -> None:
             {
                 "relation": "supersedes",
                 "reasoning": "The newer statement replaces the old value.",
+                "commitment_status": "committed_current",
+                "requires_user_choice": False,
                 "merged_memory": None,
             }
         )
@@ -589,7 +591,7 @@ def test_production_classifier_uses_strict_relation_schema() -> None:
     assert decision.action == "UPDATE"
     response_format = llm_service.complete_sync.call_args.kwargs["response_format"]
     assert isinstance(response_format, JSONSchemaResponseFormat)
-    assert response_format.name == "memory_conflict_relation_v1"
+    assert response_format.name == "memory_conflict_relation_v2"
     assert response_format.schema["properties"]["relation"]["enum"] == [
         "supersedes",
         "mergeable",
@@ -597,6 +599,94 @@ def test_production_classifier_uses_strict_relation_schema() -> None:
         "duplicate",
         "ambiguous",
     ]
+    assert response_format.schema["properties"]["commitment_status"]["enum"] == [
+        "committed_current",
+        "tentative",
+        "historical_or_contextual",
+        "unclear",
+    ]
+
+
+def test_tentative_competing_value_forces_user_clarification() -> None:
+    existing = make_existing_memory()
+    existing.content = "User's default programming language is C++."
+    existing.category = MemoryCategory.preference
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(
+        content=json.dumps(
+            {
+                "relation": "coexists",
+                "reasoning": "Python is being considered but is not adopted.",
+                "commitment_status": "tentative",
+                "requires_user_choice": True,
+                "merged_memory": None,
+            }
+        )
+    )
+    resolver = ConflictResolver(
+        session=FakeSession(existing_memory=existing),
+        qdrant_service=MagicMock(),
+        embedder=lambda _text: [0.1] * 3,
+        llm_service=llm_service,
+    )
+
+    decision = resolver._classify_conflict(
+        make_new_memory(
+            "User is considering Python as the default but has not decided between C++ and Python."
+        ),
+        existing,
+    )
+
+    assert decision.action == "CLARIFY"
+    assert decision.decision_evidence is not None
+    assert decision.decision_evidence["details"]["commitment_status"] == "tentative"
+    assert decision.decision_evidence["details"]["requires_user_choice"] is True
+
+
+def test_tentative_competing_value_stays_inactive_until_user_choice() -> None:
+    existing = make_existing_memory()
+    existing.content = "User's default programming language is C++."
+    existing.category = MemoryCategory.preference
+    session = FakeSession(existing_memory=existing)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing)]
+    llm_service = MagicMock()
+    llm_service.complete_sync.return_value = SimpleNamespace(
+        content=json.dumps(
+            {
+                "relation": "coexists",
+                "reasoning": "Python is being considered but is not adopted.",
+                "commitment_status": "tentative",
+                "requires_user_choice": True,
+                "merged_memory": None,
+            }
+        )
+    )
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=qdrant,
+        embedder=lambda _text: [0.1] * 3,
+        llm_service=llm_service,
+        default_source_conversation_id=uuid.uuid4(),
+    )
+
+    stored = resolver.check_and_store(
+        [
+            make_new_memory(
+                "User is considering Python as the default but has not decided between C++ and Python."
+            )
+        ],
+        user_id=str(existing.user_id),
+        tenant_id=str(uuid.uuid4()),
+        proxy_user_id=str(existing.proxy_user_id),
+    )
+
+    assert len(stored) == 1
+    assert stored[0].resolution == "CLARIFICATION_PENDING"
+    assert existing.is_archived is False
+    assert len(
+        [item for item in session.added if isinstance(item, ClarificationQueue)]
+    ) == 1
 
 
 def test_invalid_classifier_response_fails_safe_to_clarification() -> None:
@@ -625,6 +715,8 @@ def test_merge_relation_without_merged_memory_fails_safe() -> None:
             {
                 "relation": "mergeable",
                 "reasoning": "The claims could be combined.",
+                "commitment_status": "committed_current",
+                "requires_user_choice": False,
                 "merged_memory": None,
             }
         )

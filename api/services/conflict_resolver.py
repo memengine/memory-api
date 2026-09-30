@@ -68,7 +68,7 @@ CONFLICT_RELATION_TO_ACTION: dict[str, str] = {
 }
 
 CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
-    name="memory_conflict_relation_v1",
+    name="memory_conflict_relation_v2",
     schema={
         "type": "object",
         "properties": {
@@ -77,6 +77,16 @@ CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
                 "enum": list(CONFLICT_RELATION_TO_ACTION),
             },
             "reasoning": {"type": "string", "minLength": 1},
+            "commitment_status": {
+                "type": "string",
+                "enum": [
+                    "committed_current",
+                    "tentative",
+                    "historical_or_contextual",
+                    "unclear",
+                ],
+            },
+            "requires_user_choice": {"type": "boolean"},
             "merged_memory": {
                 "anyOf": [
                     {
@@ -124,7 +134,13 @@ CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
                 ]
             },
         },
-        "required": ["relation", "reasoning", "merged_memory"],
+        "required": [
+            "relation",
+            "reasoning",
+            "commitment_status",
+            "requires_user_choice",
+            "merged_memory",
+        ],
         "additionalProperties": False,
     },
 )
@@ -1216,12 +1232,33 @@ class ConflictResolver:
                 raise ValueError("conflict response must be an object")
             relation = str(payload.get("relation") or "").strip().lower()
             if relation:
+                commitment_status = str(
+                    payload.get("commitment_status") or ""
+                ).strip().lower()
+                if commitment_status not in {
+                    "committed_current",
+                    "tentative",
+                    "historical_or_contextual",
+                    "unclear",
+                }:
+                    raise ValueError("invalid commitment status")
+                requires_user_choice = payload.get("requires_user_choice")
+                if not isinstance(requires_user_choice, bool):
+                    raise ValueError("invalid user-choice decision")
                 action = CONFLICT_RELATION_TO_ACTION.get(relation, "")
                 raw_action = relation
+                if relation != "duplicate" and (
+                    requires_user_choice
+                    or commitment_status in {"tentative", "unclear"}
+                ):
+                    action = "CLARIFY"
+                    raw_action = f"{relation}:{commitment_status}:user_choice"
             else:
                 # Backward compatibility for explicitly injected legacy clients.
                 action = self._action_from_payload(payload)
                 raw_action = str(payload.get("action") or payload.get("keep") or "")
+                commitment_status = None
+                requires_user_choice = None
             if action not in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"}:
                 raise ValueError("unsupported conflict relation")
             reasoning = str(
@@ -1258,6 +1295,8 @@ class ConflictResolver:
                 conflict_type=conflict_type,
                 raw_action=raw_action,
                 reasoning=reasoning,
+                commitment_status=commitment_status,
+                requires_user_choice=requires_user_choice,
             ),
         )
 
@@ -1292,11 +1331,15 @@ class ConflictResolver:
         conflict_type: ConflictType,
         raw_action: str,
         reasoning: str,
+        commitment_status: str | None,
+        requires_user_choice: bool | None,
     ) -> dict[str, Any]:
         details = {
             "classifier": "llm",
             "raw_action": raw_action,
             "conflict_type": conflict_type.value,
+            "commitment_status": commitment_status,
+            "requires_user_choice": requires_user_choice,
         }
         if action == "CLARIFY":
             return review_evidence(

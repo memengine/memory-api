@@ -23,10 +23,19 @@ from typing import Any
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FIXTURE = Path(__file__).with_name("fixtures") / "governed_memory_phase0_v1.json"
-DEFAULT_FIXTURE_VERSION = "phase0-v2"
+DEFAULT_FIXTURE = (
+    Path(__file__).with_name("fixtures") / "governed_memory_phase0_v1.json"
+)
+DEFAULT_FIXTURE_VERSION = "phase0-v3"
 DEFAULT_BASE_URL = "https://api.memoryo.dev"
-TERMINAL_JOB_STATUSES = {"blocked", "completed", "dead", "dead_letter", "error", "failed"}
+TERMINAL_JOB_STATUSES = {
+    "blocked",
+    "completed",
+    "dead",
+    "dead_letter",
+    "error",
+    "failed",
+}
 
 
 def load_fixture(path: Path) -> dict[str, Any]:
@@ -44,7 +53,9 @@ def load_fixture(path: Path) -> dict[str, Any]:
             messages = scenario.get(field)
             if not isinstance(messages, list) or not messages:
                 raise ValueError(f"{scenario_id}.{field} must contain messages")
-            if any(message.get("role") not in {"user", "assistant"} for message in messages):
+            if any(
+                message.get("role") not in {"user", "assistant"} for message in messages
+            ):
                 raise ValueError(f"{scenario_id}.{field} contains an unsupported role")
         for field in ("warm_query", "verification_query"):
             if not str(scenario.get(field) or "").strip():
@@ -54,6 +65,13 @@ def load_fixture(path: Path) -> dict[str, Any]:
             expected.get("clarification_required"), bool
         ):
             raise TypeError(f"{scenario_id}.expected is invalid")
+        after_resolution = expected.get("after_resolution")
+        if after_resolution is not None and not isinstance(after_resolution, dict):
+            raise TypeError(f"{scenario_id}.expected.after_resolution is invalid")
+        if bool(expected.get("resolve_to_label_contains")) != bool(after_resolution):
+            raise ValueError(
+                f"{scenario_id} must define both resolve_to_label_contains and after_resolution"
+            )
     return payload
 
 
@@ -80,9 +98,7 @@ def build_add_payload(
     }
 
 
-def build_retrieve_payload(
-    *, external_user_id: str, query: str
-) -> dict[str, Any]:
+def build_retrieve_payload(*, external_user_id: str, query: str) -> dict[str, Any]:
     return {
         "external_user_id": external_user_id,
         "query": query,
@@ -112,13 +128,14 @@ def evaluate_retrieval(
     }
     clarification_present = bool(response.get("clarification"))
     checks: dict[str, bool] = {
-        "required_value": not include_terms or any(term in searchable for term in include_terms),
-        "superseded_value_absent": not any(term in searchable for term in exclude_terms),
+        "required_value": not include_terms
+        or any(term in searchable for term in include_terms),
+        "superseded_value_absent": not any(
+            term in searchable for term in exclude_terms
+        ),
     }
     if excluded_memory_ids:
-        checks["superseded_memory_absent"] = memory_ids.isdisjoint(
-            excluded_memory_ids
-        )
+        checks["superseded_memory_absent"] = memory_ids.isdisjoint(excluded_memory_ids)
     if check_clarification:
         checks["clarification"] = clarification_present == bool(
             expected.get("clarification_required")
@@ -130,8 +147,12 @@ def evaluate_retrieval(
             "clarification_present": clarification_present,
             "memory_count": len(memories),
             "memory_ids": sorted(memory_ids),
-            "matched_required_terms": [term for term in include_terms if term in searchable],
-            "matched_excluded_terms": [term for term in exclude_terms if term in searchable],
+            "matched_required_terms": [
+                term for term in include_terms if term in searchable
+            ],
+            "matched_excluded_terms": [
+                term for term in exclude_terms if term in searchable
+            ],
         },
     }
 
@@ -196,6 +217,94 @@ def created_memory_ids(add_result: dict[str, Any]) -> set[str]:
     if not isinstance(raw_ids, list):
         return set()
     return {str(item) for item in raw_ids if str(item).strip()}
+
+
+def select_clarification_option(
+    clarification: dict[str, Any], label_contains: str
+) -> dict[str, Any]:
+    needle = label_contains.casefold().strip()
+    options = clarification.get("options")
+    matches = (
+        [
+            option
+            for option in options
+            if isinstance(option, dict)
+            and needle in str(option.get("label") or "").casefold()
+        ]
+        if isinstance(options, list)
+        else []
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one clarification option containing {label_contains!r}; found {len(matches)}"
+        )
+    return matches[0]
+
+
+def evaluate_provenance(
+    response: dict[str, Any], *, expected_conversation_id: str
+) -> dict[str, Any]:
+    memories = (
+        [item for item in response.get("data", []) if isinstance(item, dict)]
+        if isinstance(response.get("data"), list)
+        else []
+    )
+    item_checks: list[dict[str, Any]] = []
+    for memory in memories:
+        provenance = memory.get("provenance")
+        provenance = provenance if isinstance(provenance, dict) else {}
+        extraction = provenance.get("extraction_evidence")
+        extraction = extraction if isinstance(extraction, dict) else {}
+        authority = extraction.get("authority")
+        authority = authority if isinstance(authority, dict) else {}
+        references = extraction.get("turn_references")
+        references = references if isinstance(references, list) else []
+        checks = {
+            "source_event_present": bool(provenance.get("event_id")),
+            "external_conversation_matches": (
+                provenance.get("external_conversation_id") == expected_conversation_id
+            ),
+            "authority_present": bool(authority.get("label"))
+            and isinstance(authority.get("level"), int),
+            "user_evidence_present": bool(references)
+            and all(
+                isinstance(reference, dict) and reference.get("role") == "user"
+                for reference in references
+            ),
+        }
+        item_checks.append(
+            {
+                "memory_id": str(memory.get("id") or ""),
+                "passed": all(checks.values()),
+                "checks": checks,
+            }
+        )
+    return {
+        "passed": bool(item_checks) and all(item["passed"] for item in item_checks),
+        "memory_count": len(memories),
+        "items": item_checks,
+    }
+
+
+def evaluate_idempotency(
+    first: dict[str, Any], replayed: dict[str, Any]
+) -> dict[str, Any]:
+    first_job_id = str(first.get("job_id") or "")
+    replayed_job_id = str(replayed.get("job_id") or "")
+    checks = {
+        "job_id_present": bool(first_job_id),
+        "same_job_id": first_job_id == replayed_job_id,
+    }
+    return {"passed": all(checks.values()), "checks": checks}
+
+
+def evaluate_isolation(response: dict[str, Any]) -> dict[str, Any]:
+    data = response.get("data")
+    checks = {
+        "no_memories": isinstance(data, list) and not data,
+        "no_clarification": not bool(response.get("clarification")),
+    }
+    return {"passed": all(checks.values()), "checks": checks}
 
 
 def _request_identity(response: httpx.Response, body: dict[str, Any]) -> dict[str, Any]:
@@ -294,6 +403,31 @@ async def retrieve(
     }
 
 
+async def answer_clarification(
+    client: httpx.AsyncClient,
+    *,
+    external_user_id: str,
+    clarification: dict[str, Any],
+    label_contains: str,
+) -> dict[str, Any]:
+    option = select_clarification_option(clarification, label_contains)
+    clarification_id = str(clarification.get("id") or "")
+    started = time.perf_counter()
+    response = await client.post(
+        f"/v1/memories/clarifications/{clarification_id}/answer",
+        json={"external_user_id": external_user_id, "answer": option["answer"]},
+    )
+    latency_ms = round((time.perf_counter() - started) * 1000, 2)
+    response.raise_for_status()
+    body = response.json()
+    return {
+        **_request_identity(response, body),
+        "latency_ms": latency_ms,
+        "selected_option": option,
+        "data": body.get("data"),
+    }
+
+
 async def execute(args: argparse.Namespace) -> dict[str, Any]:
     fixture = load_fixture(Path(args.fixture))
     api_key = os.environ.get("MEMORYOS_API_KEY", "").strip()
@@ -311,7 +445,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
     }
     headers = {"Authorization": f"ApiKey {api_key}"}
     async with httpx.AsyncClient(
-        base_url=args.base_url.rstrip("/"), headers=headers, timeout=args.request_timeout
+        base_url=args.base_url.rstrip("/"),
+        headers=headers,
+        timeout=args.request_timeout,
     ) as client:
         for scenario in fixture["scenarios"]:
             scenario_id = scenario["id"]
@@ -350,6 +486,25 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 poll_seconds=args.poll_seconds,
                 timeout_seconds=args.job_timeout,
             )
+            idempotency_replay = None
+            idempotency_evaluation = None
+            if scenario["expected"].get("verify_idempotency"):
+                idempotency_replay = await add_and_wait(
+                    client,
+                    build_add_payload(
+                        scenario,
+                        external_user_id=external_user_id,
+                        conversation_id=conversation_id,
+                        phase="update",
+                        fixture_version=str(fixture["version"]),
+                    ),
+                    idempotency_key=f"phase0:{run_id}:{scenario_id}:update",
+                    poll_seconds=args.poll_seconds,
+                    timeout_seconds=args.job_timeout,
+                )
+                idempotency_evaluation = evaluate_idempotency(
+                    update, idempotency_replay
+                )
             immediate = await retrieve(
                 client,
                 external_user_id=external_user_id,
@@ -369,6 +524,89 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 scenario["expected"],
                 initial_memory_ids=initial_memory_ids,
             )
+            provenance_source = settled
+            resolution = None
+            post_resolution = None
+            post_resolution_evaluation = None
+            resolve_to = scenario["expected"].get("resolve_to_label_contains")
+            if resolve_to:
+                clarification = immediate.get("clarification") or settled.get(
+                    "clarification"
+                )
+                if isinstance(clarification, dict):
+                    resolution = await answer_clarification(
+                        client,
+                        external_user_id=external_user_id,
+                        clarification=clarification,
+                        label_contains=str(resolve_to),
+                    )
+                    if args.index_settle_seconds:
+                        await asyncio.sleep(args.index_settle_seconds)
+                    post_resolution = await retrieve(
+                        client,
+                        external_user_id=external_user_id,
+                        query=scenario["verification_query"],
+                    )
+                    selected_memory_id = str(
+                        resolution["selected_option"].get("memory_id") or ""
+                    )
+                    post_expected = scenario["expected"]["after_resolution"]
+                    post_resolution_evaluation = evaluate_retrieval(
+                        post_resolution,
+                        post_expected,
+                        excluded_memory_ids=initial_memory_ids
+                        if post_expected.get("exclude_initial_memory")
+                        else set(),
+                    )
+                    post_ids = set(post_resolution_evaluation["observed"]["memory_ids"])
+                    post_resolution_evaluation["checks"]["selected_memory_present"] = (
+                        bool(selected_memory_id) and selected_memory_id in post_ids
+                    )
+                    post_resolution_evaluation["passed"] = all(
+                        post_resolution_evaluation["checks"].values()
+                    )
+                    provenance_source = post_resolution
+                else:
+                    post_resolution_evaluation = {
+                        "passed": False,
+                        "checks": {"clarification_available_for_resolution": False},
+                    }
+            provenance_evaluation = evaluate_provenance(
+                provenance_source,
+                expected_conversation_id=conversation_id,
+            )
+            isolation_retrieval = None
+            isolation_evaluation = None
+            if scenario["expected"].get("verify_foreign_user_isolation"):
+                isolation_retrieval = await retrieve(
+                    client,
+                    external_user_id=f"phase0-foreign-{scenario_id}-{run_id}",
+                    query=scenario["verification_query"],
+                )
+                isolation_evaluation = evaluate_isolation(isolation_retrieval)
+            journey_checks = {
+                "memory_policy": scenario_evaluation["passed"],
+                "provenance": provenance_evaluation["passed"],
+                "resolution": (
+                    post_resolution_evaluation["passed"]
+                    if post_resolution_evaluation is not None
+                    else True
+                ),
+                "idempotency": (
+                    idempotency_evaluation["passed"]
+                    if idempotency_evaluation is not None
+                    else True
+                ),
+                "isolation": (
+                    isolation_evaluation["passed"]
+                    if isolation_evaluation is not None
+                    else True
+                ),
+            }
+            journey_evaluation = {
+                "passed": all(journey_checks.values()),
+                "checks": journey_checks,
+            }
             record = {
                 "scenario_id": scenario_id,
                 "external_user_id": external_user_id,
@@ -376,17 +614,29 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "initial_add": initial,
                 "warm_retrieval": warm,
                 "update_add": update,
+                "idempotency_replay": idempotency_replay,
+                "idempotency_evaluation": idempotency_evaluation,
                 "immediate_retrieval": immediate,
                 "settled_retrieval": settled,
-                "immediate_evaluation": evaluate_retrieval(immediate, scenario["expected"]),
+                "resolution": resolution,
+                "post_resolution_retrieval": post_resolution,
+                "post_resolution_evaluation": post_resolution_evaluation,
+                "provenance_evaluation": provenance_evaluation,
+                "isolation_retrieval": isolation_retrieval,
+                "isolation_evaluation": isolation_evaluation,
+                "immediate_evaluation": evaluate_retrieval(
+                    immediate, scenario["expected"]
+                ),
                 "settled_evaluation": evaluate_retrieval(settled, scenario["expected"]),
                 "scenario_evaluation": scenario_evaluation,
+                "journey_evaluation": journey_evaluation,
             }
             artifact["scenarios"].append(record)
             print(
                 f"{scenario_id}: scenario={scenario_evaluation['passed']} "
                 f"immediate_state={scenario_evaluation['checks']['immediate_memory_state']} "
-                f"settled_state={scenario_evaluation['checks']['settled_memory_state']}"
+                f"settled_state={scenario_evaluation['checks']['settled_memory_state']} "
+                f"journey={journey_evaluation['passed']}"
             )
 
     artifact["completed_at"] = datetime.now(UTC).isoformat()
@@ -404,6 +654,14 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "scenarios_passed": sum(
             1 for item in artifact["scenarios"] if item["scenario_evaluation"]["passed"]
+        ),
+        "journeys_passed": sum(
+            1 for item in artifact["scenarios"] if item["journey_evaluation"]["passed"]
+        ),
+        "provenance_passed": sum(
+            1
+            for item in artifact["scenarios"]
+            if item["provenance_evaluation"]["passed"]
         ),
     }
     return artifact
@@ -450,8 +708,16 @@ def main() -> int:
 
     artifact = asyncio.run(execute(args))
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    output = Path(args.output) if args.output else (
-        ROOT / "artifacts" / "internal-benchmarks" / "phase0" / f"governed-memory-{timestamp}.json"
+    output = (
+        Path(args.output)
+        if args.output
+        else (
+            ROOT
+            / "artifacts"
+            / "internal-benchmarks"
+            / "phase0"
+            / f"governed-memory-{timestamp}.json"
+        )
     )
     write_artifact(artifact, output)
     print(f"artifact={output}")

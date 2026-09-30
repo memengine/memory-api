@@ -26,6 +26,8 @@ allowed mutation; you do not directly authorize a write.
 Return ONLY valid JSON with this schema:
 {
   "relation": "supersedes | mergeable | coexists | duplicate | ambiguous",
+  "commitment_status": "committed_current | tentative | historical_or_contextual | unclear",
+  "requires_user_choice": true,
   "reasoning": "short explanation",
   "merged_memory": {
     "content": "string",
@@ -48,6 +50,13 @@ Rules:
 - duplicate when the new memory confidence is below 0.5
 - duplicate when the new memory is clearly a one-time event not worth storing
 - ambiguous when the relationship is unclear or the user has not committed to which value is current
+- commitment_status is committed_current only when the new memory states a value that is currently adopted
+- commitment_status is tentative when the new memory describes a possibility, consideration, condition, or undecided alternative rather than a current choice
+- commitment_status is historical_or_contextual only when both values are explicitly true in different times or contexts
+- commitment_status is unclear when current commitment cannot be established safely
+- classify commitment by meaning across languages and tones, not by matching a fixed phrase
+- requires_user_choice must be true when a tentative or unclear new value competes with an existing current single-value memory
+- do not treat an undecided alternative as a second active preference merely because its uncertainty is preserved in the text
 - do not reject simply because the new memory is less specific than the existing one
 - do not use coexists merely because a correction happened later; explicit replacement of a current value supersedes
 - if the two memories have different categories, use the category of whichever memory is more specific
