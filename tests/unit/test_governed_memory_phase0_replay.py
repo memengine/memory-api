@@ -259,6 +259,29 @@ def test_phase0_clarification_selection_uses_label_not_option_order() -> None:
     }
 
 
+def test_phase0_clarification_can_select_exact_initial_memory_id() -> None:
+    selected = replay.select_clarification_memory(
+        {
+            "options": [
+                {
+                    "answer": "A",
+                    "label": "User prefers concise answers.",
+                    "memory_id": "initial-id",
+                },
+                {
+                    "answer": "B",
+                    "label": "Detailed answers may replace concise answers.",
+                    "memory_id": "candidate-id",
+                },
+            ]
+        },
+        {"initial-id"},
+    )
+
+    assert selected["answer"] == "A"
+    assert selected["memory_id"] == "initial-id"
+
+
 def test_phase0_provenance_requires_user_evidence_and_matching_conversation() -> None:
     response = {
         "data": [

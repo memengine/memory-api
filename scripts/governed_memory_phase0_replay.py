@@ -90,11 +90,20 @@ def validate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
         resolve_with_answer = expected.get("resolve_with_answer")
         if resolve_with_answer not in {None, "A", "B", "both", "neither"}:
             raise ValueError(f"{scenario_id}.resolve_with_answer is invalid")
-        if resolve_with_answer and expected.get("resolve_to_label_contains"):
-            raise ValueError(f"{scenario_id} has multiple resolution selectors")
-        has_resolution = bool(resolve_with_answer) or bool(
-            expected.get("resolve_to_label_contains")
+        resolve_to_initial = expected.get("resolve_to_initial_memory")
+        if resolve_to_initial not in {None, True}:
+            raise ValueError(f"{scenario_id}.resolve_to_initial_memory is invalid")
+        resolution_selectors = sum(
+            bool(value)
+            for value in (
+                resolve_with_answer,
+                expected.get("resolve_to_label_contains"),
+                resolve_to_initial,
+            )
         )
+        if resolution_selectors > 1:
+            raise ValueError(f"{scenario_id} has multiple resolution selectors")
+        has_resolution = resolution_selectors == 1
         if has_resolution != bool(after_resolution):
             raise ValueError(
                 f"{scenario_id} must define a resolution selector and after_resolution"
@@ -269,8 +278,14 @@ def select_clarification_option(
         else []
     )
     if len(matches) != 1:
+        labels = [
+            str(option.get("label") or "")
+            for option in options
+            if isinstance(option, dict)
+        ] if isinstance(options, list) else []
         raise ValueError(
-            f"Expected one clarification option containing {label_contains!r}; found {len(matches)}"
+            f"Expected one clarification option containing {label_contains!r}; "
+            f"found {len(matches)} in labels {labels!r}"
         )
     return matches[0]
 
@@ -291,6 +306,28 @@ def select_clarification_answer(
     if len(matches) != 1:
         raise ValueError(
             f"Expected one clarification option with answer {answer!r}; found {len(matches)}"
+        )
+    return matches[0]
+
+
+def select_clarification_memory(
+    clarification: dict[str, Any], memory_ids: set[str]
+) -> dict[str, Any]:
+    options = clarification.get("options")
+    matches = (
+        [
+            option
+            for option in options
+            if isinstance(option, dict)
+            and str(option.get("memory_id") or "") in memory_ids
+        ]
+        if isinstance(options, list)
+        else []
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            "Expected exactly one clarification option backed by the target memory IDs; "
+            f"found {len(matches)}"
         )
     return matches[0]
 
@@ -476,14 +513,16 @@ async def answer_clarification(
     clarification: dict[str, Any],
     label_contains: str | None = None,
     answer: str | None = None,
+    memory_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    if bool(label_contains) == bool(answer):
+    if sum(bool(value) for value in (label_contains, answer, memory_ids)) != 1:
         raise ValueError("Provide exactly one clarification selector")
-    option = (
-        select_clarification_option(clarification, str(label_contains))
-        if label_contains
-        else select_clarification_answer(clarification, str(answer))
-    )
+    if label_contains:
+        option = select_clarification_option(clarification, label_contains)
+    elif answer:
+        option = select_clarification_answer(clarification, answer)
+    else:
+        option = select_clarification_memory(clarification, memory_ids or set())
     clarification_id = str(clarification.get("id") or "")
     started = time.perf_counter()
     response = await client.post(
@@ -608,7 +647,10 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             post_resolution_evaluation = None
             resolve_to = scenario["expected"].get("resolve_to_label_contains")
             resolve_answer = scenario["expected"].get("resolve_with_answer")
-            if resolve_to or resolve_answer:
+            resolve_to_initial = bool(
+                scenario["expected"].get("resolve_to_initial_memory")
+            )
+            if resolve_to or resolve_answer or resolve_to_initial:
                 clarification = immediate.get("clarification") or settled.get(
                     "clarification"
                 )
@@ -619,6 +661,7 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                         clarification=clarification,
                         label_contains=str(resolve_to) if resolve_to else None,
                         answer=str(resolve_answer) if resolve_answer else None,
+                        memory_ids=initial_memory_ids if resolve_to_initial else None,
                     )
                     if args.index_settle_seconds:
                         await asyncio.sleep(args.index_settle_seconds)
@@ -733,6 +776,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "journey_evaluation": journey_evaluation,
             }
             artifact["scenarios"].append(record)
+            if args.output:
+                artifact["checkpointed_at"] = datetime.now(UTC).isoformat()
+                write_artifact(artifact, Path(args.output))
             print(
                 f"{scenario_id}: scenario={scenario_evaluation['passed']} "
                 f"immediate_state={scenario_evaluation['checks']['immediate_memory_state']} "

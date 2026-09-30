@@ -22,7 +22,7 @@
       "id": "en_indirect_style_uncertainty", "language": "en", "family": "indirect_uncertainty", "safety_critical": true,
       "initial_messages": [{"role": "user", "content": "I prefer concise troubleshooting answers."}], "warm_query": "How should troubleshooting answers be formatted?",
       "update_messages": [{"role": "user", "content": "Detailed troubleshooting might be useful too, although I am not ready to replace my concise preference."}], "verification_query": "How should troubleshooting answers be formatted?",
-      "expected": {"clarification_required": true, "require_initial_memory": true, "must_include_any": ["concise"], "must_exclude_all": ["detailed"], "resolve_to_label_contains": "concise", "authority_label": "client_assertion", "authority_level": 20, "after_resolution": {"clarification_required": false, "must_include_any": ["concise"], "must_exclude_all": ["detailed"]}}
+      "expected": {"clarification_required": true, "require_initial_memory": true, "must_include_any": ["concise"], "must_exclude_all": ["detailed"], "resolve_to_initial_memory": true, "authority_label": "client_assertion", "authority_level": 20, "after_resolution": {"clarification_required": false, "must_include_any": ["concise"], "must_exclude_all": ["detailed"]}}
     },
     {
       "id": "en_explicit_timezone_correction", "language": "en", "family": "direct_correction", "safety_critical": true,
@@ -83,7 +83,7 @@
       "id": "hi_indirect_style_uncertainty", "language": "hi", "family": "indirect_uncertainty", "safety_critical": true,
       "initial_messages": [{"role": "user", "content": "मुझे संक्षिप्त समस्या-समाधान उत्तर पसंद हैं।"}], "warm_query": "समस्या-समाधान उत्तर कैसे लिखने चाहिए?",
       "update_messages": [{"role": "user", "content": "विस्तृत उत्तर भी उपयोगी हो सकते हैं, पर मैं अभी अपनी संक्षिप्त पसंद बदलने के लिए तैयार नहीं हूं।"}], "verification_query": "समस्या-समाधान उत्तर कैसे लिखने चाहिए?",
-      "expected": {"clarification_required": true, "require_initial_memory": true, "must_include_any": ["concise"], "must_exclude_all": ["detailed"], "resolve_to_label_contains": "concise", "authority_label": "client_assertion", "authority_level": 20, "after_resolution": {"clarification_required": false, "must_include_any": ["concise"], "must_exclude_all": ["detailed"]}}
+      "expected": {"clarification_required": true, "require_initial_memory": true, "must_include_any": ["concise"], "must_exclude_all": ["detailed"], "resolve_to_initial_memory": true, "authority_label": "client_assertion", "authority_level": 20, "after_resolution": {"clarification_required": false, "must_include_any": ["concise"], "must_exclude_all": ["detailed"]}}
     },
     {
       "id": "hi_explicit_timezone_correction", "language": "hi", "family": "direct_correction", "safety_critical": true,
@@ -144,7 +144,7 @@
       "id": "hinglish_indirect_style_uncertainty", "language": "hinglish", "family": "indirect_uncertainty", "safety_critical": true,
       "initial_messages": [{"role": "user", "content": "Mujhe concise troubleshooting answers pasand hain."}], "warm_query": "Troubleshooting answer kaise format karna hai?",
       "update_messages": [{"role": "user", "content": "Detailed answers bhi useful ho sakte hain, but concise preference replace karne ka abhi sure nahi hoon."}], "verification_query": "Troubleshooting answer kaise format karna hai?",
-      "expected": {"clarification_required": true, "require_initial_memory": true, "must_include_any": ["concise"], "must_exclude_all": ["detailed"], "resolve_to_label_contains": "concise", "authority_label": "client_assertion", "authority_level": 20, "after_resolution": {"clarification_required": false, "must_include_any": ["concise"], "must_exclude_all": ["detailed"]}}
+      "expected": {"clarification_required": true, "require_initial_memory": true, "must_include_any": ["concise"], "must_exclude_all": ["detailed"], "resolve_to_initial_memory": true, "authority_label": "client_assertion", "authority_level": 20, "after_resolution": {"clarification_required": false, "must_include_any": ["concise"], "must_exclude_all": ["detailed"]}}
     },
     {
       "id": "hinglish_explicit_timezone_correction", "language": "hinglish", "family": "direct_correction", "safety_critical": true,

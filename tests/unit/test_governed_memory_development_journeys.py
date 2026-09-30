@@ -258,3 +258,27 @@ def test_fixture_rejects_resolution_without_post_state() -> None:
 
     with pytest.raises(ValueError, match="resolution selector and after_resolution"):
         runner.validate_fixture(fixture)
+
+
+def test_fixture_rejects_multiple_resolution_selectors() -> None:
+    fixture = {
+        "version": "invalid",
+        "scenarios": [
+            {
+                "id": "ambiguous-selector",
+                "initial_messages": [{"role": "user", "content": "A"}],
+                "update_messages": [{"role": "user", "content": "B"}],
+                "warm_query": "A?",
+                "verification_query": "B?",
+                "expected": {
+                    "clarification_required": True,
+                    "resolve_with_answer": "A",
+                    "resolve_to_initial_memory": True,
+                    "after_resolution": {"clarification_required": False},
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="multiple resolution selectors"):
+        runner.validate_fixture(fixture)
