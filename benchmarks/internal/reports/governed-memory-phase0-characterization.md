@@ -1,113 +1,114 @@
-# Governed-memory Phase 0 characterization
+# Governed-memory public API journey characterization
 
-Date: 2026-09-29
+Date: 2026-09-30
 
 ## Scope
 
-This phase records current behavior without changing production extraction,
-conflict resolution, claim activation, caching, retrieval, or clarification
-logic. It covers two synthetic user journeys through the public tenant API:
+This development-only matrix verifies that governance capabilities compose
+through the public tenant API. It uses a fresh synthetic external user for each
+journey and does not read or reuse any blind holdout data.
 
-1. an unresolved C++ versus Python programming-language preference;
-2. an exam-date correction from October 10 to October 18.
+The four journeys are:
 
-The runner uses fresh external user IDs and only these public endpoints:
+1. English C++ to undecided Python preference, followed by an in-chat Python selection;
+2. the same uncertainty and selection flow expressed in Hinglish;
+3. a durable project-name correction from Atlas to Nova, including idempotent replay and foreign-user isolation;
+4. an assistant tool-output claim attempting to replace a user-confirmed C++ preference.
+
+The runner uses only these public endpoints:
 
 - `POST /v1/memories/add`
 - `GET /v1/memories/jobs/{job_id}`
 - `POST /v1/memories/retrieve`
+- `POST /v1/memories/clarifications/{clarification_id}/answer`
 
-## Expected governance invariants
+## Governance invariants
 
-- An uncertain Python change does not replace the current C++ preference and
-  produces a structured clarification.
-- A direct exam-date correction supersedes October 10, leaving only October 18
-  in current trusted retrieval.
-- Results remain correct both immediately after the completed extraction job
-  and after the vector-index settling interval.
-- The diagnostic captures request, job, retrieval, and created-memory IDs plus
-  latency and provenance for synthetic data only.
+- An undecided competing value remains inactive until the user chooses it.
+- Clarification is returned through the customer's existing chat API flow.
+- Selecting an option activates one canonical current claim and removes the superseded memory from current retrieval.
+- Durable corrections replace the previous memory without requiring clarification.
+- Repeating an ingestion with the same idempotency key returns the same job rather than creating a duplicate.
+- A fresh external user cannot retrieve another user's memories or clarification.
+- Assistant or tool-output text cannot become trusted user evidence or override a user preference.
+- Every returned memory retains a source event, matching external conversation ID, authority, and user-turn evidence.
+- Retriable extraction-job failures are polled until completion or a truly terminal state.
 
-## Local characterization
-
-- The exact natural uncertainty sentence is not recognized by the deterministic
-  clarification-intent fallback. This is recorded as a strict expected failure,
-  not repaired in Phase 0.
-- Fixture and evaluator contract tests verify the intended invariants without
-  changing backend behavior.
-
-## Live run
+## Final live result
 
 Deployment health was `ok` for PostgreSQL, Redis, and Qdrant. Version:
-`cd30c86`.
-
-The first dry configuration attempted the stale hostname `api.memoryos.io` and
-failed DNS resolution. The checked-in SDK defaults and the deployed environment
-use `https://api.memoryo.dev`; the runner now uses that same default. Historical
-backend documents still contain both hostnames and require a separate docs
-consistency review after behavior is corrected.
+`90dbb35`.
 
 Artifact (local and ignored):
-`artifacts/internal-benchmarks/phase0/governed-memory-20260929T051521Z.json`
+`artifacts/internal-benchmarks/governed-memory-phase0-v3-90dbb35-final.json`
 
-Four ingestion jobs and six retrievals were executed for two fresh synthetic
-users. This sample is a characterization, not a statistically meaningful
-latency benchmark.
+All release checks passed:
 
-- add acknowledgement: 384.13-1739.89 ms; mean 1048.66 ms
-- completed job polling: 2369.85-5861.76 ms; mean 4099.04 ms
-- retrieval: 123.88-493.96 ms; mean 338.39 ms
+- scenarios: 4/4
+- complete journeys: 4/4
+- immediate safe state: 4/4
+- settled state: 4/4
+- provenance: 4/4
+- clarification resolution: 2/2
+- correction idempotency: 1/1
+- foreign-user isolation: 1/1
+- hostile tool-output boundary: 1/1
 
-Each one-turn extraction sent roughly 3.8K-4.0K tokens. The system prompt alone
-was 3,767 tokens; provider latency ranged from 1,071 ms to 2,827 ms. This is a
-confirmed cost and governance-job latency optimization opportunity, although it
-does not sit on the assistant's answer-streaming path. Four writes and six reads
-are too small a sample for percentile claims.
+After selection, the English journey returned only:
+`My default language for every programming example is Python.`
 
-### Programming-language uncertainty
+After selection, the Hinglish journey returned only:
+`User's default programming language is Python.`
 
-- Both ingestion jobs completed and created one memory each.
-- The update extraction did not produce a structured clarification request; its
-  extraction metadata reported `clarification_requires_two_memories`.
-- The conflict path nevertheless queued a clarification.
-- The first post-update retrieval returned the clarification and only the C++
-  memory. Python was not returned as trusted current context.
-- The later retrieval still returned only C++, but the clarification was no
-  longer available because retrieval had already marked it triggered.
+In both cases the selected memory ID was present, the original C++ memory ID
+was absent, no clarification remained, and tentative phrases such as
+`considering` or `not decided` were absent.
 
-This run therefore passed the core claim-state expectation, but confirmed that
-clarification delivery is one-shot rather than acknowledged/retryable. The
-deterministic fixed-phrase fallback also remains unable to recognize the exact
-natural uncertainty sentence on its own.
+The project correction returned Nova as the only current value. Replaying the
+same update was idempotent, and a fresh external user retrieved neither memory
+nor clarification. The hostile tool-output journey preserved the user's C++
+preference and did not activate Python.
 
-### Exam-date correction
+## Descriptive timing
 
-- Both jobs completed successfully but created zero memories.
-- Extraction marked both the original date and the correction as
-  `nothing_to_extract`.
-- All three retrievals were empty, so the October 18 correction was unavailable
-  in a fresh session.
-- The extraction prompt contains conflicting product policy: dated events are
-  described as temporary and assigned an expiry, while another instruction says
-  temporary statements should be omitted. The live model chose omission.
+This is a four-user functional sample, not a latency benchmark and not evidence
+for percentile claims.
 
-This is an extraction/lifecycle policy failure before conflict resolution or
-cache invalidation can be evaluated for the exam claim.
+- add acknowledgement: 309.78-2242.69 ms; mean 948.80 ms
+- completed job polling: 2404.38-20332.32 ms; mean 6770.82 ms
+- retrievals: 162.01-9514.11 ms; mean 982.83 ms across 14 calls
+- clarification answers: 809.96-813.30 ms; mean 811.63 ms across 2 calls
+
+The long job and retrieval observations should be investigated with a larger
+operational sample before setting an SLO. They do not justify p95 or p99 claims.
+
+## Repairs validated by the matrix
+
+- Semantic conflict decisions now separate relationship, current commitment,
+  and whether user choice is required.
+- Tentative or unclear competing values are routed to user clarification by the
+  backend rather than activated as current memories.
+- The classifier returns a structured attribute and candidate value. The
+  backend verifies that the value is present in the supported candidate and is
+  not the existing value, then constructs the canonical current claim.
+- The canonical candidate remains archived until the user selects it.
+- The replay runner no longer treats the retriable `failed` job state as
+  terminal; it waits for automatic completion or a dead/error state.
+
+These changes add no assistant-specific prompt requirement, new UI, database
+migration, or additional model call. Authority, evidence verification,
+clarification state, and activation remain backend responsibilities.
 
 ## Verification
 
-- focused runner tests: 4 passed, 1 expected failure
-- related extraction and replay regression tests: 57 passed, 1 expected failure
-- Ruff: passed for the new Python files
-- mypy: passed for the live runner
-- the expected failure is the exact natural uncertainty sentence against the
-  existing fixed-phrase fallback; it is intentionally not repaired in Phase 0
+- focused resolver and replay suites: passed
+- full unit suite: 1106 passed, 26 warnings
+- critical Python lint: passed
+- strengthened live public-API matrix: 4/4 complete journeys passed
 
-## Phase 0 exit gate
+## Status
 
-Phase 0 is complete only after:
-
-- focused tests pass with the known semantic gap reported as `xfail`;
-- a live run produces a sanitized artifact (complete);
-- the active deployment version and latency baseline are recorded (complete);
-- no production behavior change is included in the Phase 0 commit.
+This development matrix is complete for the four covered journeys. It is not a
+claim of universal governance correctness, multilingual accuracy, or production
+latency percentiles. Broader independent evaluation and operational monitoring
+remain separate gates.
