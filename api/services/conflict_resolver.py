@@ -68,7 +68,7 @@ CONFLICT_RELATION_TO_ACTION: dict[str, str] = {
 }
 
 CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
-    name="memory_conflict_relation_v2",
+    name="memory_conflict_relation_v3",
     schema={
         "type": "object",
         "properties": {
@@ -87,6 +87,30 @@ CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
                 ],
             },
             "requires_user_choice": {"type": "boolean"},
+            "clarification_option_memory": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "minLength": 1},
+                            "category": {
+                                "type": "string",
+                                "enum": [
+                                    "preference",
+                                    "fact",
+                                    "goal",
+                                    "procedure",
+                                    "relationship",
+                                    "expertise",
+                                ],
+                            },
+                        },
+                        "required": ["content", "category"],
+                        "additionalProperties": False,
+                    },
+                    {"type": "null"},
+                ]
+            },
             "merged_memory": {
                 "anyOf": [
                     {
@@ -139,6 +163,7 @@ CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
             "reasoning",
             "commitment_status",
             "requires_user_choice",
+            "clarification_option_memory",
             "merged_memory",
         ],
         "additionalProperties": False,
@@ -205,6 +230,7 @@ class ConflictDecision:
     action: Literal["UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"]
     reasoning: str
     merged_memory: ExtractedMemory | None = None
+    clarification_option_memory: ExtractedMemory | None = None
     decision_evidence: dict[str, Any] | None = None
 
 
@@ -943,8 +969,11 @@ class ConflictResolver:
                         )
 
                 if decision.action == "CLARIFY":
+                    clarification_memory = (
+                        decision.clarification_option_memory or new_memory
+                    )
                     pending = self._store_new_memory_with_shared_context(
-                        extracted_memory=new_memory,
+                        extracted_memory=clarification_memory,
                         user_id=user_id,
                         proxy_user_id=proxy_user_id,
                         tenant_id=tenant_id,
@@ -984,7 +1013,9 @@ class ConflictResolver:
                             "resolution": "CLARIFICATION_PENDING",
                             "reasoning": decision.reasoning,
                             "pending_memory_id": pending.id,
-                            "new_memory": self._serialize_extracted_memory(new_memory),
+                            "new_memory": self._serialize_extracted_memory(
+                                clarification_memory
+                            ),
                         },
                         memory_id=uuid.UUID(pending.id),
                     )
@@ -1232,6 +1263,8 @@ class ConflictResolver:
                 raise ValueError("conflict response must be an object")
             relation = str(payload.get("relation") or "").strip().lower()
             if relation:
+                if "clarification_option_memory" not in payload:
+                    raise ValueError("missing clarification option memory")
                 commitment_status = str(
                     payload.get("commitment_status") or ""
                 ).strip().lower()
@@ -1253,12 +1286,32 @@ class ConflictResolver:
                 ):
                     action = "CLARIFY"
                     raw_action = f"{relation}:{commitment_status}:user_choice"
+                    option_payload = payload.get("clarification_option_memory")
+                    if not isinstance(option_payload, dict):
+                        raise ValueError("clarification option memory is required")
+                    clarification_option_memory = ExtractedMemory(
+                        content=str(option_payload["content"]).strip(),
+                        category=str(option_payload["category"]).strip().lower(),
+                        importance_score=new_memory.importance_score,
+                        confidence=new_memory.confidence,
+                        expiry=new_memory.expiry,
+                        reasoning=(
+                            "Canonical current claim offered only if the user selects "
+                            "this clarification option."
+                        ),
+                        validated_evidence=dict(
+                            getattr(new_memory, "validated_evidence", {}) or {}
+                        ),
+                    )
+                else:
+                    clarification_option_memory = None
             else:
                 # Backward compatibility for explicitly injected legacy clients.
                 action = self._action_from_payload(payload)
                 raw_action = str(payload.get("action") or payload.get("keep") or "")
                 commitment_status = None
                 requires_user_choice = None
+                clarification_option_memory = None
             if action not in {"UPDATE", "MERGE", "KEEP_BOTH", "REJECT", "CLARIFY"}:
                 raise ValueError("unsupported conflict relation")
             reasoning = str(
@@ -1290,6 +1343,7 @@ class ConflictResolver:
             action=action,  # type: ignore[arg-type]
             reasoning=reasoning,
             merged_memory=merged_memory,
+            clarification_option_memory=clarification_option_memory,
             decision_evidence=self._classifier_decision_evidence(
                 action=action,
                 conflict_type=conflict_type,

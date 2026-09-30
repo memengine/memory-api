@@ -575,6 +575,7 @@ def test_production_classifier_uses_strict_relation_schema() -> None:
                 "reasoning": "The newer statement replaces the old value.",
                 "commitment_status": "committed_current",
                 "requires_user_choice": False,
+                "clarification_option_memory": None,
                 "merged_memory": None,
             }
         )
@@ -591,7 +592,7 @@ def test_production_classifier_uses_strict_relation_schema() -> None:
     assert decision.action == "UPDATE"
     response_format = llm_service.complete_sync.call_args.kwargs["response_format"]
     assert isinstance(response_format, JSONSchemaResponseFormat)
-    assert response_format.name == "memory_conflict_relation_v2"
+    assert response_format.name == "memory_conflict_relation_v3"
     assert response_format.schema["properties"]["relation"]["enum"] == [
         "supersedes",
         "mergeable",
@@ -619,6 +620,10 @@ def test_tentative_competing_value_forces_user_clarification() -> None:
                 "reasoning": "Python is being considered but is not adopted.",
                 "commitment_status": "tentative",
                 "requires_user_choice": True,
+                "clarification_option_memory": {
+                    "content": "User's default programming language is Python.",
+                    "category": "preference",
+                },
                 "merged_memory": None,
             }
         )
@@ -658,6 +663,10 @@ def test_tentative_competing_value_stays_inactive_until_user_choice() -> None:
                 "reasoning": "Python is being considered but is not adopted.",
                 "commitment_status": "tentative",
                 "requires_user_choice": True,
+                "clarification_option_memory": {
+                    "content": "User's default programming language is Python.",
+                    "category": "preference",
+                },
                 "merged_memory": None,
             }
         )
@@ -683,6 +692,7 @@ def test_tentative_competing_value_stays_inactive_until_user_choice() -> None:
 
     assert len(stored) == 1
     assert stored[0].resolution == "CLARIFICATION_PENDING"
+    assert stored[0].content == "User's default programming language is Python."
     assert existing.is_archived is False
     assert len(
         [item for item in session.added if isinstance(item, ClarificationQueue)]
@@ -717,6 +727,7 @@ def test_merge_relation_without_merged_memory_fails_safe() -> None:
                 "reasoning": "The claims could be combined.",
                 "commitment_status": "committed_current",
                 "requires_user_choice": False,
+                "clarification_option_memory": None,
                 "merged_memory": None,
             }
         )

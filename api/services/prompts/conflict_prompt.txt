@@ -28,6 +28,10 @@ Return ONLY valid JSON with this schema:
   "relation": "supersedes | mergeable | coexists | duplicate | ambiguous",
   "commitment_status": "committed_current | tentative | historical_or_contextual | unclear",
   "requires_user_choice": true,
+  "clarification_option_memory": {
+    "content": "canonical current claim if the user selects the new option",
+    "category": "preference|fact|goal|procedure|relationship|expertise"
+  },
   "reasoning": "short explanation",
   "merged_memory": {
     "content": "string",
@@ -57,6 +61,9 @@ Rules:
 - classify commitment by meaning across languages and tones, not by matching a fixed phrase
 - requires_user_choice must be true when a tentative or unclear new value competes with an existing current single-value memory
 - do not treat an undecided alternative as a second active preference merely because its uncertainty is preserved in the text
+- when requires_user_choice is true, clarification_option_memory must express only the new alternative as a concise current claim that becomes true if the user selects it
+- clarification_option_memory must remove uncertainty and references to the old alternative, but must not add any value not directly presented by the new memory
+- otherwise set clarification_option_memory to null
 - do not reject simply because the new memory is less specific than the existing one
 - do not use coexists merely because a correction happened later; explicit replacement of a current value supersedes
 - if the two memories have different categories, use the category of whichever memory is more specific
