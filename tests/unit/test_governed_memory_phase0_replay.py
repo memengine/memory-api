@@ -3,12 +3,57 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "governed_memory_phase0_replay.py"
 SPEC = importlib.util.spec_from_file_location("governed_memory_phase0_replay", SCRIPT)
 assert SPEC and SPEC.loader
 replay = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(replay)
+
+
+class _JobResponse:
+    status_code = 200
+    headers: dict[str, str] = {}
+
+    def __init__(self, status: str, attempts: int = 0) -> None:
+        self._body = {"data": {"status": status, "attempts": attempts}}
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._body
+
+
+class _SequencedJobClient:
+    def __init__(self, *responses: _JobResponse) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def get(self, _path: str) -> _JobResponse:
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_phase0_waits_through_retriable_failed_job_state() -> None:
+    client = _SequencedJobClient(
+        _JobResponse("failed", attempts=1),
+        _JobResponse("processing", attempts=1),
+        _JobResponse("completed", attempts=1),
+    )
+
+    result = await replay.wait_for_job(
+        client,
+        "job-1",
+        poll_seconds=0,
+        timeout_seconds=1,
+    )
+
+    assert result["job"]["status"] == "completed"
+    assert client.calls == 3
 
 
 def test_phase0_fixture_uses_only_public_memory_contract_inputs() -> None:

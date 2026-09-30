@@ -34,7 +34,6 @@ TERMINAL_JOB_STATUSES = {
     "dead",
     "dead_letter",
     "error",
-    "failed",
 }
 
 
