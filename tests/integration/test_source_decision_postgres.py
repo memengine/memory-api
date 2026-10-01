@@ -305,6 +305,13 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
         assert not session.get(Memory, old_id).is_archived
         pending_memory = session.get(Memory, new_id)
         assert pending_memory.is_archived
+        audit = pending_memory.metadata_json["decision_evidence"]
+        assert audit["details"]["candidate_count"] == 1
+        assert audit["details"]["target_id_present"] is True
+        assert audit["details"]["option_supplied"] is True
+        assert audit["details"]["backend_requires_user_selection"] is True
+        assert audit["details"]["commitment_status"] == state
+        assert audit["details"]["requires_user_choice"] is (state == "tentative")
         value_span = pending_memory.metadata_json["provenance"]["extraction_evidence"]["clarification_value_span"]
         assert value_span["start_char"] == update_text.index("Python")
         assert update_text[value_span["start_char"]:value_span["end_char"]] == "Python"
@@ -433,19 +440,26 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
 
 
 @pytest.mark.parametrize("relation", ["supersedes", "mergeable", "coexists", "novel"])
-def test_commitment_disagreement_is_persisted_pending_without_changing_current(sql_scope, monkeypatch, relation):
+@pytest.mark.parametrize("invalid_option", [False, True])
+@pytest.mark.parametrize("review_required", [False, True])
+def test_commitment_disagreement_is_persisted_pending_without_changing_current(sql_scope, monkeypatch, relation, invalid_option, review_required):
     initial, _, _ = _run(sql_scope, monkeypatch, "My default programming language is C++.", _decision())
     old_id = uuid.UUID(initial["stored_memories"][0]["id"])
     prefix = "My default language for every programming example is Python."
     full_turn = prefix + " This conflicts with my earlier C++ default, and I have not decided which should remain current."
-    decision = _decision(None if relation == "novel" else old_id, relation=relation)
+    decision = _decision(
+        None if relation == "novel" else old_id,
+        relation=relation,
+        state="committed_current" if review_required else "tentative",
+        option={"attribute": "default programming language", "value": "Rust", "category": "preference"} if invalid_option else None,
+    )
     if relation == "mergeable":
         decision["merged_memory"] = {
             "content": prefix, "category": "preference", "importance_score": 7,
             "confidence": 0.99, "expiry": "permanent", "reasoning": "Controlled committed merge.",
         }
     result, model, job_id = _run(
-        sql_scope, monkeypatch, full_turn, decision, claim_state="uncertain_change",
+        sql_scope, monkeypatch, full_turn, decision, claim_state="uncertain_change" if review_required else "asserted",
         extracted_content=prefix, points=[] if relation == "novel" else None,
     )
     assert result["memories_created"] == 0 and result["pending_candidates_buffered"] == 1
@@ -464,8 +478,17 @@ def test_commitment_disagreement_is_persisted_pending_without_changing_current(s
         )).one()
         assert pending.status == "pending" and pending.candidate_reason == "source_decision_pending"
         evidence = pending.metadata_json["extraction_evidence"]
-        assert evidence["claim_state"] == "uncertain_change"
-        assert "source_commitment_disagreement" in evidence["source_decision"]["reason_codes"]
+        assert evidence["claim_state"] == ("uncertain_change" if review_required else "asserted")
+        expected_code = "source_target_missing" if relation == "novel" else (
+            "source_option_invalid" if invalid_option else "source_option_missing"
+        )
+        assert expected_code in evidence["source_decision"]["reason_codes"]
+        details = evidence["source_decision"]["details"]
+        assert details["target_id_present"] is (relation != "novel")
+        assert details["option_supplied"] is invalid_option
+        assert details["commitment_status"] == ("committed_current" if review_required else "tentative")
+        assert details["requires_user_choice"] is (not review_required and relation != "novel")
+        assert details["backend_requires_user_selection"] is review_required
         assert evidence["source_spans"][0]["turn_id"] == str(job_id)
         claims = session.scalars(select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)).all()
         assert claims and {row.active_memory_id for row in claims} == {old_id}
@@ -595,3 +618,7 @@ def test_source_decision_rechecks_target_changed_by_concurrent_connection(
     with sql_scope.factory() as session:
         target = session.get(Memory, target_id)
         assert target.content.endswith("Rust.") and not target.is_archived
+        pending = session.scalars(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id,
+        )).one()
+        assert "source_target_stale" in pending.metadata_json["extraction_evidence"]["source_decision"]["reason_codes"]

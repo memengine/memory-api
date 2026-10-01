@@ -1336,18 +1336,29 @@ class ConflictResolver:
         Retrieval scores nominate inputs, never permission to become current.
         A missing target still needs a commitment decision. Failure is pending.
         """
-        failure = self._classifier_failure_decision(
-            conflict_type=ConflictType.UNKNOWN, reason_code="source_decision_unavailable",
-        )
         turns = GovernedExtractionService.verified_source_turns(memory, self.source_messages)
         if turns is None:
-            return None, failure
+            return None, self._classifier_failure_decision(
+                conflict_type=ConflictType.UNKNOWN, reason_code="source_evidence_invalid",
+            )
         evidence = memory.validated_evidence or {}
         review_required = (
             evidence.get("claim_state") == "uncertain_change"
             or evidence.get("governance_directive") == "clarify_if_conflict"
         )
         target_map = {str(row.id): row for row in targets}
+        source_details: dict[str, Any] = {
+            "candidate_count": len(target_map),
+            "backend_requires_user_selection": review_required,
+        }
+
+        def fail(reason_code: str) -> tuple[Memory | None, ConflictDecision]:
+            return None, self._classifier_failure_decision(
+                conflict_type=ConflictType.UNKNOWN,
+                reason_code=reason_code,
+                details=source_details,
+            )
+
         target_snapshots = {key: self._source_target_snapshot(row) for key, row in target_map.items()}
         prompt = json.dumps({
             "new": self._serialize_extracted_memory(memory),
@@ -1362,7 +1373,7 @@ class ConflictResolver:
         }, ensure_ascii=False)
         # Never truncate the qualifier or silently omit oversized targets.
         if sum(len(str(turn["content"])) for turn in turns) > 8000 or len(prompt) > 32000:
-            return None, failure
+            return fail("source_input_limit")
         schema = deepcopy(CONFLICT_RESPONSE_FORMAT.schema)
         schema["properties"]["relation"]["enum"].append("novel")
         schema["properties"]["selected_memory_id"] = {
@@ -1391,16 +1402,6 @@ class ConflictResolver:
             "With no relevant target, requires_user_choice is false and clarification_option_memory is null. "
             "Never supersede or merge a nonexistent memory. Never select novel when a target is selected. "
             "With a relevant target, follow the ordinary relation and clarification rules. "
-            "admission_policy is backend-owned and is not part of the user's text. "
-            "When admission_policy.requires_user_selection is true and you select a relevant "
-            "target with a different value for the same property, propose a grounded "
-            "clarification_option_memory even if your independent commitment assessment is "
-            "committed_current or requires_user_choice is false. The option is hypothetical "
-            "until the user selects it; you do not authorize admission. Use the selected "
-            "target's category and copy the alternative value exactly from supporting_user_turns. "
-            "This policy overrides the ordinary rule to return a null option when user choice "
-            "is false. Never invent a target or option to satisfy the policy; with no relevant "
-            "target or no grounded alternative, return null. Duplicates do not need an option. "
             "Return selected_memory_id in addition to the required relation fields."
         )
         try:
@@ -1414,14 +1415,28 @@ class ConflictResolver:
             self.last_source_decision_tokens_used += int(response.total_tokens or 0)
             payload = json.loads(response.content or "")
             if not isinstance(payload, dict) or "selected_memory_id" not in payload:
-                return None, failure
+                return fail("source_response_invalid")
             if set(payload) != set(schema["required"]) or payload.get("relation") not in schema["properties"]["relation"]["enum"]:
-                return None, failure
+                return fail("source_response_invalid")
+            if (
+                payload.get("commitment_status") not in schema["properties"]["commitment_status"]["enum"]
+                or not isinstance(payload.get("requires_user_choice"), bool)
+            ):
+                return fail("source_response_invalid")
             selected_id = payload["selected_memory_id"]
+            # Audit only bounded schema values and presence flags, never the
+            # raw provider payload, user text, selected ID or provider error.
+            source_details.update(
+                target_id_present=selected_id is not None,
+                option_supplied=payload.get("clarification_option_memory") is not None,
+                relation=payload["relation"],
+                commitment_status=payload["commitment_status"],
+                requires_user_choice=payload["requires_user_choice"],
+            )
             if selected_id is not None and (
                 not isinstance(selected_id, str) or selected_id not in target_map
             ):
-                return None, failure
+                return fail("source_target_invalid")
             target = target_map[selected_id] if isinstance(selected_id, str) else None
             if target is not None:
                 # Do not hold row locks across the provider request. Lock only
@@ -1432,24 +1447,31 @@ class ConflictResolver:
                         .execution_options(populate_existing=True)
                     ).scalar_one_or_none()
                 if target is None or self._source_target_snapshot(target) != target_snapshots[str(target.id)]:
-                    return None, failure
+                    return fail("source_target_stale")
+            if review_required and target is None:
+                return fail("source_target_missing")
             decision = self._parse_conflict_decision(
                 response.content, new_memory=memory, existing_memory=target,
                 conflict_type=ConflictType.UNKNOWN,
                 allow_novel=True,
                 require_user_selection=review_required and target is not None,
             )
+            if decision.decision_evidence is not None:
+                decision.decision_evidence.setdefault("details", {}).update(source_details)
+            if decision.action == "CLARIFY" and decision.clarification_option_memory is None:
+                # No selectable source claim exists. Buffer its failure audit
+                # before writer authority can discard or reinterpret it.
+                if target is None and "source_response_invalid" not in (
+                    decision.decision_evidence or {}
+                ).get("reason_codes", []):
+                    return fail("source_target_missing")
+                return None, decision
             if review_required:
                 # Uncertainty can veto admission, never grant authority. A
                 # later classifier or writer priority cannot erase this veto.
                 # Only a valid grounded clarification may proceed to selection.
-                if decision.action == "CLARIFY" and decision.clarification_option_memory is None:
-                    return None, decision
                 if decision.action in {"UPDATE", "MERGE", "KEEP_BOTH"}:
-                    return None, self._classifier_failure_decision(
-                        conflict_type=ConflictType.UNKNOWN,
-                        reason_code="source_commitment_disagreement",
-                    )
+                    return fail("source_commitment_disagreement")
                 if decision.action == "REJECT":
                     # Do not let an authority override turn a safe duplicate
                     # rejection into an update of the uncertain candidate.
@@ -1459,13 +1481,15 @@ class ConflictResolver:
                 or payload.get("requires_user_choice") is not False
                 or payload.get("relation") != "novel"
             ):
-                return None, failure
+                return fail("source_response_invalid")
             # Replacement and merge require a backend-owned target.
             if target is None and decision.action in {"UPDATE", "MERGE"}:
-                return None, failure
+                return fail("source_target_missing")
             return target, decision
-        except (AllProvidersFailedError, json.JSONDecodeError, TypeError, ValueError):
-            return None, failure
+        except AllProvidersFailedError:
+            return fail("source_provider_unavailable")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return fail("source_response_invalid")
 
     @staticmethod
     def _source_target_snapshot(memory: Memory) -> tuple[Any, ...]:
@@ -1559,19 +1583,27 @@ class ConflictResolver:
                     raw_action = f"{relation}:{commitment_status}:user_choice"
                     option_payload = payload.get("clarification_option_memory")
                     if existing_memory is not None:
-                        if require_user_selection and option_payload is None:
+                        if allow_novel and option_payload is None:
                             return self._classifier_failure_decision(
                                 conflict_type=conflict_type,
-                                reason_code="source_commitment_disagreement",
+                                reason_code="source_option_missing",
                             )
-                        if not isinstance(option_payload, dict):
-                            raise ValueError("clarification option memory is required")
-                        clarification_option_memory = self._build_clarification_option_memory(
-                            payload=option_payload,
-                            new_memory=new_memory,
-                            existing_memory=existing_memory,
-                            source_messages=self.source_messages if allow_novel else None,
-                        )
+                        try:
+                            if not isinstance(option_payload, dict):
+                                raise ValueError("clarification option memory is required")
+                            clarification_option_memory = self._build_clarification_option_memory(
+                                payload=option_payload,
+                                new_memory=new_memory,
+                                existing_memory=existing_memory,
+                                source_messages=self.source_messages if allow_novel else None,
+                            )
+                        except ValueError:
+                            if not allow_novel:
+                                raise
+                            return self._classifier_failure_decision(
+                                conflict_type=conflict_type,
+                                reason_code="source_option_invalid",
+                            )
                     else:
                         clarification_option_memory = None
                 else:
@@ -1609,7 +1641,7 @@ class ConflictResolver:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return self._classifier_failure_decision(
                 conflict_type=conflict_type,
-                reason_code="invalid_classifier_response",
+                reason_code="source_response_invalid" if allow_novel else "invalid_classifier_response",
             )
 
         return ConflictDecision(
@@ -1633,10 +1665,11 @@ class ConflictResolver:
         *,
         conflict_type: ConflictType,
         reason_code: str,
+        details: dict[str, Any] | None = None,
     ) -> ConflictDecision:
         reasoning = (
             "MemoryOS could not safely determine how these memories relate, "
-            "so it preserved the current memory and requested clarification."
+            "so it preserved the current memory and kept the candidate pending review."
         )
         return ConflictDecision(
             action="CLARIFY",
@@ -1648,6 +1681,7 @@ class ConflictResolver:
                 details={
                     "classifier": "llm",
                     "conflict_type": conflict_type.value,
+                    **(details or {}),
                 },
             ),
         )

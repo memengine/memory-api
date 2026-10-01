@@ -343,6 +343,98 @@ def test_source_provider_failure_stays_pending() -> None:
     assert len(resolver.last_pending_candidates) == 1
 
 
+@pytest.mark.parametrize("review_required", [False, True])
+@pytest.mark.parametrize("stored_priority", [20, 50, 90])
+@pytest.mark.parametrize("failure", [
+    "target_missing", "selected_target_missing", "option_missing", "option_invalid",
+    "target_invalid", "target_stale", "response_invalid", "provider_unavailable",
+    "reasoning_missing",
+])
+def test_source_failure_diagnostics_distinguish_outcomes_without_raw_payload(failure, review_required, stored_priority):
+    from api.services.llm_service import AllProvidersFailedError
+
+    full_turn = "Python could replace C++, but I am undecided. PRIVATE_SOURCE_TEXT"
+    candidate, messages = source_candidate(full_turn)
+    if review_required:
+        candidate.validated_evidence["claim_state"] = "uncertain_change"
+    existing = make_existing_memory()
+    existing.content = "My default programming language is C++."
+    existing.category = MemoryCategory.preference
+    existing.metadata_json = {"provenance": {"authority_rules": {"default_priority": stored_priority}}}
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = (
+        [] if failure == "target_missing" else [make_qdrant_point(existing, 0.7)]
+    )
+    option = {"attribute": "default programming language", "value": "Python", "category": "preference"}
+    target_id = str(existing.id)
+    if failure in {"target_missing", "selected_target_missing"}:
+        target_id = None
+    elif failure == "target_invalid":
+        target_id = "PRIVATE_UNTRUSTED_ID"
+    if failure == "option_missing":
+        option = None
+    elif failure == "option_invalid":
+        option["value"] = "PRIVATE_UNMENTIONED_VALUE"
+    payload = source_response(
+        target_id, relation="novel" if target_id is None else "supersedes", option=option,
+        state="committed_current" if review_required else "tentative",
+    )
+    payload["reasoning"] = "PRIVATE_MODEL_REASONING"
+    if failure == "reasoning_missing":
+        payload["reasoning"] = ""
+    model = MagicMock()
+    if failure == "provider_unavailable":
+        model.complete_sync.side_effect = AllProvidersFailedError("PRIVATE_PROVIDER_ERROR", providers_tried=[], errors=[])
+    elif failure == "target_stale":
+        def change_then_respond(**_kwargs):
+            existing.content = "My default programming language is Rust."
+            return SimpleNamespace(content=json.dumps(payload), total_tokens=70)
+        model.complete_sync.side_effect = change_then_respond
+    else:
+        model.complete_sync.return_value = SimpleNamespace(
+            content="PRIVATE_BROKEN_JSON" if failure == "response_invalid" else json.dumps(payload), total_tokens=70,
+        )
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages,
+                                provenance_snapshot={"authority_rules": {"default_priority": 50}})
+    assert not resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                       tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert not existing.is_archived and resolver.last_user_clarifications_queued == 0
+    assert len(session.memories) == 1 and len(resolver.last_pending_candidates) == 1
+    audit = resolver.last_pending_candidates[0].validated_evidence["source_decision"]
+    expected_code = {
+        "selected_target_missing": "source_target_missing",
+        "reasoning_missing": "source_response_invalid",
+    }.get(failure, f"source_{failure}")
+    assert expected_code in audit["reason_codes"]
+    details = audit["details"]
+    assert details["candidate_count"] == (0 if failure == "target_missing" else 1)
+    assert details["backend_requires_user_selection"] is review_required
+    assert set(details) <= {
+        "classifier", "conflict_type", "candidate_count", "backend_requires_user_selection",
+        "target_id_present", "option_supplied", "relation", "commitment_status", "requires_user_choice",
+    }
+    assert len(json.dumps(details)) < 512
+    assert "PRIVATE_" not in json.dumps(audit)
+    assert model.complete_sync.call_count == 1
+
+
+def test_source_option_contract_has_no_user_choice_null_override():
+    candidate, messages = source_candidate("Python might replace C++.")
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(state="tentative", relation="ambiguous")), total_tokens=20)
+    resolver = ConflictResolver(session=FakeSession(), qdrant_service=MagicMock(), embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    resolver._classify_source_claim(candidate, [])
+    prompt = model.complete_sync.call_args.kwargs["system_prompt"]
+    assert prompt.count("Option construction is independent of commitment_status and requires_user_choice.") == 1
+    assert "otherwise set clarification_option_memory to null" not in prompt
+    assert "This policy overrides the ordinary rule" not in prompt
+    assert "supporting_user_turns" in prompt and "admission_policy.requires_user_selection" in prompt
+
+
 @pytest.mark.parametrize("marker", ["claim_state", "directive", "both"])
 @pytest.mark.parametrize("stored_priority", [20, 50, 90])
 @pytest.mark.parametrize("relation", ["supersedes", "mergeable", "coexists", "novel", "duplicate"])
@@ -388,7 +480,12 @@ def test_source_commitment_disagreement_cannot_admit_or_replace_memory(marker, s
     else:
         pending = resolver.last_pending_candidates
         assert len(pending) == 1
-        assert "source_commitment_disagreement" in pending[0].validated_evidence["source_decision"]["reason_codes"]
+        audit = pending[0].validated_evidence["source_decision"]
+        expected_code = "source_target_missing" if relation == "novel" else "source_option_missing"
+        assert expected_code in audit["reason_codes"]
+        assert audit["details"]["commitment_status"] == "committed_current"
+        assert audit["details"]["requires_user_choice"] is False
+        assert audit["details"]["backend_requires_user_selection"] is True
         assert pending[0].validated_evidence["source_spans"] == candidate.validated_evidence["source_spans"]
 
 
