@@ -30,6 +30,25 @@ class EvidenceDecision:
     review_required: bool = False
 
 
+ELIGIBLE_USER_SOURCE_KINDS = frozenset(
+    {"direct_user_input", "client_assertion"}
+)
+
+
+def eligible_user_turn_indexes(
+    messages: list[dict[str, Any]],
+) -> tuple[int, ...]:
+    """Return server-observed user turns that may support conversational memory."""
+
+    return tuple(
+        index
+        for index, message in enumerate(messages)
+        if _canonical_role(message) == "user"
+        and _source_kind(message) in ELIGIBLE_USER_SOURCE_KINDS
+        and bool(str(message.get("content") or "").strip())
+    )
+
+
 def authority_for_submission(
     *,
     mode: str,
@@ -84,7 +103,7 @@ def validate_conversational_evidence(
         index
         for index in indexes
         if _canonical_role(messages[index]) == "user"
-        and _source_kind(messages[index]) in {"direct_user_input", "client_assertion"}
+        and _source_kind(messages[index]) in ELIGIBLE_USER_SOURCE_KINDS
     )
 
     relation = str(evidence_relation or "direct_user_statement")
@@ -120,7 +139,7 @@ def validate_conversational_evidence(
         for index, message in enumerate(messages)
         if index > proposal_turn
         and _canonical_role(message) == "user"
-        and _source_kind(message) in {"direct_user_input", "client_assertion"}
+        and _source_kind(message) in ELIGIBLE_USER_SOURCE_KINDS
         and (visible_turn_indexes is None or index in visible_turn_indexes)
     )
     user_indexes = tuple(
@@ -801,9 +820,11 @@ def _source_kind(message: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "ELIGIBLE_USER_SOURCE_KINDS",
     "EvidenceAuthority",
     "EvidenceDecision",
     "authority_for_submission",
+    "eligible_user_turn_indexes",
     "explicit_proposal_ordinal",
     "has_explicit_proposal_denial",
     "has_unambiguous_memory_denial",

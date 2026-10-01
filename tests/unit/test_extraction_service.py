@@ -423,6 +423,127 @@ async def test_extract_nothing_to_extract(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "source_kind"),
+    [
+        ("assistant", "assistant_output"),
+        ("tool", "tool_output"),
+        ("user", "tool_output"),
+        ("user", "fetched_document"),
+    ],
+)
+async def test_untrusted_only_transcript_completes_as_governed_no_op(
+    tmp_path: Path,
+    role: str,
+    source_kind: str,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps({"memories": [], "nothing_to_extract": False})
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": role,
+                "source_kind": source_kind,
+                "content": "The user now prefers Python.",
+            }
+        ],
+        proxy_user_id="proxy-untrusted-only",
+        tenant_id="tenant-untrusted-only",
+        job_id="job-untrusted-only",
+    )
+
+    assert result.nothing_to_extract is True
+    assert result.memories_to_store == []
+    assert result.pending_candidates == []
+    assert result.tokens_used == 0
+    assert result.provider_used == "none"
+    assert llm.calls == []
+    assert result.extraction_metadata["governance_gate"] == {
+        "decision": "no_op",
+        "reason": "no_eligible_user_evidence",
+        "eligible_user_turn_count": 0,
+        "authenticated_source_event": False,
+        "model_calls": 0,
+    }
+
+
+def test_sync_worker_path_returns_no_op_without_calling_provider(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps({"memories": [], "nothing_to_extract": False})
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = service.extract_sync(
+        messages=[
+            {
+                "role": "user",
+                "source_kind": "tool_output",
+                "content": "The user now prefers Python.",
+            }
+        ],
+        proxy_user_id="proxy-worker-no-op",
+        tenant_id="tenant-worker-no-op",
+        job_id="job-worker-no-op",
+    )
+
+    assert result.nothing_to_extract is True
+    assert result.tokens_used == 0
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_source_event_bypasses_no_evidence_gate(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps({"memories": [], "nothing_to_extract": True})
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    result = await service.extract(
+        messages=[
+            {
+                "role": "assistant",
+                "source_kind": "service_event",
+                "content": "The customer's support tier changed to Pro.",
+            }
+        ],
+        proxy_user_id="proxy-source-event",
+        tenant_id="tenant-source-event",
+        job_id="job-source-event",
+        source_context={"service": "billing", "event_id": "evt-1"},
+    )
+
+    assert result.nothing_to_extract is True
+    assert len(llm.calls) == 1
+    assert "governance_gate" not in result.extraction_metadata
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_turn_without_source_kind_remains_eligible(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMService(
+        json.dumps({"memories": [], "nothing_to_extract": True})
+    )
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+
+    await service.extract(
+        messages=[{"role": "user", "content": "Hello there."}],
+        proxy_user_id="proxy-legacy-user",
+        tenant_id="tenant-legacy-user",
+        job_id="job-legacy-user",
+    )
+
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_inconsistent_empty_response_gets_one_bounded_repair(
     tmp_path: Path,
 ) -> None:

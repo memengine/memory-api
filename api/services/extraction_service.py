@@ -19,6 +19,7 @@ from api.schemas.extraction_schemas import (
 )
 from api.schemas.memory_schemas import ExtractedMemory
 from api.services.evidence_policy import (
+    eligible_user_turn_indexes,
     explicit_proposal_ordinal,
     has_explicit_proposal_denial,
     normalized_selection_tokens,
@@ -320,6 +321,45 @@ class ExtractionService:
         in one place.
         """
         resolved_user_id = proxy_user_id or user_id or ""
+        eligible_turns = eligible_user_turn_indexes(messages)
+        if source_context is None and not eligible_turns:
+            LOGGER.info(
+                "extraction_skipped_no_eligible_evidence",
+                extra={
+                    "event": "extraction_skipped_no_eligible_evidence",
+                    "tenant_id": tenant_id,
+                    "proxy_user_id": resolved_user_id,
+                    "job_id": job_id,
+                    "message_count": len(messages),
+                },
+            )
+            return ExtractionResult(
+                memories_extracted=0,
+                memories_filtered=0,
+                pending_candidates_count=0,
+                conflicts_resolved=0,
+                nothing_to_extract=True,
+                tokens_used=0,
+                provider_used="none",
+                job_id=str(job_id or ""),
+                extraction_metadata={
+                    "candidate_validation": {
+                        "model_returned_memories": 0,
+                        "accepted_for_storage": 0,
+                        "accepted_as_pending": 0,
+                        "rejected": 0,
+                        "rejection_counts": {},
+                        "model_marked_nothing_to_extract": False,
+                    },
+                    "governance_gate": {
+                        "decision": "no_op",
+                        "reason": "no_eligible_user_evidence",
+                        "eligible_user_turn_count": 0,
+                        "authenticated_source_event": False,
+                        "model_calls": 0,
+                    },
+                },
+            )
         indexed_messages = [
             {**message, "_turn_index": index}
             for index, message in enumerate(messages)
