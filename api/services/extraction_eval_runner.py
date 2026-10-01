@@ -1,9 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from api.services.extraction_eval_harness import (
     GoldenComparison,
@@ -15,29 +14,8 @@ from api.services.extraction_service import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     ExtractionService,
 )
-from api.services.llm_service import LLMResponse
 
 MIN_STORED_IMPORTANCE = 2.0
-
-
-class StaticGoldenLLMService:
-    """Deterministic LLM stub for golden extraction validation."""
-
-    def __init__(self, content: str) -> None:
-        self.content = content
-        self.calls: list[dict[str, Any]] = []
-
-    async def complete(self, **kwargs: Any) -> LLMResponse:
-        self.calls.append(kwargs)
-        return LLMResponse(
-            content=self.content,
-            provider_used="golden",
-            model_used="golden-expected-output",
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            latency_ms=0,
-        )
 
 
 @dataclass(frozen=True)
@@ -71,9 +49,9 @@ async def run_golden_extraction_baseline(
 ) -> GoldenBaselineSummary:
     """Run golden cases through the real parser/filter path without live LLM calls.
 
-    The baseline intentionally uses expected memories as the mocked model output.
-    This isolates parser, threshold, and nothing-to-extract behavior before we
-    spend tokens on model quality evaluation.
+    These historical fixtures contain generated paraphrases, not v2 source
+    clauses. Test their legacy parser and thresholds explicitly; never send
+    them through the new provider write contract or claim model accuracy.
     """
     results: list[GoldenBaselineCaseResult] = []
     for case in cases:
@@ -86,7 +64,9 @@ async def run_golden_extraction_baseline(
 
     by_case_type: dict[str, dict[str, int]] = {}
     for result in results:
-        bucket = by_case_type.setdefault(result.case_type, {"total": 0, "passed": 0, "failed": 0})
+        bucket = by_case_type.setdefault(
+            result.case_type, {"total": 0, "passed": 0, "failed": 0}
+        )
         bucket["total"] += 1
         if result.passed:
             bucket["passed"] += 1
@@ -109,17 +89,20 @@ async def _run_case(
     spec_path: str | Path | None,
     confidence_threshold: float,
 ) -> GoldenBaselineCaseResult:
-    llm = StaticGoldenLLMService(_expected_llm_payload(case))
     service = ExtractionService(
-        llm_service=llm,
+        client=object(),
         spec_path=spec_path,
         confidence_threshold=confidence_threshold,
+        importance_shadow_enabled=False,
+        proposal_confirmation_enabled=False,
+        app_env="test",
     )
-    extraction = await service.extract(
-        messages=case.messages,
-        proxy_user_id=f"golden-{case.id}",
-        tenant_id="golden-eval",
-        job_id=f"golden-{case.id}",
+    kept, pending, filtered_count, nothing_to_extract, _rejections = (
+        service._parse_and_validate_response(
+            _expected_llm_payload(case),
+            messages=case.messages,
+            evidence_context={"extractor_version": "legacy-parser-golden-v1"},
+        )
     )
 
     expected_stored = _expected_stored_memories(
@@ -131,23 +114,25 @@ async def _run_case(
             "content": memory.content,
             "category": memory.category,
         }
-        for memory in extraction.memories_to_store
+        for memory in kept
     ]
     comparison = compare_expected_memories(actual, expected_stored)
-    nothing_matches = extraction.nothing_to_extract is case.expected_nothing_to_extract
+    nothing_matches = nothing_to_extract is case.expected_nothing_to_extract
 
     return GoldenBaselineCaseResult(
         case_id=case.id,
         case_type=case.case_type,
         passed=comparison.passed and nothing_matches,
         expected_stored_count=len(expected_stored),
-        extracted_count=extraction.memories_extracted,
-        filtered_count=extraction.memories_filtered,
-        pending_candidates_count=extraction.pending_candidates_count,
+        extracted_count=len(kept),
+        filtered_count=filtered_count,
+        pending_candidates_count=len(pending),
         borderline_candidate_count=sum(
-            1 for memory in case.expected_memories if memory.confidence < confidence_threshold
+            1
+            for memory in case.expected_memories
+            if memory.confidence < confidence_threshold
         ),
-        nothing_to_extract=extraction.nothing_to_extract,
+        nothing_to_extract=nothing_to_extract,
         comparison=comparison,
     )
 

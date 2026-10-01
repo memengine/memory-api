@@ -12,7 +12,7 @@
   "suites": [
     {
       "name": "extraction-contract", "version": "1.0", "tier": "fast", "classification": "development",
-      "dataset": "benchmarks/internal/datasets/extraction/development", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_extraction_benchmark.py", "tests/unit/test_extraction_golden_dataset.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+      "dataset": "benchmarks/internal/datasets/extraction/development", "runner": ["{python}", "-m", "pytest", "tests/unit/test_internal_extraction_benchmark.py", "tests/unit/test_extraction_golden_dataset.py", "tests/unit/test_extraction_source_spans.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
       "services": [], "provider_calls": false, "mode": "deterministic", "baseline": "benchmarks/internal/baselines/baseline-index.json",
       "acceptance": {"exit_code": 0}, "component_status": "production-active extraction plus benchmark-only evaluator"
     },

@@ -135,77 +135,23 @@ def test_semantic_floor_preserves_boundary_and_rejects_lower_score() -> None:
     assert service._passes_semantic_floor(SimpleNamespace(score=0.315)) is True
     assert service._passes_semantic_floor(SimpleNamespace(score=0.314999)) is False
 
-def test_qdrant_payload_results_include_provenance() -> None:
-    memory_id = uuid.uuid4()
-    source_event_id = uuid.uuid4()
-    service = object.__new__(RetrieverService)
-    point = SimpleNamespace(
-        id=str(memory_id),
-        score=0.91,
-        payload={
-            "memory_id": str(memory_id),
-            "content": "User's current subscription plan is Growth.",
-            "category": "fact",
-            "importance_score": 7.0,
-            "confidence_score": 0.95,
-            "agent_id": None,
-            "previous_version_id": None,
-            "created_at": datetime.now(UTC).isoformat(),
-            "last_accessed_at": None,
-            "source_event_id": str(source_event_id),
-            "provenance": {
-                "service": "billing-service",
-                "event_id": "billing-plan-001",
-                "writer_id": str(uuid.uuid4()),
-            },
-        },
-    )
-
-    results = service._results_from_qdrant_payloads([point])
-
-    assert len(results) == 1
-    assert results[0].source_event_id == str(source_event_id)
-    assert results[0].provenance == point.payload["provenance"]
-
-
-def test_qdrant_payload_results_enforce_requested_agent() -> None:
-    requested_agent_id = str(uuid.uuid4())
-    other_agent_id = str(uuid.uuid4())
-    service = object.__new__(RetrieverService)
-
-    def point(agent_id: str | None) -> SimpleNamespace:
-        memory_id = uuid.uuid4()
-        return SimpleNamespace(
-            id=str(memory_id),
-            score=0.9,
-            payload={
-                "memory_id": str(memory_id),
-                "content": "Agent-scoped memory",
-                "category": "fact",
-                "importance_score": 5.0,
-                "confidence_score": 0.9,
-                "agent_id": agent_id,
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-        )
-
-    results = service._results_from_qdrant_payloads(
-        [point(requested_agent_id), point(other_agent_id), point(None)],
-        agent_id=requested_agent_id,
-    )
-
-    assert len(results) == 1
-    assert results[0].agent_id == requested_agent_id
-
-
+def test_nomination_ids_are_bounded_deduplicated_and_malformed_ids_ignored() -> None:
+    first = uuid.uuid4()
+    ids = [str(first), "malformed", str(first), *[str(uuid.uuid4()) for _ in range(100)]]
+    bounded = RetrieverService._bounded_memory_ids(iter(ids))
+    assert bounded[0] == first
+    assert len(bounded) == 48
+    assert len(bounded) == len(set(bounded))
 @pytest.mark.asyncio
-async def test_retrieve_returns_cached_results_immediately(monkeypatch) -> None:
+async def test_retrieve_verifies_cached_ids_without_embedding_or_vector_search(monkeypatch) -> None:
     monkeypatch.setattr("api.services.retriever.REDIS_CACHE_READ_ENABLED", True)
+    memory = make_memory(content="User prefers concise answers", category=MemoryCategory.preference,
+                         importance_score=8.0)
     cache_service = MagicMock()
     cache_service.get_hot_memories = AsyncMock(
         return_value=[
             {
-                "id": "memory-1",
+                "id": str(memory.id),
                 "content": "User prefers concise answers",
                 "category": "preference",
                 "importance_score": 8.0,
@@ -222,7 +168,7 @@ async def test_retrieve_returns_cached_results_immediately(monkeypatch) -> None:
     )
     cache_service.set_hot_memories = AsyncMock()
     session = MagicMock()
-    session.execute = AsyncMock()
+    session.execute = AsyncMock(return_value=FakeExecuteResult(items=[memory]))
     qdrant_service = MagicMock()
     task_mock = MagicMock()
     monkeypatch.setattr("api.services.retriever.update_memory_accesses", task_mock)
@@ -236,13 +182,69 @@ async def test_retrieve_returns_cached_results_immediately(monkeypatch) -> None:
         client=FakeGenAIClient([0.1, 0.2]),
     )
 
-    results = await service.retrieve(query="pricing", user_id=str(uuid.uuid4()))
+    results = await service.retrieve(query="pricing", user_id=str(memory.user_id))
 
     assert len(results) == 1
     assert results[0].content == "User prefers concise answers"
-    session.execute.assert_not_awaited()
+    session.execute.assert_awaited_once()
+    assert "memories.user_id" in str(session.execute.call_args.args[0])
     qdrant_service.search_memories.assert_not_called()
-    task_mock.delay.assert_called_once_with(["memory-1"])
+    task_mock.delay.assert_called_once_with([str(memory.id)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [QuotaMode.blocked, QuotaMode.passthrough])
+async def test_blocked_quota_cannot_be_bypassed_by_warm_cache(mode):
+    cache = MagicMock()
+    cache.get_retrieval_results = AsyncMock()
+    session = MagicMock()
+    session.execute = AsyncMock()
+    service = RetrieverService(session=session, cache_service=cache,
+        qdrant_service=MagicMock(), quota_manager=FakeQuotaManager(),
+        embedding_service=FakeEmbeddingService())
+    assert await service.retrieve("query", user_id=str(uuid.uuid4()), quota_mode=mode) == []
+    cache.get_retrieval_results.assert_not_awaited()
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_database_failure_never_falls_back_to_unverified_cached_content(monkeypatch):
+    memory = make_memory(content="Current preference")
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=TimeoutError("database unavailable"))
+    service = RetrieverService(session=session, cache_service=MagicMock(),
+        qdrant_service=MagicMock(), quota_manager=FakeQuotaManager(),
+        embedding_service=FakeEmbeddingService())
+    cached = service._memory_to_result(memory, semantic_score=0.9)
+    monkeypatch.setattr(service, "_get_cached_results", AsyncMock(return_value=[cached]))
+    with pytest.raises(TimeoutError, match="database unavailable"):
+        await service.retrieve("query", user_id=str(memory.user_id), quota_mode="full")
+    session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cached_page_has_one_bounded_unlocked_owner_scoped_sql_read():
+    from api.db.models import ProxyUser
+    tenant_id, proxy_id = uuid.uuid4(), uuid.uuid4()
+    memories = [make_memory(content=f"unique-{index}") for index in range(50)]
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=FakeExecuteResult(items=memories))
+    service = RetrieverService(session=session, cache_service=MagicMock(),
+        qdrant_service=MagicMock(), quota_manager=FakeQuotaManager(),
+        embedding_service=FakeEmbeddingService())
+    results = await service._hydrate_current_results(
+        [service._memory_to_result(row, semantic_score=0.9) for row in memories],
+        proxy_user_id=str(proxy_id), user_id=None, tenant_id=str(tenant_id),
+        categories=["fact"], agent_id=None, created_after=None)
+    assert len(results) == 50
+    session.execute.assert_awaited_once()
+    query = session.execute.call_args.args[0]
+    assert query.get_execution_options()["populate_existing"] is True
+    assert "FOR UPDATE" not in str(query)
+    assert "proxy_users.tenant_id" in str(query)
+    assert "proxy_users.is_blocked" in str(query)
+    assert "memories.proxy_user_id" in str(query)
+    assert ProxyUser.__tablename__ in str(query)
 
 
 @pytest.mark.asyncio

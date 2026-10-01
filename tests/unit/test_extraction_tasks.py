@@ -9,6 +9,8 @@ from api.db.models import ConversationProcessingStatus
 from api.db.models import MemorySourceEvent
 from api.db.models import ProxyUser
 from api.db.models import User
+from api.db.models import PendingExtractionCandidate
+from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.services.extractor import ExtractedMemory
 from api.tasks import extraction_tasks
 
@@ -126,6 +128,19 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     session = FakeSession(proxy_user)
     session_factory = FakeSessionFactory(session)
     resolver = FakeConflictResolver()
+    resolver.last_pending_candidates = [PendingExtractedMemory(
+        content="Python might become my default.", category="preference",
+        importance_score=7.0, confidence=0.9, reasoning="No committed choice.",
+        candidate_reason="source_decision_pending",
+        validated_evidence={"source_decision": {"action": "USER_REVIEW"}},
+    )]
+    resolver.last_source_decision_tokens_used = 77
+    resolver.last_user_clarifications_queued = 1
+    buffered = []
+    def capture_pending(_session, **kwargs):
+        buffered.extend(kwargs["candidates"])
+        return len(kwargs["candidates"])
+    monkeypatch.setattr(extraction_tasks, "_persist_pending_extraction_candidates", capture_pending)
     backing_user = User(
         id=uuid.uuid4(),
         external_id=f"proxy::{proxy_user.id}",
@@ -188,6 +203,11 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
 
     assert result["status"] == "processed"
     assert result["memories_created"] == 1
+    assert result["pending_candidates_buffered"] == 1
+    assert result["clarification_queued"] is True
+    assert result["tokens_used"] == 77
+    assert result["extraction_metadata"]["source_decision"] == {"pending_count": 1, "tokens_used": 77}
+    assert buffered == resolver.last_pending_candidates
     assert result["stored_memories"][0]["proxy_user_id"] == str(proxy_user.id)
     assert resolver.calls[0]["tenant_id"] == str(proxy_user.tenant_id)
     assert resolver.calls[0]["proxy_user_id"] == str(proxy_user.id)
@@ -201,6 +221,32 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert session.commits == 2
     assert session.rollbacks == 0
     assert session.closed is True
+
+
+def test_source_decision_pending_persists_evidence_without_creating_memory(monkeypatch) -> None:
+    proxy = ProxyUser(id=uuid.uuid4(), tenant_id=uuid.uuid4())
+    session = FakeSession(proxy)
+    candidate = PendingExtractedMemory(
+        content="Python might become my default.", category="preference",
+        importance_score=7.0, confidence=0.9, reasoning="No committed choice.",
+        candidate_reason="source_decision_pending",
+        validated_evidence={"source_spans": [{"turn_sha256": "digest"}],
+                            "source_decision": {"action": "USER_REVIEW"}},
+    )
+    monkeypatch.setattr(extraction_tasks, "_find_matching_pending_candidate", lambda *args, **kwargs: (None, False))
+    count = extraction_tasks._persist_pending_extraction_candidates(
+        session, candidates=[candidate], tenant_id=str(proxy.tenant_id),
+        proxy_user_id=str(proxy.id), extraction_job_id=str(uuid.uuid4()), source_event_id=None,
+    )
+    assert count == 1
+    assert len(session.added) == 1
+    row = session.added[0]
+    assert isinstance(row, PendingExtractionCandidate)
+    assert row.status == "pending"
+    assert row.candidate_reason == "source_decision_pending"
+    assert row.metadata_json["extraction_evidence"] == candidate.validated_evidence
+    assert row.proxy_user_id == proxy.id
+    assert row.tenant_id == proxy.tenant_id
 
 
 def test_external_conversation_id_survives_processing_in_memory_provenance(monkeypatch) -> None:

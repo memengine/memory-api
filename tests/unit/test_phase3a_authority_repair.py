@@ -550,7 +550,8 @@ async def test_rejected_proposal_candidate_can_only_fall_back_to_direct_groundin
             {
                 "memories": [
                     {
-                        "content": "User prefers to see the conclusion first.",
+                        "content": "My preference is to see the conclusion first.",
+                        "evidence_spans": [{"turn_index": 1, "quote": "My preference is to see the conclusion first."}],
                         "category": "preference",
                         "importance_score": 6,
                         "confidence": 0.9,
@@ -596,7 +597,8 @@ async def test_correction_recovery_runs_only_after_bounded_rejection_miss() -> N
             {
                 "memories": [
                     {
-                        "content": "उपयोगकर्ता की पसंद पहले निष्कर्ष देखने की है।",
+                        "content": "मेरी पसंद पहले निष्कर्ष देखने की है।",
+                        "evidence_spans": [{"turn_index": 1, "quote": "मेरी पसंद पहले निष्कर्ष देखने की है।"}],
                         "category": "preference",
                         "importance_score": 6,
                         "confidence": 0.9,
@@ -1318,7 +1320,8 @@ async def test_structured_unrelated_decision_keeps_independent_user_memory() -> 
             },
             "memories": [
                 {
-                    "content": "User prefers code examples before explanations.",
+                    "content": user_text,
+                    "evidence_spans": [{"turn_index": 1, "quote": user_text}],
                     "category": "preference",
                     "importance_score": 6,
                     "confidence": 0.9,
@@ -1336,7 +1339,7 @@ async def test_structured_unrelated_decision_keeps_independent_user_memory() -> 
 
     assert result.memories_extracted == 1
     assert result.memories_to_store[0].content == (
-        "User prefers code examples before explanations."
+        user_text
     )
     assert result.memories_to_store[0].validated_evidence["relation"] == (
         "direct_user_statement"

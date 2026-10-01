@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import islice
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,7 +16,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.cache import CacheService
-from api.db.models import Memory, QuotaMode
+from api.db.models import Memory, ProxyUser, QuotaMode
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
@@ -158,20 +159,33 @@ class RetrieverService:
             elif user_id is not None:
                 cache_identity = user_id
 
-        cached_results = await self._get_cached_results(user_id=cache_identity, cache_context=cache_context)
+        resolved_quota_mode = self._coerce_quota_mode(quota_mode) if quota_mode is not None else await self._resolve_quota_mode(tenant_id)
+        self.last_quota_mode = resolved_quota_mode.value
+        if resolved_quota_mode in {QuotaMode.blocked, QuotaMode.passthrough}:
+            return []
+
+        cached_results = await self._get_cached_results(user_id=cache_identity, cache_context=cache_context) if as_of is None else None
+        if cached_results:
+            verified = await self._hydrate_current_results(
+                cached_results, proxy_user_id=str(proxy_user.id) if proxy_user is not None else None,
+                user_id=identity if proxy_user is None else None, tenant_id=tenant_id,
+                categories=normalized_categories, agent_id=agent_id, created_after=created_after,
+            )
+            # Missing/changed candidates invalidate the whole cached ranking.
+            # Recompute to discover the replacement rather than returning a
+            # partial cached answer or silently retaining an obsolete score.
+            cached_results = verified if (
+                len(verified) == len(cached_results)
+                and {row.id: row.content for row in verified}
+                == {row.id: row.content for row in cached_results}
+            ) else None
+        else:
+            cached_results = None
         if cached_results is not None:
-            cached_results = self._filter_current_results(cached_results)
             self.last_cache_hit = True
-            self.last_quota_mode = self._coerce_quota_mode(quota_mode).value if quota_mode is not None else QuotaMode.full.value
             self._queue_access_update([result.id for result in cached_results])
             return cached_results[:limit]
         self.last_cache_hit = False
-
-        resolved_quota_mode = self._coerce_quota_mode(quota_mode) if quota_mode is not None else await self._resolve_quota_mode(tenant_id)
-        self.last_quota_mode = resolved_quota_mode.value
-
-        if resolved_quota_mode in {QuotaMode.blocked, QuotaMode.passthrough}:
-            return []
 
         if as_of is not None:
             historical_results = await self._retrieve_as_of_semantic(
@@ -194,6 +208,11 @@ class RetrieverService:
             categories=normalized_categories,
             agent_id=agent_id,
             created_after=created_after,
+        )
+        hot_tier_results = await self._hydrate_current_results(
+            hot_tier_results, proxy_user_id=str(proxy_user.id) if proxy_user is not None else None,
+            user_id=identity if proxy_user is None else None, tenant_id=tenant_id,
+            categories=normalized_categories, agent_id=agent_id, created_after=created_after,
         )
 
         if resolved_quota_mode == QuotaMode.degraded_retrieve:
@@ -327,25 +346,11 @@ class RetrieverService:
             point
             for point in scored_points
             if self._passes_semantic_floor(point)
-            and self._payload_is_current(getattr(point, "payload", {}) or {})
         ]
 
         if not scored_points:
             self._queue_access_update([result.id for result in hot_tier_results])
             return hot_tier_results[:limit]
-
-        payload_results = self._results_from_qdrant_payloads(scored_points, agent_id=agent_id)
-        if payload_results:
-            deduplicated_results = self._deduplicate_results(payload_results)
-            ranked_results = sorted(
-                deduplicated_results,
-                key=lambda item: item.final_score,
-                reverse=True,
-            )
-            final_results = self._merge_hot_tier_results(hot_tier_results, ranked_results, limit)
-            self._queue_access_update([result.id for result in final_results])
-            await self._cache_results(user_id=cache_identity, results=final_results, cache_context=cache_context)
-            return final_results
 
         top_memory_ids = [self._point_memory_id(point) for point in scored_points]
         if proxy_user is not None:
@@ -355,6 +360,7 @@ class RetrieverService:
                 categories=normalized_categories,
                 agent_id=agent_id,
                 created_after=created_after,
+                tenant_id=tenant_id,
             )
         else:
             memories_by_id = await self._fetch_memories_by_ids_for_user(
@@ -373,6 +379,8 @@ class RetrieverService:
 
             memory = memories_by_id.get(memory_id)
             if memory is None:
+                continue
+            if not self._memory_is_current(memory):
                 continue
 
             semantic_score = float(getattr(point, "score", 0.0) or 0.0)
@@ -466,9 +474,10 @@ class RetrieverService:
         if not cached_memories:
             return None
 
-        results = self._filter_current_results(
-            [self._memory_result_from_cache(item) for item in cached_memories]
-        )
+        try:
+            results = [self._memory_result_from_cache(item) for item in cached_memories[:50]]
+        except (KeyError, TypeError, ValueError):
+            return None
         self._set_l1_cache(l1_key, results)
         return results
 
@@ -582,18 +591,7 @@ class RetrieverService:
             return []
 
         results: list[MemoryResult] = []
-        for item in cached_memories:
-            if not self._payload_is_current(item):
-                continue
-            category = str(item.get("category", ""))
-            if categories and category not in categories:
-                continue
-            if agent_id is not None and item.get("agent_id") not in {None, agent_id}:
-                continue
-            if created_after is not None:
-                created_at = self._parse_datetime(item.get("created_at"))
-                if created_at is None or created_at < created_after:
-                    continue
+        for item in cached_memories[:50]:
             try:
                 results.append(self._memory_result_from_cache(item))
             except Exception:
@@ -881,10 +879,12 @@ class RetrieverService:
             Memory.importance_score.desc(),
             Memory.last_accessed_at.desc(),
         ).limit(limit)
-        result = await self.session.execute(query)
-        return self._filter_current_results(
-            [self._memory_to_result(memory, semantic_score=0.0) for memory in result.scalars().all()]
-        )
+        result = await self.session.execute(query.execution_options(populate_existing=True))
+        return [
+            self._memory_to_result(memory, semantic_score=0.0)
+            for memory in result.scalars().all()
+            if self._memory_is_current(memory)
+        ]
 
     async def _retrieve_cold_start_memories(
         self,
@@ -999,7 +999,7 @@ class RetrieverService:
         if created_after is not None:
             query = query.where(Memory.created_at >= created_after)
 
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.execution_options(populate_existing=True))
         return list(result.scalars().all())
 
     async def _fetch_cold_start_memories_for_user(
@@ -1020,7 +1020,7 @@ class RetrieverService:
             query = query.where(Memory.agent_id == self._as_uuid(agent_id))
         if created_after is not None:
             query = query.where(Memory.created_at >= created_after)
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.execution_options(populate_existing=True))
         return list(result.scalars().all())
 
     async def _fetch_memories_by_ids(
@@ -1031,8 +1031,9 @@ class RetrieverService:
         categories: list[str],
         agent_id: str | None,
         created_after: datetime | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, Memory]:
-        normalized_ids = [self._as_uuid(memory_id) for memory_id in memory_ids if memory_id]
+        normalized_ids = self._bounded_memory_ids(memory_ids)
         if not normalized_ids:
             return {}
 
@@ -1041,6 +1042,11 @@ class RetrieverService:
             Memory.proxy_user_id == self._as_uuid(proxy_user_id),
             Memory.is_archived.is_(False),
         )
+        if tenant_id is not None:
+            query = query.join(ProxyUser, Memory.proxy_user_id == ProxyUser.id).where(
+                ProxyUser.tenant_id == self._as_uuid(tenant_id),
+                ProxyUser.is_blocked.is_(False),
+            )
         if categories:
             query = query.where(Memory.category.in_([category for category in categories]))
         if agent_id is not None:
@@ -1048,7 +1054,7 @@ class RetrieverService:
         if created_after is not None:
             query = query.where(Memory.created_at >= created_after)
 
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.execution_options(populate_existing=True))
         memories = list(result.scalars().all())
         return {str(memory.id): memory for memory in memories}
 
@@ -1061,7 +1067,7 @@ class RetrieverService:
         agent_id: str | None,
         created_after: datetime | None = None,
     ) -> dict[str, Memory]:
-        normalized_ids = [self._as_uuid(memory_id) for memory_id in memory_ids if memory_id]
+        normalized_ids = self._bounded_memory_ids(memory_ids)
         if not normalized_ids:
             return {}
         query = select(Memory).where(
@@ -1075,9 +1081,54 @@ class RetrieverService:
             query = query.where(Memory.agent_id == self._as_uuid(agent_id))
         if created_after is not None:
             query = query.where(Memory.created_at >= created_after)
-        result = await self.session.execute(query)
+        result = await self.session.execute(query.execution_options(populate_existing=True))
         memories = list(result.scalars().all())
         return {str(memory.id): memory for memory in memories}
+
+    @staticmethod
+    def _bounded_memory_ids(memory_ids: Iterable[str | None]) -> list[uuid.UUID]:
+        ids: list[uuid.UUID] = []
+        for value in islice(memory_ids, 50):
+            try:
+                parsed = uuid.UUID(str(value))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if parsed not in ids:
+                ids.append(parsed)
+        return ids
+
+    async def _hydrate_current_results(
+        self, candidates: list[MemoryResult], *, proxy_user_id: str | None,
+        user_id: str | None, tenant_id: str | None, categories: list[str],
+        agent_id: str | None, created_after: datetime | None,
+    ) -> list[MemoryResult]:
+        """Caches nominate at most one page; SQL owns content and eligibility.
+
+        One indexed batch read, no provider call and no locks. Always refresh
+        ORM instances: another process may have committed since the last read.
+        A database failure propagates; stale context is never a fallback.
+        """
+        if not candidates:
+            return []
+        memory_ids = [row.id for row in candidates[:50]]
+        if proxy_user_id is not None:
+            memories = await self._fetch_memories_by_ids(
+                memory_ids=memory_ids, categories=categories, agent_id=agent_id,
+                created_after=created_after, proxy_user_id=proxy_user_id, tenant_id=tenant_id,
+            )
+        elif user_id is not None:
+            memories = await self._fetch_memories_by_ids_for_user(
+                memory_ids=memory_ids, categories=categories, agent_id=agent_id,
+                created_after=created_after, user_id=user_id,
+            )
+        else:
+            return []
+        results = [
+            self._memory_to_result(memories[row.id], semantic_score=row.semantic_score)
+            for row in candidates[:50]
+            if row.id in memories and self._memory_is_current(memories[row.id])
+        ]
+        return sorted(self._deduplicate_results(results), key=lambda row: row.final_score, reverse=True)
 
     async def _embed_query(self, query: str, *, model_id: str) -> EmbeddingResult:
         return await self.embedding_service.embed(query, model_id=model_id)
@@ -1273,58 +1324,6 @@ class RetrieverService:
             effective_until=memory.effective_until.isoformat() if memory.effective_until else None,
         )
 
-    def _results_from_qdrant_payloads(
-        self, scored_points: list[Any], *, agent_id: str | None = None
-    ) -> list[MemoryResult]:
-        results: list[MemoryResult] = []
-        for point in scored_points:
-            payload = getattr(point, "payload", {}) or {}
-            if agent_id is not None and str(payload.get("agent_id") or "") != str(agent_id):
-                continue
-            memory_id = self._point_memory_id(point)
-            content = payload.get("content")
-            category = payload.get("category")
-            importance_score = payload.get("importance_score")
-            if not memory_id or not content or not category or importance_score is None:
-                return []
-
-            semantic_score = float(getattr(point, "score", 0.0) or 0.0)
-            last_accessed_at = payload.get("last_accessed_at")
-            created_at = payload.get("created_at")
-            recency_source = self._parse_datetime(last_accessed_at) or self._parse_datetime(created_at)
-            recency_score = self._recency_score(recency_source)
-            importance = float(importance_score)
-            final_score = (
-                (self.SEMANTIC_WEIGHT * semantic_score)
-                + (self.IMPORTANCE_WEIGHT * (importance / 10.0))
-                + (self.RECENCY_WEIGHT * recency_score)
-            )
-            results.append(
-                MemoryResult(
-                    id=str(memory_id),
-                    content=str(content),
-                    category=str(category),
-                    importance_score=importance,
-                    confidence_score=float(payload.get("confidence_score") or payload.get("confidence") or 1.0),
-                    semantic_score=semantic_score,
-                    recency_score=recency_score,
-                    final_score=round(final_score, 6),
-                    agent_id=str(payload["agent_id"]) if payload.get("agent_id") else None,
-                    previous_version_id=(
-                        str(payload["previous_version_id"]) if payload.get("previous_version_id") else None
-                    ),
-                    last_accessed_at=str(last_accessed_at) if last_accessed_at else None,
-                    created_at=str(created_at) if created_at else None,
-                    source_event_id=(
-                        str(payload["source_event_id"]) if payload.get("source_event_id") else None
-                    ),
-                    provenance=dict(payload["provenance"]) if payload.get("provenance") else None,
-                    effective_from=str(payload["effective_from"]) if payload.get("effective_from") else None,
-                    effective_until=str(payload["effective_until"]) if payload.get("effective_until") else None,
-                )
-            )
-        return results
-
     @classmethod
     def _deduplicate_results(cls, results: list[MemoryResult]) -> list[MemoryResult]:
         deduplicated: list[MemoryResult] = []
@@ -1400,7 +1399,7 @@ class RetrieverService:
         cls, memory: Memory, *, now: datetime | None = None
     ) -> bool:
         reference = now or datetime.now(UTC)
-        return cls._is_valid_at(
+        return cls._is_valid_at(None, getattr(memory, "expires_at", None), reference) and cls._is_valid_at(
             getattr(memory, "effective_from", None),
             getattr(memory, "effective_until", None),
             reference,

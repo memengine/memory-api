@@ -22,6 +22,11 @@ def test_strict_schema_requires_complete_root_shape(
         "claim_state"
     ]
     assert claim_state["enum"] == ["asserted", "correction", "uncertain_change"]
+    memory_schema = schema["properties"]["memories"]["items"]
+    assert "evidence_spans" in memory_schema["required"]
+    span = memory_schema["properties"]["evidence_spans"]["items"]
+    assert set(span["required"]) == {"turn_index", "quote"}
+    assert span["additionalProperties"] is False
 
 
 def test_proposal_mode_does_not_allow_model_to_emit_confirmed_memory_directly() -> None:

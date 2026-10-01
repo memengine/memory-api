@@ -71,15 +71,46 @@ def _memory_item_schema(*, proposal_confirmation_enabled: bool) -> dict[str, Any
         else ["direct_user_statement", "user_confirmed_assistant_proposal"]
     )
     properties = {
-        "content": {"type": "string"},
+        "content": {
+            "type": "string",
+            "description": (
+                "For independent conversational claims, copy one complete supporting "
+                "user clause verbatim, or join supporting clauses across user turns "
+                "with newline separators in transcript order. content must equal "
+                "one evidence_spans.quote or that exact joined text, after trimming "
+                "surrounding whitespace. Do not paraphrase, translate "
+                "or copy English category examples. "
+                "Preserve negation, uncertainty, corrections and time qualifiers."
+            ),
+        },
         "category": {"type": "string", "enum": CATEGORIES},
         "importance_score": {"type": "number", "minimum": 1.0, "maximum": 10.0},
         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "claim_state": {
             "type": "string",
             "enum": ["asserted", "correction", "uncertain_change"],
+            "description": (
+                "Classify the meaning of the full supporting user turn, not just the "
+                "selected quote. asserted means a committed current claim; correction "
+                "means an earlier value is explicitly superseded; uncertain_change "
+                "means a competing value remains undecided, regardless of confidence. "
+                "A correction remains correction even when the replacement is certain."
+            ),
         },
         "evidence_turns": {"type": "array", "items": {"type": "integer"}},
+        "evidence_spans": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "turn_index": {"type": "integer"},
+                    "quote": {"type": "string", "minLength": 1, "maxLength": 1000},
+                },
+                "required": ["turn_index", "quote"],
+                "additionalProperties": False,
+            },
+        },
         "evidence_relation": {"type": "string", "enum": evidence_relations},
         "proposal_turn": {"type": ["integer", "null"]},
         "reasoning": {"type": "string"},

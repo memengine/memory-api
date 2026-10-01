@@ -41,15 +41,32 @@ def test_vector_payload_can_omit_plaintext_content(monkeypatch) -> None:
     assert payload["category"] == "fact"
 
 
-def test_contentless_qdrant_payload_requests_authorized_database_fallback() -> None:
-    service = object.__new__(RetrieverService)
-    point = SimpleNamespace(
-        id="memory-1",
-        score=0.9,
-        payload={"memory_id": "memory-1", "category": "fact", "importance_score": 7.0},
-    )
-
-    assert service._results_from_qdrant_payloads([point]) == []
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_content", [False, True])
+async def test_vector_payload_always_requires_authorized_database_hydration(monkeypatch, include_content) -> None:
+    from tests.unit.test_retriever import FakeEmbeddingService, FakeExecuteResult, FakeQuotaManager, make_memory
+    memory = make_memory(content="Database-governed content")
+    payload = {"memory_id": str(memory.id), "category": "fact", "importance_score": 7.0}
+    if include_content:
+        payload["content"] = "Forged vector payload content"
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[
+        FakeExecuteResult(scalar_value=10),
+        FakeExecuteResult(items=[memory.embedding_model_id]),
+        FakeExecuteResult(items=[memory]),
+    ])
+    cache = MagicMock()
+    cache.get_retrieval_results = AsyncMock(return_value=None)
+    cache.get_hot_memories = AsyncMock(return_value=None)
+    qdrant = MagicMock()
+    qdrant.breaker.current_state.return_value = "CLOSED"
+    qdrant.search_memories_async = AsyncMock(return_value=[SimpleNamespace(id=str(memory.id), score=0.9, payload=payload)])
+    service = RetrieverService(session=session, qdrant_service=qdrant, cache_service=cache,
+        quota_manager=FakeQuotaManager(), embedding_service=FakeEmbeddingService())
+    monkeypatch.setattr(service, "_queue_access_update", lambda _: None)
+    results = await service.retrieve("query", user_id=str(memory.user_id), quota_mode="full")
+    assert [row.content for row in results] == [memory.content]
+    assert "memories.user_id" in str(session.execute.call_args.args[0])
 
 
 @pytest.mark.asyncio

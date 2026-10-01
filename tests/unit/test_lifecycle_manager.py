@@ -253,7 +253,7 @@ async def test_hot_tier_memory_is_returned_without_qdrant_lookup(monkeypatch) ->
     cache = FakeCache()
     cache.hot_tier_payloads = [MemoryLifecycleManager._memory_cache_payload(hot_memory)]
     session = MagicMock()
-    session.execute = AsyncMock(return_value=FakeScalarResult([10]))
+    session.execute = AsyncMock(side_effect=[FakeScalarResult([hot_memory]), FakeScalarResult([10])])
     qdrant_service = MagicMock()
     qdrant_service.search_memories = MagicMock(return_value=[])
     qdrant_service.breaker = SimpleNamespace(current_state=lambda: "CLOSED")

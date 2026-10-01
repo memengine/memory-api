@@ -87,7 +87,9 @@ async def test_extract_filters_and_returns_result(tmp_path: Path) -> None:
             {
                 "memories": [
                     {
-                        "content": "User prefers concise Python-first explanations",
+                        "content": "I prefer concise Python-first explanations.",
+                        "evidence_turns": [0],
+                        "evidence_spans": [{"turn_index": 0, "quote": "I prefer concise Python-first explanations."}],
                         "category": "preference",
                         "importance_score": 8.0,
                         "confidence": 0.92,
@@ -132,11 +134,11 @@ async def test_extract_filters_and_returns_result(tmp_path: Path) -> None:
     assert result.provider_used == "test"
     assert (
         result.memories_to_store[0].content
-        == "User prefers concise Python-first explanations"
+        == "I prefer concise Python-first explanations."
     )
     response_format = llm.calls[0]["response_format"]
     assert isinstance(response_format, JSONSchemaResponseFormat)
-    assert response_format.name == "memory_extraction_v1"
+    assert response_format.name == "memory_extraction_v2"
     assert "What Should NEVER" not in llm.calls[0]["system_prompt"]
 
 
@@ -150,7 +152,8 @@ async def test_extract_keeps_declarative_preference_that_starts_with_when(
                 {
                     "memories": [
                         {
-                            "content": "User prefers concise Python-first coding examples.",
+                            "content": "When you explain coding topics to me, I prefer concise Python-first examples.",
+                            "evidence_spans": [{"turn_index": 0, "quote": "When you explain coding topics to me, I prefer concise Python-first examples."}],
                             "category": "preference",
                             "importance_score": 7.0,
                             "confidence": 0.92,
@@ -363,7 +366,8 @@ async def test_extract_keeps_memory_from_mixed_question_and_declaration(
                 {
                     "memories": [
                         {
-                            "content": "User now keeps the spare office key in the locked cabinet by their desk.",
+                            "content": "I now keep the spare office key in the locked cabinet by my desk.",
+                            "evidence_spans": [{"turn_index": 0, "quote": "I now keep the spare office key in the locked cabinet by my desk."}],
                             "category": "fact",
                             "importance_score": 5.0,
                             "confidence": 0.8,
@@ -554,7 +558,8 @@ async def test_inconsistent_empty_response_gets_one_bounded_repair(
                 {
                     "memories": [
                         {
-                            "content": "User now prefers detailed incident explanations.",
+                            "content": "I now prefer detailed incident explanations.",
+                            "evidence_spans": [{"turn_index": 0, "quote": "I now prefer detailed incident explanations."}],
                             "category": "preference",
                             "importance_score": 7.0,
                             "confidence": 0.92,
@@ -586,7 +591,7 @@ async def test_inconsistent_empty_response_gets_one_bounded_repair(
 
     assert result.memories_extracted == 1
     assert result.memories_to_store[0].content == (
-        "User now prefers detailed incident explanations."
+        "I now prefer detailed incident explanations."
     )
     assert len(llm.calls) == 2
     assert "violated the response contract" in str(llm.calls[1]["system_prompt"])
@@ -709,9 +714,10 @@ async def test_invalid_single_memory_clarification_recovers_uncertain_candidate(
                     "memories": [
                         {
                             "content": (
-                                "User is considering Python as their default language "
-                                "but has not decided whether it should replace C++."
+                                "My default language is Python, but I have not decided whether "
+                                "it should replace my earlier C++ default."
                             ),
+                            "evidence_spans": [{"turn_index": 0, "quote": "My default language is Python, but I have not decided whether it should replace my earlier C++ default."}],
                             "category": "preference",
                             "importance_score": 7.0,
                             "confidence": 0.9,
@@ -962,7 +968,9 @@ async def test_extract_buffers_borderline_candidates(tmp_path: Path) -> None:
             {
                 "memories": [
                     {
-                        "content": "User may prefer short replies for difficult topics",
+                        "content": "Maybe keep replies short for hard topics.",
+                        "evidence_turns": [0],
+                        "evidence_spans": [{"turn_index": 0, "quote": "Maybe keep replies short for hard topics."}],
                         "category": "preference",
                         "importance_score": 6.0,
                         "confidence": 0.58,
@@ -996,7 +1004,7 @@ async def test_extract_buffers_borderline_candidates(tmp_path: Path) -> None:
     assert result.memories_filtered == 1
     assert (
         result.pending_candidates[0].content
-        == "User may prefer short replies for difficult topics"
+        == "Maybe keep replies short for hard topics."
     )
     assert result.pending_candidates[0].confidence == 0.58
 
@@ -1011,7 +1019,8 @@ async def test_importance_one_is_valid_under_extraction_contract(
                 {
                     "memories": [
                         {
-                            "content": "User prefers a dark theme for this client project only.",
+                            "content": "For this client project only, use a dark theme.",
+                            "evidence_spans": [{"turn_index": 0, "quote": "For this client project only, use a dark theme."}],
                             "category": "preference",
                             "importance_score": 1.0,
                             "confidence": 0.9,
@@ -1114,7 +1123,7 @@ def test_system_prompt_includes_schema_and_categories(tmp_path: Path) -> None:
     assert '"claim_semantics_shadow"' not in prompt
     response_format = service._primary_response_format()
     assert isinstance(response_format, JSONSchemaResponseFormat)
-    assert response_format.name == "memory_extraction_v1"
+    assert response_format.name == "memory_extraction_v2"
     assert "claim_semantics_shadow" not in response_format.schema["properties"]
 
 
@@ -1128,9 +1137,10 @@ async def test_uncertain_change_is_routed_out_of_active_memories(
                 "memories": [
                     {
                         "content": (
-                            "User is considering Python as the programming default "
-                            "but has not decided between Python and C++."
+                            "Python may replace my C++ default, but I have not decided "
+                            "which should remain current."
                         ),
+                        "evidence_spans": [{"turn_index": 0, "quote": "Python may replace my C++ default, but I have not decided which should remain current."}],
                         "category": "preference",
                         "importance_score": 8.0,
                         "confidence": 0.9,
@@ -1181,7 +1191,8 @@ async def test_correction_state_is_preserved_for_conflict_resolution(
             {
                 "memories": [
                     {
-                        "content": "User's exam is on October 18.",
+                        "content": "Correction: my exam moved from October 10 to October 18.",
+                        "evidence_spans": [{"turn_index": 0, "quote": "Correction: my exam moved from October 10 to October 18."}],
                         "category": "fact",
                         "importance_score": 6.0,
                         "confidence": 0.95,
@@ -1315,7 +1326,8 @@ async def test_regular_chat_keeps_explicit_user_preference(tmp_path: Path) -> No
             {
                 "memories": [
                     {
-                        "content": "User prefers concise step-by-step technical explanations",
+                        "content": "I prefer concise, step-by-step technical explanations.",
+                        "evidence_spans": [{"turn_index": 0, "quote": "I prefer concise, step-by-step technical explanations."}],
                         "category": "preference",
                         "importance_score": 8.0,
                         "confidence": 0.94,
@@ -1699,7 +1711,12 @@ async def test_composite_conversation_runs_compositional_prepass(
                 {
                     "memories": [
                         {
-                            "content": "User is building an analytics platform for healthcare customers",
+                            "content": "We are building an analytics platform, but the product shape is still changing.\nMostly healthcare operations teams who need better weekly reporting.",
+                            "evidence_turns": [0, 2],
+                            "evidence_spans": [
+                                {"turn_index": 0, "quote": "We are building an analytics platform, but the product shape is still changing."},
+                                {"turn_index": 2, "quote": "Mostly healthcare operations teams who need better weekly reporting."},
+                            ],
                             "category": "goal",
                             "importance_score": 7.0,
                             "confidence": 0.86,
@@ -1746,7 +1763,7 @@ async def test_composite_conversation_runs_compositional_prepass(
     assert result.extraction_metadata["compositional_relationships"] == 1
     assert (
         result.memories_to_store[0].content
-        == "User is building an analytics platform for healthcare customers"
+        == "We are building an analytics platform, but the product shape is still changing.\nMostly healthcare operations teams who need better weekly reporting."
     )
 
 
@@ -1757,7 +1774,9 @@ async def test_short_conversation_skips_compositional_prepass(tmp_path: Path) ->
             {
                 "memories": [
                     {
-                        "content": "User prefers concise Python-first explanations",
+                        "content": "I prefer concise Python-first explanations.",
+                        "evidence_turns": [0],
+                        "evidence_spans": [{"turn_index": 0, "quote": "I prefer concise Python-first explanations."}],
                         "category": "preference",
                         "importance_score": 8.0,
                         "confidence": 0.92,
@@ -1843,7 +1862,9 @@ async def test_compositional_prepass_failure_falls_back_to_normal_extraction(
                     {
                         "memories": [
                             {
-                                "content": "User is preparing a healthcare analytics launch",
+                                "content": "The goal is to launch this healthcare reporting workflow next week.",
+                                "evidence_turns": [4],
+                                "evidence_spans": [{"turn_index": 4, "quote": "The goal is to launch this healthcare reporting workflow next week."}],
                                 "category": "goal",
                                 "importance_score": 7.0,
                                 "confidence": 0.82,

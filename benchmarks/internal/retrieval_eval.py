@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+from api.db.models import MemoryCategory
 from api.services.retriever import RetrieverService
 from benchmarks.internal.retrieval_cases import RetrievalCase
 
@@ -15,7 +16,9 @@ MIN_SEMANTIC_SCORE = 0.10
 def evaluate_case(case: RetrievalCase) -> dict[str, Any]:
     service = object.__new__(RetrieverService)
     now = datetime.now(UTC)
-    points = []
+    # Controlled ranking fixtures only; real ownership/currentness are tested
+    # through PostgreSQL integration, not these prefiltered in-memory records.
+    scored_results = []
     key_by_id = {}
     for index, candidate in enumerate(case.candidates):
         if candidate.get("active", True) is not True:
@@ -33,17 +36,16 @@ def evaluate_case(case: RetrievalCase) -> dict[str, Any]:
         memory_id = f"00000000-0000-0000-0000-{index + 1:012d}"
         key_by_id[memory_id] = candidate["key"]
         created = now - timedelta(days=float(candidate.get("age_days", 0)))
-        points.append(SimpleNamespace(
-            id=memory_id, score=float(candidate["semantic"]),
-            payload={
-                "memory_id": memory_id, "content": candidate["content"],
-                "category": candidate["category"], "importance_score": candidate["importance"],
-                "confidence_score": 0.95, "created_at": created.isoformat(),
-                "last_accessed_at": created.isoformat(), "agent_id": candidate.get("agent_id"),
-                "provenance": candidate.get("provenance"), "is_archived": False,
-            },
-        ))
-    results = service._deduplicate_results(service._results_from_qdrant_payloads(points))
+        memory = SimpleNamespace(
+            id=memory_id, content=candidate["content"], category=MemoryCategory(candidate["category"]),
+            importance_score=candidate["importance"], confidence_score=0.95,
+            created_at=created, last_accessed_at=created, agent_id=candidate.get("agent_id"),
+            metadata_json={"provenance": candidate.get("provenance")},
+            previous_version_id=None, source_event_id=None,
+            effective_from=None, effective_until=None,
+        )
+        scored_results.append(service._memory_to_result(memory, semantic_score=float(candidate["semantic"])))
+    results = service._deduplicate_results(scored_results)
     ranked = sorted(results, key=lambda item: item.final_score, reverse=True)[: case.limit]
     retrieved = [key_by_id[item.id] for item in ranked]
     relevant = set(case.relevant)

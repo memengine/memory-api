@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -52,6 +53,7 @@ MAX_EXISTING_MEMORIES = 20
 MAX_COMPOSITION_HINT_TOKENS = 800
 MAX_EXISTING_MEMORY_CONTEXT_TOKENS = 1200
 MAX_PRIMARY_INPUT_TOKENS = 10_000
+_UNSET_SOURCE_SPANS = object()
 COMPOSITIONAL_MIN_MESSAGES = 4
 COMPOSITIONAL_MIN_USER_MESSAGES = 2
 COMPOSITIONAL_MIN_CHARS = 240
@@ -511,7 +513,7 @@ class ExtractionService:
                     "provider": response.provider_used,
                     "model": response.model_used,
                     "extracted_at": datetime.now(UTC).isoformat(),
-                    "extractor_version": "structured-evidence-v1",
+                    "extractor_version": "source-evidence-v2",
                 },
                 proposal_context=proposal_context,
             )
@@ -638,7 +640,8 @@ class ExtractionService:
                         "provider": empty_response_repair_response.provider_used,
                         "model": empty_response_repair_response.model_used,
                         "extracted_at": datetime.now(UTC).isoformat(),
-                        "extractor_version": "empty-response-repair-v1",
+                        "extractor_version": "source-evidence-v2",
+                        "pass": "empty_response_repair",
                     },
                     proposal_context=None,
                 )
@@ -710,7 +713,7 @@ class ExtractionService:
                         "provider": correction_recovery_response.provider_used,
                         "model": correction_recovery_response.model_used,
                         "extracted_at": datetime.now(UTC).isoformat(),
-                        "extractor_version": "structured-evidence-v1",
+                        "extractor_version": "source-evidence-v2",
                         "pass": "correction_recovery",
                     },
                     # This pass can recover only the user's independent
@@ -1088,6 +1091,15 @@ class ExtractionService:
             "do not depend on trigger phrases. An uncertain change to a provided existing memory is governance-"
             "relevant: return it as uncertain_change with nothing_to_extract=false even though it must not become "
             "current automatically. Preserve uncertainty in content and confidence.\n\n"
+            "Preserve the language and script of the supporting user statement in content. "
+            "Keep its key claim wording, negation, uncertainty, and time qualifiers; do not "
+            "translate it into English or infer a current value from a quoted or hypothetical "
+            "claim. For each independent direct claim, copy the shortest complete supporting "
+            "clause into evidence_spans as an exact quote with its transcript turn_index. "
+            "Include enough surrounding text to distinguish repeated phrases. Never copy "
+            "assistant, tool, document, or existing-memory text as direct user evidence. "
+            "The backend verifies the quotes and derives character offsets; do not invent offsets. "
+            "Authenticated service events may use an empty evidence_spans array.\n\n"
             "Use importance 1-3 for narrow project-only or occasionally useful context; 4-6 for "
             "regularly useful operating context; and 7-9 only for identity-level facts, committed priorities, "
             "or capabilities that should shape most responses. Do not default every memory to 5.\n\n"
@@ -1122,11 +1134,34 @@ class ExtractionService:
                 "They are not memories by themselves. Convert supported cross-message relationships "
                 "into clean, atomic memories and discard unsupported hints."
             )
+        if not source_context:
+            prompt += (
+                "\n\nSOURCE-FAITHFUL OUTPUT CONTRACT\n"
+                "English sample memories above illustrate categories, not an output language "
+                "or reusable content template. For independent user claims, copy the original "
+                "complete claim clause verbatim as content; retain its language and script. "
+                "content must equal one evidence_spans.quote after trimming surrounding whitespace. "
+                "For a claim supported across user turns, content may instead join the complete "
+                "supporting quotes with newline separators in transcript order; add no inferred glue. "
+                "Do not paraphrase or add a 'User' prefix. Do not rewrite "
+                "a Hindi, Arabic, Japanese, or code-switched claim as an English 'User ...' "
+                "sentence. content and evidence_spans.quote must retain the same key claim "
+                "wording, including uncertainty, negation and corrections. This source-faithful "
+                "contract takes precedence over the wording of category examples. "
+                "Classify claim_state from the FULL supporting user turn before selecting "
+                "a quote: committed current claim = asserted; an earlier value explicitly "
+                "superseded = correction; a competing value still undecided = uncertain_change. "
+                "A certain replacement is still correction, and an undecided replacement "
+                "is still uncertain_change even with high confidence. Include the full "
+                "qualifying clause in content and quote; never cut off the uncertainty or "
+                "correction to make a claim look current. A chosen communication or code "
+                "default is a preference, not expertise merely because it names a technology."
+            )
         return prompt
 
     def _primary_response_format(self) -> str | JSONSchemaResponseFormat:
         return JSONSchemaResponseFormat(
-            name="memory_extraction_v1",
+            name="memory_extraction_v2",
             schema=build_extraction_response_schema(
                 proposal_confirmation_enabled=self._proposal_confirmation_enabled,
             ),
@@ -1146,6 +1181,7 @@ class ExtractionService:
             '      "confidence": float between 0.0 and 1.0,\n'
             '      "claim_state": "asserted|correction|uncertain_change",\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
+            '      "evidence_spans": [{"turn_index": "cited user turn index", "quote": "exact supporting user clause"}],\n'
             '      "evidence_relation": "direct_user_statement|user_confirmed_assistant_proposal",\n'
             '      "proposal_turn": "integer for a confirmed registered proposal, otherwise null",\n'
             '      "reasoning": "one sentence why this was extracted"\n'
@@ -1215,6 +1251,7 @@ class ExtractionService:
             '      "confidence": float between 0.0 and 1.0,\n'
             '      "claim_state": "asserted|correction|uncertain_change",\n'
             '      "evidence_turns": [zero-based indexes of transcript turns supporting the memory],\n'
+            '      "evidence_spans": [{"turn_index": "cited user turn index", "quote": "exact supporting user clause"}],\n'
             '      "evidence_relation": "direct_user_statement",\n'
             '      "proposal_turn": null,\n'
             '      "reasoning": "one sentence why this was extracted"\n'
@@ -1275,6 +1312,8 @@ class ExtractionService:
             "different durable fact or preference, extract only that replacement claim. "
             "Preserve the user's language and key wording so the claim can be verified "
             "against the cited user turn. Set evidence_relation to direct_user_statement, "
+            "and copy the exact supporting clause into evidence_spans with its turn_index. "
+            "content must equal that supporting clause verbatim, not a paraphrase or translation. "
             "proposal_turn to null, and evidence_turns to the zero-based index of the user "
             "turn. If there is no independent durable replacement claim, return no memories. "
             "Use confidence >= 0.80 for an explicit replacement stated as the user's "
@@ -1284,7 +1323,8 @@ class ExtractionService:
             '{"memories":[{"content":"string","category":"preference|fact|goal|'
             'procedure|relationship|expertise","importance_score":1.0,'
             '"confidence":0.9,"evidence_turns":[0],"evidence_relation":'
-            '"direct_user_statement","proposal_turn":null,"reasoning":"string"}],'
+            '"direct_user_statement","evidence_spans":[{"turn_index":0,"quote":"exact supporting user clause"}],'
+            '"proposal_turn":null,"reasoning":"string"}],'
             '"nothing_to_extract":false,"extraction_notes":"optional string"}. '
             'For no replacement claim return {"memories":[],"nothing_to_extract":true,'
             '"extraction_notes":"no direct replacement claim"}.'
@@ -1320,6 +1360,9 @@ class ExtractionService:
             "uncertain_change when the user states a competing value but has not "
             "decided which remains current, and asserted otherwise. Do not infer a "
             "claim from a question or invent a value that the user did not state. "
+            "Preserve the user's language, script, negation, uncertainty, and time qualifiers "
+            "in content. Copy the exact supporting clause into evidence_spans. "
+            "content must equal that supporting clause verbatim, not a paraphrase or translation. "
             f"Cite user turn {evidence_turn} in evidence_turns and use "
             "evidence_relation direct_user_statement. Return JSON only as "
             "{\"memories\":[{\"content\":\"string\",\"category\":"
@@ -1327,7 +1370,9 @@ class ExtractionService:
             "\"importance_score\":7.0,\"confidence\":0.9,"
             "\"claim_state\":\"asserted|correction|uncertain_change\","
             f"\"evidence_turns\":[{evidence_turn}],\"evidence_relation\":"
-            "\"direct_user_statement\",\"proposal_turn\":null,"
+            "\"direct_user_statement\",\"evidence_spans\":[{"
+            f"\"turn_index\":{evidence_turn},\"quote\":\"exact supporting user clause\""
+            "}],\"proposal_turn\":null,"
             "\"reasoning\":\"string\"}],\"nothing_to_extract\":false}. "
             "If there is no direct durable claim, "
             "return exactly {\"memories\":[],\"nothing_to_extract\":true,"
@@ -2161,6 +2206,27 @@ class ExtractionService:
                     and not isinstance(proposal_turn, bool)
                     else relation
                 )
+                if (
+                    dict(evidence_context or {}).get("extractor_version") == "source-evidence-v2"
+                    and effective_relation in {None, "direct_user_statement"}
+                ):
+                    # A model sometimes copies a short subclause as content but
+                    # cites its complete source clause. Expand only that exact
+                    # subclause to the verified quote, retaining omitted context.
+                    # Generated paraphrases/translations still fail below.
+                    cited = self._valid_evidence_indexes(raw_memory.get("evidence_turns"), len(messages or []))
+                    eligible = set(eligible_user_turn_indexes(messages or [])) & cited
+                    if visible_turn_indexes is not None:
+                        eligible &= visible_turn_indexes
+                    spans = self._verify_source_spans(
+                        raw_memory.get("evidence_spans"), messages=messages or [],
+                        eligible_indexes=eligible,
+                    )
+                    if spans and len(spans) == 1:
+                        span = spans[0]
+                        quote = str((messages or [])[span["turn_index"]].get("content") or "")[span["start_char"]:span["end_char"]].strip()
+                        if candidate.content.strip() in quote:
+                            candidate.content = quote
                 validated_evidence = self._validated_user_evidence(
                     candidate,
                     messages or [],
@@ -2173,6 +2239,9 @@ class ExtractionService:
                     visible_turn_indexes=visible_turn_indexes,
                     proposal_confirmation_enabled=self._proposal_confirmation_enabled,
                     active_proposals=proposal_context,
+                    evidence_spans=raw_memory.get(
+                        "evidence_spans", _UNSET_SOURCE_SPANS
+                    ),
                 )
                 if not validated_evidence:
                     if (
@@ -2201,6 +2270,9 @@ class ExtractionService:
                                 None,
                                 evidence_context=evidence_context,
                                 visible_turn_indexes=visible_turn_indexes,
+                                evidence_spans=raw_memory.get(
+                                    "evidence_spans", _UNSET_SOURCE_SPANS
+                                ),
                             )
                         if validated_evidence:
                             candidate.validated_evidence = validated_evidence
@@ -2257,7 +2329,7 @@ class ExtractionService:
     @classmethod
     def _has_user_evidence(
         cls,
-        candidate: PendingExtractedMemory,
+        candidate: PendingExtractedMemory | ExtractedMemory,
         messages: list[dict[str, Any]],
         evidence_turns: Any,
         evidence_relation: Any = None,
@@ -2276,7 +2348,7 @@ class ExtractionService:
     @classmethod
     def _validated_user_evidence(
         cls,
-        candidate: PendingExtractedMemory,
+        candidate: PendingExtractedMemory | ExtractedMemory,
         messages: list[dict[str, Any]],
         evidence_turns: Any,
         evidence_relation: Any = None,
@@ -2287,6 +2359,7 @@ class ExtractionService:
         proposal_confirmation_enabled: bool = False,
         active_proposals: list[dict[str, Any]] | None = None,
         structured_proposal_decision: bool = False,
+        evidence_spans: Any = _UNSET_SOURCE_SPANS,
     ) -> dict[str, Any]:
         """Require conversational memories to be grounded in a user's own turn.
 
@@ -2334,6 +2407,44 @@ class ExtractionService:
             if index in eligible_user_indexes
             and str(message.get("content") or "").strip()
         ]
+        verified_spans: list[dict[str, Any]] | None = None
+        if (
+            policy.proposal_turn_index is None
+            and evidence_spans is _UNSET_SOURCE_SPANS
+            and dict(evidence_context or {}).get("extractor_version")
+            == "source-evidence-v2"
+        ):
+            return {}
+        if (
+            policy.proposal_turn_index is None
+            and evidence_spans is not _UNSET_SOURCE_SPANS
+        ):
+            verified_spans = cls._verify_source_spans(
+                evidence_spans,
+                messages=messages,
+                eligible_indexes=eligible_user_indexes & cited_indexes,
+            )
+            if verified_spans is None:
+                return {}
+            # A quoted clause must support the candidate independently. Words
+            # elsewhere in the user turn cannot rescue an unrelated citation.
+            user_turns = [
+                (
+                    span["turn_index"],
+                    str(messages[span["turn_index"]].get("content") or "")[
+                        span["start_char"] : span["end_char"]
+                    ],
+                )
+                for span in verified_spans
+            ]
+            # v2 direct claims are extractive, not translations or generated
+            # paraphrases. Attribution alone cannot justify generated wording.
+            source_clauses = [content.strip() for _index, content in user_turns]
+            if str(candidate.content).strip() not in {
+                *source_clauses,
+                "\n".join(source_clauses),
+            }:
+                return {}
         candidate_tokens = cls._significant_tokens(candidate.content)
         if policy.proposal_turn_index is not None:
             proposal_content = str(
@@ -2346,7 +2457,10 @@ class ExtractionService:
         else:
             supported = any(
                 not cls._is_question_only(content)
-                and bool(candidate_tokens & cls._significant_tokens(content))
+                and (
+                    verified_spans is not None
+                    or bool(candidate_tokens & cls._significant_tokens(content))
+                )
                 for _index, content in user_turns
             )
         if not supported:
@@ -2358,7 +2472,15 @@ class ExtractionService:
             if value is not None
         }
         return {
-            "schema_version": 1,
+            "schema_version": 2 if verified_spans is not None else 1,
+            **({"source_spans": verified_spans} if verified_spans is not None else {}),
+            "grounding_mode": (
+                "verified_source_spans"
+                if verified_spans is not None
+                else "registered_proposal"
+                if policy.proposal_turn_index is not None
+                else "legacy_token_overlap"
+            ),
             "citation_mode": "model_cited"
             if evidence_was_provided
             else "legacy_compatibility",
@@ -2411,6 +2533,105 @@ class ExtractionService:
             },
             "extraction": normalized_context,
         }
+
+    @staticmethod
+    def _verify_source_spans(
+        spans: Any,
+        *,
+        messages: list[dict[str, Any]],
+        eligible_indexes: set[int],
+    ) -> list[dict[str, Any]] | None:
+        """Verify exact source quotes and derive Unicode code-point offsets.
+
+        Persist only offsets and a digest, so evidence retention remains tied
+        to the original transcript rather than copying raw quotes per memory.
+        This verifies attribution; it does not prove semantic entailment.
+        """
+        if not isinstance(spans, list) or not 1 <= len(spans) <= 8:
+            return None
+        verified: list[dict[str, Any]] = []
+        seen: set[tuple[int, int, int]] = set()
+        for span in spans:
+            if not isinstance(span, dict) or set(span) != {"turn_index", "quote"}:
+                return None
+            turn_index = span["turn_index"]
+            quote = span["quote"]
+            if (
+                not isinstance(turn_index, int)
+                or isinstance(turn_index, bool)
+                or turn_index not in eligible_indexes
+                or not isinstance(quote, str)
+                or not quote.strip()
+                or len(quote) > 1000
+            ):
+                return None
+            content = str(messages[turn_index].get("content") or "")
+            start = content.find(quote)
+            if start < 0 or content.find(quote, start + 1) >= 0:
+                return None
+            end = start + len(quote)
+            key = (turn_index, start, end)
+            if key in seen:
+                return None
+            seen.add(key)
+            verified.append(
+                {
+                    "turn_index": turn_index,
+                    "turn_id": str(
+                        messages[turn_index].get("turn_id")
+                        or f"legacy-index:{turn_index}"
+                    ),
+                    "start_char": start,
+                    "end_char": end,
+                    "offset_unit": "unicode_code_point",
+                    "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+                    "turn_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                }
+            )
+        return sorted(verified, key=lambda span: (span["turn_index"], span["start_char"]))
+
+    @classmethod
+    def verified_source_turns(
+        cls, candidate: ExtractedMemory, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
+        """Recheck attribution against the worker transcript, including qualifiers.
+
+        Full turns are ephemeral decision inputs, not copied into provenance.
+        A matching quote alone must not validate an altered surrounding turn.
+        """
+        evidence = candidate.validated_evidence or {}
+        spans = evidence.get("source_spans")
+        if not isinstance(spans, list) or not spans:
+            return None
+        quotes = []
+        for span in spans:
+            if not isinstance(span, dict):
+                return None
+            index, start, end = (
+                span.get("turn_index"), span.get("start_char"), span.get("end_char")
+            )
+            if (
+                not isinstance(index, int) or isinstance(index, bool)
+                or not isinstance(start, int) or isinstance(start, bool)
+                or not isinstance(end, int) or isinstance(end, bool)
+            ):
+                return None
+            if not 0 <= index < len(messages):
+                return None
+            content = str(messages[index].get("content") or "")
+            if not 0 <= start < end <= len(content):
+                return None
+            quotes.append({"turn_index": index, "quote": content[start:end]})
+        checked = cls._validated_user_evidence(
+            candidate, messages, evidence.get("turn_indexes"),
+            "direct_user_statement", evidence_spans=quotes,
+        )
+        if checked.get("source_spans") != spans:
+            return None
+        return [
+            {"turn_index": index, "role": "user", "content": messages[index]["content"]}
+            for index in sorted({span["turn_index"] for span in spans})
+        ]
 
     @staticmethod
     def _valid_evidence_indexes(value: Any, message_count: int) -> set[int]:

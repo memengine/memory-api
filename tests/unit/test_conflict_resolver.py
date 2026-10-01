@@ -21,6 +21,7 @@ from api.settings import get_settings
 from api.services.conflict_resolver import ConflictResolver
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.extractor import ExtractedMemory
+from api.services.extraction_service import ExtractionService
 from api.services.llm_service import JSONSchemaResponseFormat
 
 
@@ -85,6 +86,235 @@ def make_new_memory(content: str = "User switched backend work from Python to Go
         expiry="permanent",
         reasoning="New conflict candidate",
     )
+
+
+def test_verified_source_spans_survive_memory_provenance_storage() -> None:
+    claim = "मुझे व्याख्या से पहले कोड उदाहरण पसंद हैं।"
+    candidate = make_new_memory(claim)
+    candidate.validated_evidence = ExtractionService._validated_user_evidence(
+        candidate,
+        [{"role": "user", "content": claim, "turn_id": "source-turn-1"}],
+        [0],
+        "direct_user_statement",
+        evidence_spans=[{"turn_index": 0, "quote": claim}],
+    )
+    original_evidence = dict(candidate.validated_evidence)
+    session = FakeSession()
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = []
+    conversation_id = uuid.uuid4()
+    resolver = ConflictResolver(
+        session=session,
+        qdrant_service=qdrant,
+        embedder=lambda _text: [0.1] * 3,
+        client=MagicMock(),
+        default_source_conversation_id=conversation_id,
+        provenance_snapshot={"external_conversation_id": "source-evidence-development"},
+        source_messages=[{"role": "user", "content": claim, "turn_id": "source-turn-1"}],
+        llm_service=SimpleNamespace(complete_sync=lambda **_kwargs: SimpleNamespace(
+            content=json.dumps({
+                "selected_memory_id": None, "relation": "novel",
+                "commitment_status": "committed_current", "requires_user_choice": False,
+                "clarification_option_memory": None, "merged_memory": None,
+                "reasoning": "Current standalone preference.",
+            }), total_tokens=10,
+        )),
+    )
+
+    stored = resolver.check_and_store([candidate], user_id=str(uuid.uuid4()))
+
+    assert len(stored) == 1
+    memory = session.memories[stored[0].id]
+    provenance = memory.metadata_json["provenance"]
+    evidence = provenance["extraction_evidence"]
+    assert provenance["external_conversation_id"] == "source-evidence-development"
+    assert evidence["source_spans"] == original_evidence["source_spans"]
+    assert evidence["grounding_mode"] == "verified_source_spans"
+    assert evidence["authority"] == original_evidence["authority"]
+    assert evidence["memory_id"] == stored[0].id
+    assert evidence["source_conversation_id"] == str(conversation_id)
+    assert candidate.validated_evidence == original_evidence
+
+
+def source_candidate(full_turn: str, quote: str | None = None):
+    messages = [{"role": "user", "content": full_turn, "turn_id": "source-1"}]
+    candidate = make_new_memory(quote or full_turn)
+    candidate.validated_evidence = ExtractionService._validated_user_evidence(
+        candidate, messages, [0], "direct_user_statement",
+        evidence_spans=[{"turn_index": 0, "quote": quote or full_turn}],
+    )
+    candidate.validated_evidence["claim_state"] = "asserted"
+    return candidate, messages
+
+
+def source_response(target_id=None, *, state="committed_current", relation="novel", option=None):
+    return {
+        "selected_memory_id": target_id, "relation": relation,
+        "commitment_status": state, "requires_user_choice": state == "tentative" and target_id is not None,
+        "clarification_option_memory": option, "merged_memory": None,
+        "reasoning": "Decision from full source turn.",
+    }
+
+
+@pytest.mark.parametrize("score", [0.9, 0.7, None])
+@pytest.mark.parametrize("quote_part", [0, 1])
+def test_source_uncertainty_does_not_require_similarity_trigger(score, quote_part) -> None:
+    full_turn = "मेरी डिफ़ॉल्ट प्रोग्रामिंग भाषा Python हो सकती है, लेकिन मैंने अभी तय नहीं किया कि वह C++ की जगह लेगी या नहीं।"
+    quote = full_turn.split(",")[quote_part].strip()
+    candidate, messages = source_candidate(full_turn, quote)
+    existing = make_existing_memory()
+    existing.content = "User's default programming language is C++."
+    existing.category = MemoryCategory.preference
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing, score)] if score is not None else []
+    payload = source_response(
+        str(existing.id) if score is not None else None,
+        state="tentative", relation="ambiguous",
+        option={"attribute": "default programming language", "value": "Python", "category": "preference"} if score is not None else None,
+    )
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(payload), total_tokens=70)
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                     tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+
+    assert not existing.is_archived
+    assert model.complete_sync.call_count == 1
+    prompt = json.loads(model.complete_sync.call_args.kwargs["user_message"])
+    assert prompt["supporting_user_turns"][0]["content"] == full_turn
+    assert prompt["new"]["content"] == quote
+    assert resolver.last_source_decision_tokens_used == 70
+    if score is None:
+        assert not stored
+        assert len(resolver.last_pending_candidates) == 1
+        assert resolver.last_user_clarifications_queued == 0
+    else:
+        assert [row.resolution for row in stored] == ["CLARIFICATION_PENDING"]
+        assert resolver.last_user_clarifications_queued == 1
+        assert session.memories[stored[0].id].is_archived
+        value_span = session.memories[stored[0].id].metadata_json["provenance"]["extraction_evidence"]["clarification_value_span"]
+        assert full_turn[value_span["start_char"]:value_span["end_char"]] == "Python"
+
+
+@pytest.mark.parametrize("change", ["missing", "qualifier", "role", "hash", "oversized"])
+def test_source_decision_never_uses_missing_altered_or_truncated_evidence(change) -> None:
+    full_turn = "I might prefer Python, but I have not decided to replace C++."
+    candidate, messages = source_candidate(full_turn, "I might prefer Python")
+    if change == "missing":
+        messages = []
+    elif change == "qualifier":
+        messages[0]["content"] = "I might prefer Python, and this is now my current choice."
+    elif change == "role":
+        messages[0]["role"] = "tool"
+    elif change == "hash":
+        candidate.validated_evidence["source_spans"][0]["turn_sha256"] = "forged"
+    else:
+        candidate, messages = source_candidate(full_turn + " " + "x" * 8100, "I might prefer Python")
+    model = MagicMock()
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = []
+    resolver = ConflictResolver(session=FakeSession(), qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(uuid.uuid4()))
+    assert len(resolver.last_pending_candidates) == 1
+    model.complete_sync.assert_not_called()
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"action": "UPDATE", "selected_memory_id": None},
+    source_response("foreign-id", relation="supersedes"),
+    source_response(relation="supersedes"),
+    source_response(state="historical_or_contextual"),
+    source_response(state="tentative", relation="coexists"),
+    source_response(state="unclear", relation="ambiguous"),
+])
+def test_source_decision_failures_cannot_create_current_memory(payload) -> None:
+    candidate, messages = source_candidate("Python could be my default, but I am undecided.")
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(payload), total_tokens=20)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = []
+    resolver = ConflictResolver(session=FakeSession(), qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(uuid.uuid4()))
+    assert len(resolver.last_pending_candidates) == 1
+
+
+def test_source_target_ownership_checked_independently_of_vector_payload() -> None:
+    candidate, messages = source_candidate("My default programming language is Python.")
+    foreign = make_existing_memory()
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response()), total_tokens=20)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(foreign)]
+    resolver = ConflictResolver(session=FakeSession(foreign), qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    stored = resolver.check_and_store([candidate], user_id=str(uuid.uuid4()))
+    assert [row.resolution for row in stored] == ["NEW"]
+    assert json.loads(model.complete_sync.call_args.kwargs["user_message"])["existing_candidates"] == []
+    assert not foreign.is_archived
+
+
+@pytest.mark.parametrize("mutation", ["archive", "content"])
+def test_source_decision_rejects_target_changed_during_model_request(mutation) -> None:
+    candidate, messages = source_candidate("Correction: my default is Python instead of C++.")
+    existing = make_existing_memory()
+    existing.content = "User's default programming language is C++."
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing, 0.7)]
+    def change_then_respond(**kwargs):
+        if mutation == "archive":
+            existing.is_archived = True
+        else:
+            existing.content = "User's default programming language is Rust."
+        return SimpleNamespace(content=json.dumps(source_response(str(existing.id), relation="supersedes")), total_tokens=40)
+    model = SimpleNamespace(complete_sync=change_then_respond)
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                       tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert len(resolver.last_pending_candidates) == 1
+    assert len(session.memories) == 1
+
+
+def test_source_uncertainty_cannot_become_current_by_higher_writer_authority() -> None:
+    candidate, messages = source_candidate("Python might be my default, but I have not replaced C++.")
+    existing = make_existing_memory()
+    existing.content = "User's default programming language is C++."
+    existing.metadata_json = {"provenance": {"authority_rules": {"default_priority": 20}}}
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing, 0.7)]
+    payload = source_response(str(existing.id), relation="ambiguous", state="tentative",
+                              option={"attribute": "default programming language", "value": "Python", "category": "preference"})
+    model = SimpleNamespace(complete_sync=lambda **kwargs: SimpleNamespace(content=json.dumps(payload), total_tokens=40))
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages,
+                                provenance_snapshot={"authority_rules": {"default_priority": 90}})
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                     tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert [row.resolution for row in stored] == ["CLARIFICATION_PENDING"]
+    assert not existing.is_archived
+
+
+def test_source_provider_failure_stays_pending() -> None:
+    from api.services.llm_service import AllProvidersFailedError
+    candidate, messages = source_candidate("My default programming language is Python.")
+    model = MagicMock()
+    model.complete_sync.side_effect = AllProvidersFailedError("development failure", providers_tried=[], errors=[])
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = []
+    resolver = ConflictResolver(session=FakeSession(), qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(uuid.uuid4()))
+    assert len(resolver.last_pending_candidates) == 1
 
 
 def make_memory(

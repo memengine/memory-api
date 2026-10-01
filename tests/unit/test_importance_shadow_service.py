@@ -17,7 +17,9 @@ class FakeLLM:
         return LLMResponse(
             content=json.dumps({
                 "memories": [{
-                    "content": "User prefers diagrams before explanations",
+                    "content": "I prefer diagrams before explanations.",
+                    "evidence_turns": [0],
+                    "evidence_spans": [{"turn_index": 0, "quote": "I prefer diagrams before explanations."}],
                     "category": "preference",
                     "importance_score": 8.0,
                     "confidence": 0.9,

@@ -742,6 +742,11 @@ def _persist_pending_extraction_candidates(
                 existing.status = "pending"
 
         session.add(existing)
+        if candidate.validated_evidence:
+            existing.metadata_json = {
+                **dict(existing.metadata_json or {}),
+                "extraction_evidence": dict(candidate.validated_evidence),
+            }
         buffered += 1
 
     return buffered
@@ -1476,6 +1481,7 @@ def run_extraction_pipeline(
             default_source_event_id=source_event.id if source_event is not None else None,
             provenance_snapshot=provenance_snapshot or None,
             domain_schema=domain_schema_name,
+            source_messages=messages,
         )
         structured_clarification = dict(
             extraction_meta.get("clarification_request") or {}
@@ -1490,16 +1496,32 @@ def run_extraction_pipeline(
             auto_commit=False,
             clarification_requested=False,
         )
-        clarification_queued = False
+        source_pending = list(getattr(resolver, "last_pending_candidates", []) or [])
+        if source_pending:
+            extraction_meta["pending_candidates_buffered"] += _persist_pending_extraction_candidates(
+                session, candidates=source_pending, tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id,
+                extraction_job_id=str(job_payload.get("job_id") or "") or None,
+                source_event_id=str(source_event.id) if source_event is not None else None,
+            )
+        source_tokens = int(getattr(resolver, "last_source_decision_tokens_used", 0) or 0)
+        extraction_meta["tokens_used"] = int(extraction_meta.get("tokens_used", 0) or 0) + source_tokens
+        metadata = dict(extraction_meta.get("extraction_metadata") or {})
+        metadata["source_decision"] = {
+            "pending_count": len(source_pending), "tokens_used": source_tokens,
+        }
+        extraction_meta["extraction_metadata"] = metadata
+        clarification_queued = bool(getattr(resolver, "last_user_clarifications_queued", 0))
         selected_memory_ids = list(
             structured_clarification.get("memory_ids") or []
         )
         if selected_memory_ids:
-            clarification_queued = resolver.queue_existing_memory_clarification(
+            existing_clarification_queued = resolver.queue_existing_memory_clarification(
                 memory_ids=selected_memory_ids,
                 tenant_id=tenant_id,
                 proxy_user_id=proxy_user_id,
             )
+            clarification_queued = clarification_queued or existing_clarification_queued
             clarification_metadata = dict(
                 (extraction_meta.get("extraction_metadata") or {}).get(
                     "memory_clarification"
