@@ -1422,6 +1422,23 @@ class ConflictResolver:
                 conflict_type=ConflictType.UNKNOWN,
                 allow_novel=True,
             )
+            evidence = memory.validated_evidence or {}
+            if (
+                evidence.get("claim_state") == "uncertain_change"
+                or evidence.get("governance_directive") == "clarify_if_conflict"
+            ):
+                # Uncertainty can veto admission, never grant authority. A
+                # later classifier or writer priority cannot erase this veto.
+                # Only a valid grounded clarification may proceed to selection.
+                if decision.action in {"UPDATE", "MERGE", "KEEP_BOTH"}:
+                    return None, self._classifier_failure_decision(
+                        conflict_type=ConflictType.UNKNOWN,
+                        reason_code="source_commitment_disagreement",
+                    )
+                if decision.action == "REJECT":
+                    # Do not let an authority override turn a safe duplicate
+                    # rejection into an update of the uncertain candidate.
+                    return None, decision
             if target is None and decision.action == "KEEP_BOTH" and (
                 payload.get("commitment_status") != "committed_current"
                 or payload.get("requires_user_choice") is not False

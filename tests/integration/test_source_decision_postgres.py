@@ -62,11 +62,12 @@ class _Embedding:
 
 
 class _Model:
-    def __init__(self, content, decision, before_decision=None):
+    def __init__(self, content, decision, before_decision=None, *, claim_state="asserted"):
         self.content = content
         self.decision = decision
         self.before_decision = before_decision
         self.source_prompts = []
+        self.claim_state = claim_state
 
     async def complete(self, **kwargs):
         assert kwargs["response_format"].name == "memory_extraction_v2"
@@ -78,7 +79,7 @@ class _Model:
                         "category": "preference",
                         "importance_score": 6,
                         "confidence": 0.95,
-                        "claim_state": "asserted",
+                        "claim_state": self.claim_state,
                         "reasoning": "Controlled model response for SQL contract test.",
                         "evidence_turns": [0],
                         "evidence_relation": "direct_user_statement",
@@ -175,8 +176,9 @@ def sql_scope(monkeypatch):
         engine.dispose()
 
 
-def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=None):
-    model = _Model(content, decision, before_decision)
+def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=None,
+         claim_state="asserted", extracted_content=None):
+    model = _Model(extracted_content or content, decision, before_decision, claim_state=claim_state)
     cache = AsyncMock()
     extractor = ExtractionService(
         llm_service=model,
@@ -293,6 +295,7 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
                 "category": "preference",
             },
         ),
+        claim_state="uncertain_change",
     )
     assert result["clarification_queued"] is True
     new_id = uuid.UUID(result["stored_memories"][0]["id"])
@@ -427,6 +430,50 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
         ).all()
 
 
+@pytest.mark.parametrize("relation", ["supersedes", "mergeable", "coexists", "novel"])
+def test_commitment_disagreement_is_persisted_pending_without_changing_current(sql_scope, monkeypatch, relation):
+    initial, _, _ = _run(sql_scope, monkeypatch, "My default programming language is C++.", _decision())
+    old_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    prefix = "My default language for every programming example is Python."
+    full_turn = prefix + " This conflicts with my earlier C++ default, and I have not decided which should remain current."
+    decision = _decision(None if relation == "novel" else old_id, relation=relation)
+    if relation == "mergeable":
+        decision["merged_memory"] = {
+            "content": prefix, "category": "preference", "importance_score": 7,
+            "confidence": 0.99, "expiry": "permanent", "reasoning": "Controlled committed merge.",
+        }
+    result, model, job_id = _run(
+        sql_scope, monkeypatch, full_turn, decision, claim_state="uncertain_change",
+        extracted_content=prefix, points=[] if relation == "novel" else None,
+    )
+    assert result["memories_created"] == 0 and result["pending_candidates_buffered"] == 1
+    assert not result["stored_memories"] and result["clarification_queued"] is False
+    assert len(model.source_prompts) == 1
+    assert model.source_prompts[0]["supporting_user_turns"][0]["content"] == full_turn
+    with sql_scope.factory() as session:
+        old = session.get(Memory, old_id)
+        assert not old.is_archived and old.content.endswith("C++.")
+        assert [row.id for row in session.scalars(select(Memory).where(
+            Memory.proxy_user_id == sql_scope.proxy_id,
+        ))] == [old_id]
+        pending = session.scalars(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id,
+            PendingExtractionCandidate.extraction_job_id == job_id,
+        )).one()
+        assert pending.status == "pending" and pending.candidate_reason == "source_decision_pending"
+        evidence = pending.metadata_json["extraction_evidence"]
+        assert evidence["claim_state"] == "uncertain_change"
+        assert "source_commitment_disagreement" in evidence["source_decision"]["reason_codes"]
+        assert evidence["source_spans"][0]["turn_id"] == str(job_id)
+        claims = session.scalars(select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)).all()
+        assert claims and {row.active_memory_id for row in claims} == {old_id}
+        revisions = session.scalars(select(MemoryClaimRevision).where(MemoryClaimRevision.memory_id == old_id)).all()
+        assert revisions and all(row.status == "activated" for row in revisions)
+        assert not session.scalars(select(ClarificationQueue).where(
+            ClarificationQueue.proxy_user_id == sql_scope.proxy_id,
+        )).all()
+
+
 def test_explicit_correction_replaces_current_memory_and_preserves_source(
     sql_scope, monkeypatch
 ):
@@ -439,6 +486,7 @@ def test_explicit_correction_replaces_current_memory_and_preserves_source(
         monkeypatch,
         "Correction: my default is Python instead of C++.",
         _decision(old_id, relation="supersedes"),
+        claim_state="correction",
     )
     assert result["conflicts_resolved"] == 1
     new_id = uuid.UUID(result["stored_memories"][0]["id"])

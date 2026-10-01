@@ -168,6 +168,7 @@ def source_response(target_id=None, *, state="committed_current", relation="nove
 def test_source_uncertainty_does_not_require_similarity_trigger(score, quote_part, full_turn) -> None:
     quote = full_turn.split(",")[quote_part].strip()
     candidate, messages = source_candidate(full_turn, quote)
+    candidate.validated_evidence.update(claim_state="uncertain_change", governance_directive="clarify_if_conflict")
     existing = make_existing_memory()
     existing.content = "User's default programming language is C++."
     existing.category = MemoryCategory.preference
@@ -300,6 +301,7 @@ def test_source_decision_rejects_target_changed_during_model_request(mutation) -
 
 def test_source_uncertainty_cannot_become_current_by_higher_writer_authority() -> None:
     candidate, messages = source_candidate("Python might be my default, but I have not replaced C++.")
+    candidate.validated_evidence.update(claim_state="uncertain_change", governance_directive="clarify_if_conflict")
     existing = make_existing_memory()
     existing.content = "User's default programming language is C++."
     existing.metadata_json = {"provenance": {"authority_rules": {"default_priority": 20}}}
@@ -330,6 +332,100 @@ def test_source_provider_failure_stays_pending() -> None:
                                 llm_service=model, source_messages=messages)
     assert not resolver.check_and_store([candidate], user_id=str(uuid.uuid4()))
     assert len(resolver.last_pending_candidates) == 1
+
+
+@pytest.mark.parametrize("marker", ["claim_state", "directive", "both"])
+@pytest.mark.parametrize("stored_priority", [20, 50, 90])
+@pytest.mark.parametrize("relation", ["supersedes", "mergeable", "coexists", "novel", "duplicate"])
+def test_source_commitment_disagreement_cannot_admit_or_replace_memory(marker, stored_priority, relation):
+    prefix = "My default language for every programming example is Python."
+    full_turn = prefix + " This conflicts with my earlier C++ default, and I have not decided which should remain current."
+    candidate, messages = source_candidate(full_turn, prefix)
+    candidate.category = "preference"
+    if marker in {"claim_state", "both"}:
+        candidate.validated_evidence["claim_state"] = "uncertain_change"
+    if marker in {"directive", "both"}:
+        candidate.validated_evidence["governance_directive"] = "clarify_if_conflict"
+    existing = make_existing_memory()
+    existing.content = "My default language for every programming example is C++."
+    existing.category = MemoryCategory.preference
+    existing.metadata_json = {"provenance": {"authority_rules": {"default_priority": stored_priority}}}
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [] if relation == "novel" else [make_qdrant_point(existing, 0.7)]
+    payload = source_response(None if relation == "novel" else str(existing.id), relation=relation)
+    if relation == "mergeable":
+        payload["merged_memory"] = {
+            "content": prefix, "category": "preference", "importance_score": 7,
+            "confidence": 0.99, "expiry": "permanent", "reasoning": "Controlled committed merge.",
+        }
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(payload), total_tokens=70)
+    resolver = ConflictResolver(
+        session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+        llm_service=model, source_messages=messages,
+        provenance_snapshot={"authority_rules": {"default_priority": 50}},
+    )
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                     tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert stored == [] and not existing.is_archived
+    assert len(session.memories) == 1 and resolver.last_user_clarifications_queued == 0
+    assert model.complete_sync.call_count == 1
+    assert resolver.last_source_decision_tokens_used == 70
+    assert json.loads(model.complete_sync.call_args.kwargs["user_message"])["supporting_user_turns"][0]["content"] == full_turn
+    if relation == "duplicate":
+        assert not resolver.last_pending_candidates
+    else:
+        pending = resolver.last_pending_candidates
+        assert len(pending) == 1
+        assert "source_commitment_disagreement" in pending[0].validated_evidence["source_decision"]["reason_codes"]
+        assert pending[0].validated_evidence["source_spans"] == candidate.validated_evidence["source_spans"]
+
+
+@pytest.mark.parametrize("relation", ["supersedes", "novel", "duplicate"])
+def test_committed_source_control_keeps_existing_admission_behavior(relation):
+    candidate, messages = source_candidate("My default programming language is Python.")
+    existing = make_existing_memory()
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [] if relation == "novel" else [make_qdrant_point(existing, 0.7)]
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        None if relation == "novel" else str(existing.id), relation=relation,
+    )), total_tokens=70)
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                     tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert [row.resolution for row in stored] == ({"supersedes": ["UPDATE"], "novel": ["NEW"], "duplicate": []}[relation])
+    assert existing.is_archived == (relation == "supersedes")
+    assert not resolver.last_pending_candidates
+
+
+@pytest.mark.parametrize("option", [None, "not-an-option", {
+    "attribute": "default programming language", "value": "Rust", "category": "preference",
+}])
+def test_uncertain_source_without_grounded_option_stays_pending(option):
+    candidate, messages = source_candidate("Python might be my default, but I have not decided between Python and C++.")
+    candidate.validated_evidence.update(claim_state="uncertain_change", governance_directive="clarify_if_conflict")
+    existing = make_existing_memory()
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing, 0.7)]
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(existing.id), state="tentative", relation="ambiguous", option=option,
+    )), total_tokens=70)
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                       tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert not existing.is_archived and resolver.last_user_clarifications_queued == 0
+    assert len(resolver.last_pending_candidates) == 1
+    assert model.complete_sync.call_count == 1
 
 
 def make_memory(
