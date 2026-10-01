@@ -266,8 +266,14 @@ def test_pending_decision_survives_worker_processing_without_active_memory(
     assert model.source_prompts[0]["supporting_user_turns"][0]["content"] == content
 
 
+@pytest.mark.parametrize("update_text", [
+    "Python could be my default, but I have not decided whether to replace C++.",
+    "Python might be my default, but I have not decided between C++ and Python.",
+    "Ab Python bhi default rakhne ka soch raha hoon, lekin abhi decide nahi kiya ki C++ ya Python mein se kaunsa current rahe.",
+    "मेरी डिफ़ॉल्ट भाषा Python हो सकती है, लेकिन C++ और Python में अभी निर्णय नहीं लिया है।",
+])
 def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
-    sql_scope, monkeypatch
+    sql_scope, monkeypatch, update_text
 ):
     initial, _, _ = _run(
         sql_scope, monkeypatch, "My default programming language is C++.", _decision()
@@ -276,7 +282,7 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
     result, _, _ = _run(
         sql_scope,
         monkeypatch,
-        "Python could be my default, but I have not decided whether to replace C++.",
+        update_text,
         _decision(
             old_id,
             state="tentative",
@@ -292,7 +298,11 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
     new_id = uuid.UUID(result["stored_memories"][0]["id"])
     with sql_scope.factory() as session:
         assert not session.get(Memory, old_id).is_archived
-        assert session.get(Memory, new_id).is_archived
+        pending_memory = session.get(Memory, new_id)
+        assert pending_memory.is_archived
+        value_span = pending_memory.metadata_json["provenance"]["extraction_evidence"]["clarification_value_span"]
+        assert value_span["start_char"] == update_text.index("Python")
+        assert update_text[value_span["start_char"]:value_span["end_char"]] == "Python"
         clarification = session.scalars(
             select(ClarificationQueue).where(
                 ClarificationQueue.proxy_user_id == sql_scope.proxy_id

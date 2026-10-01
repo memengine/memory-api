@@ -1759,19 +1759,9 @@ class ConflictResolver:
         existing_content = existing_memory.content.casefold()
         value_span = None
         if source_messages is not None:
-            turns = GovernedExtractionService.verified_source_turns(new_memory, source_messages)
-            if turns is None:
-                raise ValueError("clarification requires verified full source")
-            for turn in turns:
-                if value not in str(turn["content"]):
-                    continue
-                spans = GovernedExtractionService._verify_source_spans(
-                    [{"turn_index": turn["turn_index"], "quote": value}],
-                    messages=source_messages, eligible_indexes={turn["turn_index"]},
-                )
-                if spans:
-                    value_span = spans[0]
-                    break
+            value_span = GovernedExtractionService.verified_source_value_span(
+                new_memory, source_messages, value,
+            )
             if value_span is None:
                 raise ValueError("clarification value lacks verified user source")
         elif value.casefold() not in new_content:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -158,8 +159,13 @@ def source_response(target_id=None, *, state="committed_current", relation="nove
 
 @pytest.mark.parametrize("score", [0.9, 0.7, None])
 @pytest.mark.parametrize("quote_part", [0, 1])
-def test_source_uncertainty_does_not_require_similarity_trigger(score, quote_part) -> None:
-    full_turn = "मेरी डिफ़ॉल्ट प्रोग्रामिंग भाषा Python हो सकती है, लेकिन मैंने अभी तय नहीं किया कि वह C++ की जगह लेगी या नहीं।"
+@pytest.mark.parametrize("full_turn", [
+    "मेरी डिफ़ॉल्ट प्रोग्रामिंग भाषा Python हो सकती है, लेकिन मैंने अभी तय नहीं किया कि वह C++ की जगह लेगी या नहीं।",
+    "Ab Python bhi default rakhne ka soch raha hoon, lekin abhi decide nahi kiya ki C++ ya Python mein se kaunsa current rahe.",
+    "🧠 Python might be my default, but I have not decided between C++ and Python.",
+    "मेरी डिफ़ॉल्ट भाषा Python हो सकती है, लेकिन C++ और Python में अभी निर्णय नहीं लिया है।",
+])
+def test_source_uncertainty_does_not_require_similarity_trigger(score, quote_part, full_turn) -> None:
     quote = full_turn.split(",")[quote_part].strip()
     candidate, messages = source_candidate(full_turn, quote)
     existing = make_existing_memory()
@@ -198,9 +204,14 @@ def test_source_uncertainty_does_not_require_similarity_trigger(score, quote_par
         assert session.memories[stored[0].id].is_archived
         value_span = session.memories[stored[0].id].metadata_json["provenance"]["extraction_evidence"]["clarification_value_span"]
         assert full_turn[value_span["start_char"]:value_span["end_char"]] == "Python"
+        assert value_span["start_char"] == full_turn.index("Python")
+        assert value_span["offset_unit"] == "unicode_code_point"
+        assert value_span["turn_id"] == messages[0]["turn_id"]
+        assert value_span["quote_sha256"] == hashlib.sha256(b"Python").hexdigest()
+        assert value_span["turn_sha256"] == hashlib.sha256(full_turn.encode("utf-8")).hexdigest()
 
 
-@pytest.mark.parametrize("change", ["missing", "qualifier", "role", "hash", "oversized"])
+@pytest.mark.parametrize("change", ["missing", "qualifier", "role", "source_kind", "turn_id", "hash", "oversized"])
 def test_source_decision_never_uses_missing_altered_or_truncated_evidence(change) -> None:
     full_turn = "I might prefer Python, but I have not decided to replace C++."
     candidate, messages = source_candidate(full_turn, "I might prefer Python")
@@ -210,6 +221,10 @@ def test_source_decision_never_uses_missing_altered_or_truncated_evidence(change
         messages[0]["content"] = "I might prefer Python, and this is now my current choice."
     elif change == "role":
         messages[0]["role"] = "tool"
+    elif change == "source_kind":
+        messages[0]["source_kind"] = "fetched_document"
+    elif change == "turn_id":
+        messages[0]["turn_id"] = "forged-turn"
     elif change == "hash":
         candidate.validated_evidence["source_spans"][0]["turn_sha256"] = "forged"
     else:

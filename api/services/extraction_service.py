@@ -2534,8 +2534,9 @@ class ExtractionService:
             "extraction": normalized_context,
         }
 
-    @staticmethod
+    @classmethod
     def _verify_source_spans(
+        cls,
         spans: Any,
         *,
         messages: list[dict[str, Any]],
@@ -2574,21 +2575,51 @@ class ExtractionService:
             if key in seen:
                 return None
             seen.add(key)
-            verified.append(
-                {
-                    "turn_index": turn_index,
-                    "turn_id": str(
-                        messages[turn_index].get("turn_id")
-                        or f"legacy-index:{turn_index}"
-                    ),
-                    "start_char": start,
-                    "end_char": end,
-                    "offset_unit": "unicode_code_point",
-                    "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
-                    "turn_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                }
-            )
+            verified.append(cls._source_span_record(
+                turn_index=turn_index, message=messages[turn_index], quote=quote, start=start,
+            ))
         return sorted(verified, key=lambda span: (span["turn_index"], span["start_char"]))
+
+    @staticmethod
+    def _source_span_record(
+        *, turn_index: int, message: dict[str, Any], quote: str, start: int,
+    ) -> dict[str, Any]:
+        """Record an exact occurrence after the caller has verified attribution."""
+        content = str(message.get("content") or "")
+        return {
+            "turn_index": turn_index,
+            "turn_id": str(message.get("turn_id") or f"legacy-index:{turn_index}"),
+            "start_char": start,
+            "end_char": start + len(quote),
+            "offset_unit": "unicode_code_point",
+            "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+            "turn_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+
+    @classmethod
+    def verified_source_value_span(
+        cls, candidate: ExtractedMemory, messages: list[dict[str, Any]], value: str,
+    ) -> dict[str, Any] | None:
+        """Attribute a pending option value within already verified user turns.
+
+        Repetition of the same value is not ambiguous attribution: the backend
+        selects the first exact occurrence in transcript order, never a model
+        offset. This does not establish commitment or semantic entailment.
+        General extraction quotes still require a unique occurrence.
+        """
+        if not isinstance(value, str) or not value.strip() or len(value) > 1000:
+            return None
+        turns = cls.verified_source_turns(candidate, messages)
+        if turns is None:
+            return None
+        for turn in turns:
+            start = str(turn["content"]).find(value)
+            if start >= 0:
+                index = turn["turn_index"]
+                return cls._source_span_record(
+                    turn_index=index, message=messages[index], quote=value, start=start,
+                )
+        return None
 
     @classmethod
     def verified_source_turns(

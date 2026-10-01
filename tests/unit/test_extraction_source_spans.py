@@ -15,6 +15,70 @@ def _candidate(content: str) -> SimpleNamespace:
     return SimpleNamespace(content=content)
 
 
+def test_repeated_value_uses_first_occurrence_only_in_verified_user_turns():
+    messages = [
+        {"role": "assistant", "content": "Python Python", "turn_id": "tool-turn", "source_kind": "tool_output"},
+        {"role": "user", "content": "🧠 Python might work, but Python is not decided.", "turn_id": "user-1"},
+        {"role": "user", "content": "Python is still only an alternative.", "turn_id": "user-2"},
+    ]
+    candidate = _candidate(messages[1]["content"] + "\n" + messages[2]["content"])
+    candidate.validated_evidence = ExtractionService._validated_user_evidence(
+        candidate, messages, [1, 2], "direct_user_statement",
+        evidence_spans=[{"turn_index": index, "quote": messages[index]["content"]} for index in (1, 2)],
+    )
+    span = ExtractionService.verified_source_value_span(candidate, messages, "Python")
+    assert span["turn_index"] == 1 and span["turn_id"] == "user-1"
+    assert span["start_char"] == messages[1]["content"].index("Python")
+    assert messages[1]["content"][span["start_char"]:span["end_char"]] == "Python"
+    assert span["quote_sha256"] == hashlib.sha256(b"Python").hexdigest()
+    assert span["turn_sha256"] == hashlib.sha256(messages[1]["content"].encode()).hexdigest()
+
+
+@pytest.mark.parametrize("change", [
+    "surrounding_content", "role", "source_kind", "turn_id", "hash", "missing_spans",
+    "missing_value", "case_change", "tool_only_value", "uncited_user_value", "ambiguous_parent_quote", "oversized_value",
+])
+def test_option_value_attribution_never_relaxes_source_evidence(change):
+    text = "Python might work, but I have not chosen between C++ and Python."
+    messages = [{"role": "user", "content": text, "turn_id": "user-1"}]
+    candidate = _candidate(text)
+    candidate.validated_evidence = ExtractionService._validated_user_evidence(
+        candidate, messages, [0], "direct_user_statement",
+        evidence_spans=[{"turn_index": 0, "quote": text}],
+    )
+    value = "Python"
+    if change == "surrounding_content":
+        messages[0]["content"] += " This is now final."
+    elif change == "role":
+        messages[0]["role"] = "assistant"
+    elif change == "source_kind":
+        messages[0]["source_kind"] = "fetched_document"
+    elif change == "turn_id":
+        messages[0]["turn_id"] = "forged-user-turn"
+    elif change == "hash":
+        candidate.validated_evidence["source_spans"][0]["turn_sha256"] = "forged"
+    elif change == "missing_spans":
+        candidate.validated_evidence.pop("source_spans")
+    elif change == "ambiguous_parent_quote":
+        # Extraction still cannot attribute a repeated quote without a unique span.
+        candidate.validated_evidence = ExtractionService._validated_user_evidence(
+            candidate, messages, [0], "direct_user_statement",
+            evidence_spans=[{"turn_index": 0, "quote": "Python"}],
+        )
+        assert candidate.validated_evidence == {}
+    elif change == "case_change":
+        value = "python"
+    elif change == "oversized_value":
+        value = "x" * 1001
+    else:
+        value = "Rust"
+        if change == "tool_only_value":
+            messages.append({"role": "assistant", "source_kind": "tool_output", "content": "Rust Rust"})
+        elif change == "uncited_user_value":
+            messages.append({"role": "user", "content": "Rust Rust"})
+    assert ExtractionService.verified_source_value_span(candidate, messages, value) is None
+
+
 @pytest.mark.parametrize("content,source,accepted", [
     ("常に説明の前にコード例を示してください。", "プログラミングの説明では、常に説明の前にコード例を示してください。", True),
     ("I might prefer Python", "I might prefer Python, but I have not replaced C++.", True),
