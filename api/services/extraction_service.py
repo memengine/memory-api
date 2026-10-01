@@ -451,6 +451,19 @@ class ExtractionService:
             )
             if getattr(memory, "id", None) is not None and line in user_message
         }
+        # Only unarchived, visible same-category pairs can enter stored-memory
+        # review. A new claim is not a second stored memory.
+        review_groups: dict[str, set[str]] = {}
+        for memory in existing_memories or []:
+            memory_id = str(getattr(memory, "id", "") or "")
+            if memory_id not in visible_existing_memory_ids or bool(getattr(memory, "is_archived", False)):
+                continue
+            category = getattr(memory, "category", "")
+            review_groups.setdefault(str(getattr(category, "value", category)), set()).add(memory_id)
+        review_memory_ids = tuple(sorted({
+            memory_id for group in review_groups.values() if len(group) >= 2
+            for memory_id in group
+        }))
         prompt_context_metrics["primary_user_message_tokens"] = self._count_tokens(
             user_message
         )
@@ -474,7 +487,7 @@ class ExtractionService:
             user_message=user_message,
             temperature=0.0 if proposal_context else 0.1,
             max_tokens=1500,
-            response_format=self._primary_response_format(),
+            response_format=self._primary_response_format(review_memory_ids=review_memory_ids),
         )
         primary_wall_latency_ms = int((time.perf_counter() - primary_started) * 1000)
         tokens_used += int(response.total_tokens or 0)
@@ -1159,11 +1172,14 @@ class ExtractionService:
             )
         return prompt
 
-    def _primary_response_format(self) -> str | JSONSchemaResponseFormat:
+    def _primary_response_format(
+        self, *, review_memory_ids: tuple[str, ...] = (),
+    ) -> JSONSchemaResponseFormat:
         return JSONSchemaResponseFormat(
             name="memory_extraction_v2",
             schema=build_extraction_response_schema(
                 proposal_confirmation_enabled=self._proposal_confirmation_enabled,
+                review_memory_ids=review_memory_ids,
             ),
         )
 
@@ -1217,12 +1233,7 @@ class ExtractionService:
             "such as 'the user wants to remember that ...'. Preserve the proposal's original language "
             "and reuse its key claim wording instead of translating it; the registered proposal number "
             "shown in the transcript is the server-verified ordinal.\n\n"
-            "If the user explicitly asks the assistant not to decide between two existing "
-            "memories and to ask them to choose, set memory_clarification.requested to true "
-            "and return exactly the two server-provided memory IDs. Cite the direct user turn "
-            "and copy a short exact substring that asks for the choice. Never invent an ID. This "
-            "is a request for review, not a new memory: do not copy either alternative into "
-            "the memories array. If the request or the pair is ambiguous, use null.\n\n"
+            f"{self._stored_memory_review_contract()}\n\n"
             "If nothing should be extracted, return:\n"
             '{"memories":[],"memory_clarification":null,'
             '"nothing_to_extract":true,"extraction_notes":"reason"}'
@@ -1290,12 +1301,7 @@ class ExtractionService:
             "not address a proposal. Do not copy a confirmed proposal into the memories array: "
             "the backend resolves its registered content. Never output transcript turn indexes as "
             "target_ordinal.\n\n"
-            "If the user explicitly asks the assistant not to decide between two existing "
-            "memories and to ask them to choose, set memory_clarification.requested to true "
-            "and return exactly the two server-provided memory IDs. Cite the direct user turn "
-            "and copy a short exact substring that asks for the choice. Never invent an ID. This "
-            "is a request for review, not a new memory: do not copy either alternative into "
-            "the memories array. If the request or the pair is ambiguous, use null.\n\n"
+            f"{self._stored_memory_review_contract()}\n\n"
             "If nothing should be extracted, return:\n"
             '{"proposal_confirmation":null,"memory_clarification":null,'
             '"memories":[],'
@@ -1328,6 +1334,20 @@ class ExtractionService:
             '"nothing_to_extract":false,"extraction_notes":"optional string"}. '
             'For no replacement claim return {"memories":[],"nothing_to_extract":true,'
             '"extraction_notes":"no direct replacement claim"}.'
+        )
+
+    @staticmethod
+    def _stored_memory_review_contract() -> str:
+        return (
+            "Stored-memory review is available only when memory_clarification's schema "
+            "allows an object. When its schema permits only null, extract any independently "
+            "stated new claim with its uncertainty; do not request a stored-memory pair. "
+            "If the user explicitly asks the assistant not to decide between two existing "
+            "memories and to ask them to choose, set memory_clarification.requested to true "
+            "and return exactly the two server-provided memory IDs. Cite the direct user turn "
+            "and copy a short exact substring that asks for the choice. Never invent an ID. This "
+            "is a request for review, not a new memory: do not copy either alternative into "
+            "the memories array. If the request or the pair is ambiguous, use null."
         )
 
     @staticmethod
@@ -2599,12 +2619,14 @@ class ExtractionService:
     @classmethod
     def verified_source_value_span(
         cls, candidate: ExtractedMemory, messages: list[dict[str, Any]], value: str,
+        *, turn_index: int | None = None,
     ) -> dict[str, Any] | None:
         """Attribute a pending option value within already verified user turns.
 
-        Repetition of the same value is not ambiguous attribution: the backend
-        selects the first exact occurrence in transcript order, never a model
-        offset. This does not establish commitment or semantic entailment.
+        Repetition is not ambiguous attribution: select the first exact
+        occurrence in the referenced verified turn, or transcript order when
+        no reference is supplied. Never accept a model offset. This does not
+        establish commitment or semantic entailment.
         General extraction quotes still require a unique occurrence.
         """
         if not isinstance(value, str) or not value.strip() or len(value) > 1000:
@@ -2613,6 +2635,8 @@ class ExtractionService:
         if turns is None:
             return None
         for turn in turns:
+            if turn_index is not None and turn["turn_index"] != turn_index:
+                continue
             start = str(turn["content"]).find(value)
             if start >= 0:
                 index = turn["turn_index"]

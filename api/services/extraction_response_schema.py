@@ -15,6 +15,7 @@ CATEGORIES = [
 def build_extraction_response_schema(
     *,
     proposal_confirmation_enabled: bool,
+    review_memory_ids: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the strict primary-extraction response schema.
 
@@ -37,13 +38,19 @@ def build_extraction_response_schema(
         )
         required.append("proposal_confirmation")
 
-    properties["memory_clarification"] = _nullable_object(
+    review = _nullable_object(
         {
             "requested": {"type": "boolean"},
-            "memory_ids": {"type": "array", "items": {"type": "string"}},
+            "memory_ids": {
+                "type": "array", "minItems": 2, "maxItems": 2,
+                "items": {"type": "string", "enum": sorted(set(review_memory_ids))},
+            },
             "evidence_turn": {"type": "integer"},
             "selection_evidence": {"type": "string"},
         }
+    )
+    properties["memory_clarification"] = (
+        review if len(set(review_memory_ids)) >= 2 else {"type": "null"}
     )
     properties["memories"] = {
         "type": "array",

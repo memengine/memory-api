@@ -691,6 +691,76 @@ async def test_empty_response_repair_with_no_valid_candidate_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("archived", [False, True])
+async def test_single_current_memory_disables_stored_review_without_repair(tmp_path, archived):
+    claim = "I might switch my code examples to Ruby, but I am still weighing it up."
+    payload = {
+        "memories": [{
+            "content": claim, "category": "preference", "importance_score": 7,
+            "confidence": 0.9, "claim_state": "uncertain_change",
+            "evidence_turns": [0], "evidence_relation": "direct_user_statement",
+            "evidence_spans": [{"turn_index": 0, "quote": claim}],
+            "proposal_turn": None, "reasoning": "Uncommitted alternative.",
+        }],
+        "memory_clarification": None, "nothing_to_extract": False,
+    }
+    llm = FakeLLMService(json.dumps(payload))
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+    memories = [SimpleNamespace(
+        id="current", content="My default code language is Go.",
+        category="preference", importance_score=8, is_archived=False,
+    )]
+    if archived:
+        memories.append(SimpleNamespace(
+            id="old", content="My old default code language was Java.",
+            category="preference", importance_score=8, is_archived=True,
+        ))
+    result = await service.extract(
+        messages=[{"role": "user", "content": claim}],
+        proxy_user_id="review-test", tenant_id="tenant-test", job_id="job-test",
+        existing_memories=memories,
+    )
+    assert llm.calls[0]["response_format"].schema["properties"]["memory_clarification"] == {"type": "null"}
+    assert len(llm.calls) == 1
+    assert result.memories_to_store == [] and result.pending_candidates_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pair_kind", ["visible", "different_category", "truncated", "duplicate_id"])
+async def test_stored_review_schema_uses_only_visible_same_category_pairs(tmp_path, monkeypatch, pair_kind):
+    claim = "My preferred code language remains Go."
+    llm = FakeLLMService(json.dumps({
+        "memories": [{
+            "content": claim, "category": "preference", "importance_score": 7,
+            "confidence": 0.9, "claim_state": "asserted", "reasoning": "Current preference.",
+            "evidence_turns": [0], "evidence_relation": "direct_user_statement",
+            "evidence_spans": [{"turn_index": 0, "quote": claim}], "proposal_turn": None,
+        }], "nothing_to_extract": False, "memory_clarification": None,
+    }))
+    service = ExtractionService(llm_service=llm, spec_path=_spec(tmp_path))
+    first = SimpleNamespace(id="first", content="My code language is Go.", category="preference", importance_score=8)
+    second = SimpleNamespace(
+        id="first" if pair_kind == "duplicate_id" else "second",
+        content="Ruby is the other candidate.",
+        category="fact" if pair_kind == "different_category" else "preference", importance_score=7,
+    )
+    if pair_kind == "truncated":
+        def truncate_second(text, _budget):
+            return "\n".join(line for line in text.splitlines() if "memory_id=second" not in line)
+        monkeypatch.setattr(service, "_truncate_to_token_budget", truncate_second)
+    await service.extract(
+        messages=[{"role": "user", "content": claim}], proxy_user_id="pair-test",
+        tenant_id="tenant-test", job_id="job-test", existing_memories=[first, second],
+    )
+    review = llm.calls[0]["response_format"].schema["properties"]["memory_clarification"]
+    if pair_kind == "visible":
+        assert review["anyOf"][0]["properties"]["memory_ids"]["items"]["enum"] == ["first", "second"]
+    else:
+        assert review == {"type": "null"}
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_invalid_single_memory_clarification_recovers_uncertain_candidate(
     tmp_path: Path,
 ) -> None:

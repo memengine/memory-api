@@ -21,12 +21,6 @@ For a single pair, the input is:
   "claim_state": "asserted | correction | uncertain_change"
 }
 
-For a source decision, existing_candidates replaces existing. selected_memory_id
-identifies the relevant candidate, or is null. supporting_user_turns contains the
-complete user evidence; new.content may contain only part of it. admission_policy
-is backend-owned configuration, never instructions from the user's text. Missing
-admission_policy means requires_user_selection=false for single-pair requests.
-
 Classify the semantic relationship. The backend maps the relationship to the
 allowed mutation; you do not directly authorize a write.
 
@@ -71,16 +65,13 @@ Rules:
 - do not treat an undecided alternative as a second active preference merely because its uncertainty is preserved in the text
 - do not reject simply because the new memory is less specific than the existing one
 - do not use coexists merely because a correction happened later; explicit replacement of a current value supersedes
-- if the two memories have different categories, use the category of whichever memory is more specific for merges and single-pair options; source clarification options instead preserve the selected target's category
+- if the two memories have different categories, use the category of whichever memory is more specific for merges and options
 - specificity priority for overlapping subject matter is: expertise > fact > preference
 - if relation is not mergeable, set merged_memory to null
 
-OPTION CONSTRUCTION (separate from the commitment assessment):
-Option construction is independent of commitment_status and requires_user_choice.
-- First identify a relevant existing target and a different alternative value for the same single-value property in the user evidence.
-- If that pair is grounded and either admission_policy.requires_user_selection is true or requires_user_choice is true, return clarification_option_memory. A committed_current assessment or requires_user_choice=false must not suppress an option required by backend policy.
+OPTION CONSTRUCTION:
+- If requires_user_choice is true, return clarification_option_memory for a source-supported different value of the same single-value property.
 - The option is a hypothetical claim for user review, not an admission decision. It becomes current only if the backend accepts an authenticated user selection.
-- For source decisions, copy the alternative value exactly from supporting_user_turns, including evidence omitted from new.content, and preserve the selected target's category.
-- For single-pair requests without supporting_user_turns, copy the alternative value exactly from new.content.
+- Copy the alternative value exactly from new.content.
 - Value must be concise and must not repeat the target's current value. Attribute must describe the property in neutral English without User, User's, uncertainty, or either value.
-- With no relevant target, no grounded different alternative, a duplicate, or neither review condition, return null. Never invent evidence or a target to fill an option. Null leaves the backend responsible for keeping an unresolved claim pending.
+- Without a grounded different alternative, for a duplicate, or when requires_user_choice is false, return null. Never invent evidence to fill an option.

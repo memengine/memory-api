@@ -1509,6 +1509,8 @@ def run_extraction_pipeline(
         metadata = dict(extraction_meta.get("extraction_metadata") or {})
         metadata["source_decision"] = {
             "pending_count": len(source_pending), "tokens_used": source_tokens,
+            "complete_calls": int(getattr(resolver, "last_source_decision_calls", 0) or 0),
+            "wall_latency_ms": int(getattr(resolver, "last_source_decision_wall_latency_ms", 0) or 0),
         }
         extraction_meta["extraction_metadata"] = metadata
         clarification_queued = bool(getattr(resolver, "last_user_clarifications_queued", 0))

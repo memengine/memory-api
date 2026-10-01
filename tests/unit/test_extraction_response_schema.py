@@ -38,3 +38,22 @@ def test_proposal_mode_does_not_allow_model_to_emit_confirmed_memory_directly() 
         "evidence_relation"
     ]
     assert relation["enum"] == ["direct_user_statement"]
+
+
+@pytest.mark.parametrize("ids", [(), ("only-current",)])
+def test_stored_review_is_null_only_without_a_pair(ids) -> None:
+    schema = build_extraction_response_schema(
+        proposal_confirmation_enabled=True, review_memory_ids=ids,
+    )
+    assert schema["properties"]["memory_clarification"] == {"type": "null"}
+
+
+def test_stored_review_ids_are_bounded_to_the_visible_pair() -> None:
+    schema = build_extraction_response_schema(
+        proposal_confirmation_enabled=False,
+        review_memory_ids=("current-a", "current-b"),
+    )
+    review = schema["properties"]["memory_clarification"]["anyOf"][0]
+    ids = review["properties"]["memory_ids"]
+    assert ids["items"]["enum"] == ["current-a", "current-b"]
+    assert ids["minItems"] == ids["maxItems"] == 2

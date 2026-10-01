@@ -67,10 +67,12 @@ class _Model:
         self.decision = decision
         self.before_decision = before_decision
         self.source_prompts = []
+        self.primary_formats = []
         self.claim_state = claim_state
 
     async def complete(self, **kwargs):
         assert kwargs["response_format"].name == "memory_extraction_v2"
+        self.primary_formats.append(kwargs["response_format"])
         return self._response(
             {
                 "memories": [
@@ -92,7 +94,7 @@ class _Model:
         )
 
     def complete_sync(self, **kwargs):
-        assert kwargs["response_format"].name == "memory_source_relation_v1"
+        assert kwargs["response_format"].name == "memory_source_relation_v2"
         self.source_prompts.append(json.loads(kwargs["user_message"]))
         if self.before_decision:
             self.before_decision()
@@ -110,8 +112,10 @@ def _decision(target=None, *, state="committed_current", relation="novel", optio
         "selected_memory_id": str(target) if target else None,
         "relation": relation,
         "commitment_status": state,
-        "requires_user_choice": state == "tentative" and target is not None,
-        "clarification_option_memory": option,
+        "candidate_representation": (
+            {"status": "grounded", **option, "evidence_turn_index": 0}
+            if option is not None else {"status": "unavailable", "reason": "no_new_value"}
+        ),
         "merged_memory": None,
         "reasoning": "Controlled full-source decision.",
     }
@@ -268,6 +272,44 @@ def test_pending_decision_survives_worker_processing_without_active_memory(
     assert model.source_prompts[0]["supporting_user_turns"][0]["content"] == content
 
 
+@pytest.mark.parametrize("kind", ["unavailable", "forged_index", "old_contract"])
+def test_source_v2_failure_is_persisted_without_activating_an_option(sql_scope, monkeypatch, kind):
+    initial, _, _ = _run(sql_scope, monkeypatch, "My default code language is Go.", _decision())
+    old_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    decision = _decision(old_id, relation="supersedes", option={
+        "attribute": "default code language", "value": "Ruby", "category": "preference",
+    })
+    expected_reason = "source_option_invalid"
+    if kind == "unavailable":
+        decision["candidate_representation"] = {"status": "unavailable", "reason": "unsupported_value"}
+        expected_reason = "source_representation_unavailable"
+    elif kind == "forged_index":
+        decision["candidate_representation"]["evidence_turn_index"] = 7
+    else:
+        decision["requires_user_choice"] = False
+        expected_reason = "source_response_invalid"
+    result, model, job_id = _run(
+        sql_scope, monkeypatch, "Ruby might replace Go, but I have not chosen yet.",
+        decision, claim_state="uncertain_change",
+    )
+    assert result["memories_created"] == 0 and result["pending_candidates_buffered"] == 1
+    assert not result["clarification_queued"]
+    assert len(model.primary_formats) == len(model.source_prompts) == 1
+    assert model.primary_formats[0].schema["properties"]["memory_clarification"] == {"type": "null"}
+    assert result["extraction_metadata"]["source_decision"]["complete_calls"] == 1
+    with sql_scope.factory() as session:
+        memories = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert [row.id for row in memories] == [old_id] and not memories[0].is_archived
+        candidate = session.scalars(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.extraction_job_id == job_id,
+        )).one()
+        audit = candidate.metadata_json["extraction_evidence"]["source_decision"]
+        assert expected_reason in audit["reason_codes"]
+        assert not session.scalars(select(ClarificationQueue).where(
+            ClarificationQueue.proxy_user_id == sql_scope.proxy_id,
+        )).all()
+
+
 @pytest.mark.parametrize("state", ["tentative", "committed_current"])
 @pytest.mark.parametrize("update_text", [
     "Python could be my default, but I have not decided whether to replace C++.",
@@ -299,6 +341,11 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
         claim_state="uncertain_change",
     )
     assert result["clarification_queued"] is True
+    assert len(model.primary_formats) == 1
+    assert model.primary_formats[0].schema["properties"]["memory_clarification"] == {"type": "null"}
+    source_metrics = result["extraction_metadata"]["source_decision"]
+    assert source_metrics["complete_calls"] == 1 and source_metrics["tokens_used"] == 20
+    assert source_metrics["wall_latency_ms"] >= 0
     assert model.source_prompts[0]["admission_policy"]["requires_user_selection"] is True
     new_id = uuid.UUID(result["stored_memories"][0]["id"])
     with sql_scope.factory() as session:
@@ -480,7 +527,7 @@ def test_commitment_disagreement_is_persisted_pending_without_changing_current(s
         evidence = pending.metadata_json["extraction_evidence"]
         assert evidence["claim_state"] == ("uncertain_change" if review_required else "asserted")
         expected_code = "source_target_missing" if relation == "novel" else (
-            "source_option_invalid" if invalid_option else "source_option_missing"
+            "source_option_invalid" if invalid_option else "source_representation_unavailable"
         )
         assert expected_code in evidence["source_decision"]["reason_codes"]
         details = evidence["source_decision"]["details"]

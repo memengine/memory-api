@@ -135,6 +135,8 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
         validated_evidence={"source_decision": {"action": "USER_REVIEW"}},
     )]
     resolver.last_source_decision_tokens_used = 77
+    resolver.last_source_decision_calls = 2
+    resolver.last_source_decision_wall_latency_ms = 121
     resolver.last_user_clarifications_queued = 1
     buffered = []
     def capture_pending(_session, **kwargs):
@@ -206,7 +208,9 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert result["pending_candidates_buffered"] == 1
     assert result["clarification_queued"] is True
     assert result["tokens_used"] == 77
-    assert result["extraction_metadata"]["source_decision"] == {"pending_count": 1, "tokens_used": 77}
+    assert result["extraction_metadata"]["source_decision"] == {
+        "pending_count": 1, "tokens_used": 77, "complete_calls": 2, "wall_latency_ms": 121,
+    }
     assert buffered == resolver.last_pending_candidates
     assert result["stored_memories"][0]["proxy_user_id"] == str(proxy_user.id)
     assert resolver.calls[0]["tenant_id"] == str(proxy_user.tenant_id)
