@@ -52,6 +52,9 @@ python scripts/governed_memory_phase0_replay.py --fixture benchmarks/internal/da
 
 The live replay requires `MEMORYOS_API_KEY` and an explicit `--execute`. Use `--max-cases` for the
 first canary, and write raw results only below the ignored `artifacts/internal-benchmarks` tree.
+When a long run is interrupted, pass the same explicit `--output` with `--resume`; the runner
+validates the fixture version and API origin, reuses the synthetic run identity, and skips only
+scenarios already checkpointed in that artifact.
 The artifact separates add acknowledgement, asynchronous job completion, retrieval, and
 clarification-answer timings; do not combine job completion time with the customer's answer-path
 latency. Provider-token cost remains measured by the Phase 3A provider evaluator because the public

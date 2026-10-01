@@ -37,6 +37,26 @@ class _SequencedJobClient:
         return self.responses.pop(0)
 
 
+class _AddResponse:
+    headers: dict[str, str] = {}
+
+    def __init__(self, status_code: int, body: dict) -> None:
+        self.status_code = status_code
+        self._body = body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise AssertionError("expected rejection should not call raise_for_status")
+
+    def json(self) -> dict:
+        return self._body
+
+
+class _AddClient:
+    async def post(self, *_args, **_kwargs) -> _AddResponse:
+        return _AddResponse(409, {"code": "EVID_409", "error": "payload mismatch"})
+
+
 @pytest.mark.asyncio
 async def test_phase0_waits_through_retriable_failed_job_state() -> None:
     client = _SequencedJobClient(
@@ -54,6 +74,22 @@ async def test_phase0_waits_through_retriable_failed_job_state() -> None:
 
     assert result["job"]["status"] == "completed"
     assert client.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_phase0_expected_write_rejection_is_a_governance_result() -> None:
+    result = await replay.add_and_wait(
+        _AddClient(),
+        {"messages": []},
+        idempotency_key="rejected-update",
+        poll_seconds=0,
+        timeout_seconds=1,
+        expected_http_status=409,
+    )
+
+    assert result["http_status"] == 409
+    assert result["rejected"] is True
+    assert result["error_code"] == "EVID_409"
 
 
 def test_phase0_fixture_uses_only_public_memory_contract_inputs() -> None:

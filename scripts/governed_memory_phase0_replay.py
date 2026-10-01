@@ -108,6 +108,15 @@ def validate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"{scenario_id} must define a resolution selector and after_resolution"
             )
+        update_http_status = expected.get("update_http_status", 200)
+        if not isinstance(update_http_status, int) or update_http_status < 100:
+            raise ValueError(f"{scenario_id}.update_http_status is invalid")
+        if update_http_status >= 400 and not str(
+            expected.get("update_error_code") or ""
+        ).strip():
+            raise ValueError(
+                f"{scenario_id}.update_error_code is required for rejected updates"
+            )
     return payload
 
 
@@ -454,6 +463,7 @@ async def add_and_wait(
     idempotency_key: str,
     poll_seconds: float,
     timeout_seconds: float,
+    expected_http_status: int = 200,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     response = await client.post(
@@ -462,8 +472,21 @@ async def add_and_wait(
         headers={"Idempotency-Key": idempotency_key},
     )
     acknowledgement_ms = round((time.perf_counter() - started) * 1000, 2)
-    response.raise_for_status()
     body = response.json()
+    if response.status_code != expected_http_status:
+        response.raise_for_status()
+        raise RuntimeError(
+            f"Expected HTTP {expected_http_status}, received {response.status_code}"
+        )
+    if expected_http_status >= 400:
+        return {
+            **_request_identity(response, body),
+            "acknowledgement_ms": acknowledgement_ms,
+            "rejected": True,
+            "error_code": body.get("code"),
+            "error": body.get("error") or body.get("message"),
+        }
+    response.raise_for_status()
     job_id = body.get("job_id")
     result: dict[str, Any] = {
         **_request_identity(response, body),
@@ -546,15 +569,26 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
     if not api_key:
         raise SystemExit("MEMORYOS_API_KEY is required with --execute")
 
-    run_id = uuid.uuid4().hex[:12]
-    artifact: dict[str, Any] = {
-        "schema_version": 1,
-        "fixture_version": fixture["version"],
-        "run_id": run_id,
-        "started_at": datetime.now(UTC).isoformat(),
-        "base_url": args.base_url.rstrip("/"),
-        "scenarios": [],
-    }
+    output_path = Path(args.output) if args.output else None
+    if args.resume:
+        if output_path is None or not output_path.exists():
+            raise ValueError("--resume requires an existing --output artifact")
+        artifact = json.loads(output_path.read_text(encoding="utf-8"))
+        if artifact.get("fixture_version") != fixture["version"]:
+            raise ValueError("Resume artifact fixture version does not match")
+        if artifact.get("base_url") != args.base_url.rstrip("/"):
+            raise ValueError("Resume artifact base URL does not match")
+        run_id = str(artifact["run_id"])
+    else:
+        run_id = uuid.uuid4().hex[:12]
+        artifact = {
+            "schema_version": 1,
+            "fixture_version": fixture["version"],
+            "run_id": run_id,
+            "started_at": datetime.now(UTC).isoformat(),
+            "base_url": args.base_url.rstrip("/"),
+            "scenarios": [],
+        }
     headers = {"Authorization": f"ApiKey {api_key}"}
     async with httpx.AsyncClient(
         base_url=args.base_url.rstrip("/"),
@@ -566,6 +600,16 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             scenario_ids=args.scenario,
             max_cases=args.max_cases,
         )
+        completed_ids = {
+            str(item.get("scenario_id"))
+            for item in artifact.get("scenarios", [])
+            if isinstance(item, dict)
+        }
+        selected_scenarios = [
+            scenario
+            for scenario in selected_scenarios
+            if str(scenario["id"]) not in completed_ids
+        ]
         for scenario in selected_scenarios:
             scenario_id = scenario["id"]
             external_user_id = f"phase0-{scenario_id}-{run_id}"
@@ -602,6 +646,9 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 idempotency_key=f"phase0:{run_id}:{scenario_id}:update",
                 poll_seconds=args.poll_seconds,
                 timeout_seconds=args.job_timeout,
+                expected_http_status=int(
+                    scenario["expected"].get("update_http_status", 200)
+                ),
             )
             idempotency_replay = None
             idempotency_evaluation = None
@@ -742,6 +789,15 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                     isolation_evaluation["passed"]
                     if isolation_evaluation is not None
                     else True
+                ),
+                "update_rejection": (
+                    update.get("http_status")
+                    == scenario["expected"].get("update_http_status", 200)
+                    and (
+                        scenario["expected"].get("update_error_code") is None
+                        or update.get("error_code")
+                        == scenario["expected"].get("update_error_code")
+                    )
                 ),
             }
             journey_evaluation = {
@@ -942,6 +998,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--scenario", action="append")
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
 

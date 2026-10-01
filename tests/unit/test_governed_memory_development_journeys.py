@@ -282,3 +282,15 @@ def test_fixture_rejects_multiple_resolution_selectors() -> None:
 
     with pytest.raises(ValueError, match="multiple resolution selectors"):
         runner.validate_fixture(fixture)
+
+
+def test_duplicate_turn_boundary_requires_explicit_rejection_contract() -> None:
+    fixture = runner.load_fixture(DATASET)
+    scenario = next(
+        item
+        for item in fixture["scenarios"]
+        if item["id"] == "system_duplicate_external_turn_boundary"
+    )
+
+    assert scenario["expected"]["update_http_status"] == 409
+    assert scenario["expected"]["update_error_code"] == "EVID_409"
