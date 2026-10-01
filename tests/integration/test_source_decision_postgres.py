@@ -268,6 +268,7 @@ def test_pending_decision_survives_worker_processing_without_active_memory(
     assert model.source_prompts[0]["supporting_user_turns"][0]["content"] == content
 
 
+@pytest.mark.parametrize("state", ["tentative", "committed_current"])
 @pytest.mark.parametrize("update_text", [
     "Python could be my default, but I have not decided whether to replace C++.",
     "Python might be my default, but I have not decided between C++ and Python.",
@@ -275,20 +276,20 @@ def test_pending_decision_survives_worker_processing_without_active_memory(
     "मेरी डिफ़ॉल्ट भाषा Python हो सकती है, लेकिन C++ और Python में अभी निर्णय नहीं लिया है।",
 ])
 def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
-    sql_scope, monkeypatch, update_text
+    sql_scope, monkeypatch, update_text, state
 ):
     initial, _, _ = _run(
         sql_scope, monkeypatch, "My default programming language is C++.", _decision()
     )
     old_id = uuid.UUID(initial["stored_memories"][0]["id"])
-    result, _, _ = _run(
+    result, model, _ = _run(
         sql_scope,
         monkeypatch,
         update_text,
         _decision(
             old_id,
-            state="tentative",
-            relation="ambiguous",
+            state=state,
+            relation="supersedes" if state == "committed_current" else "ambiguous",
             option={
                 "attribute": "default programming language",
                 "value": "Python",
@@ -298,6 +299,7 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
         claim_state="uncertain_change",
     )
     assert result["clarification_queued"] is True
+    assert model.source_prompts[0]["admission_policy"]["requires_user_selection"] is True
     new_id = uuid.UUID(result["stored_memories"][0]["id"])
     with sql_scope.factory() as session:
         assert not session.get(Memory, old_id).is_archived
@@ -555,8 +557,9 @@ def test_foreign_vector_target_cannot_be_selected_or_overwritten(
         ).all()
 
 
+@pytest.mark.parametrize("review_required", [False, True])
 def test_source_decision_rechecks_target_changed_by_concurrent_connection(
-    sql_scope, monkeypatch
+    sql_scope, monkeypatch, review_required
 ):
     initial, _, _ = _run(
         sql_scope, monkeypatch, "My default programming language is C++.", _decision()
@@ -575,8 +578,17 @@ def test_source_decision_rechecks_target_changed_by_concurrent_connection(
         sql_scope,
         monkeypatch,
         "Correction: use Python instead of C++.",
-        _decision(target_id, relation="supersedes"),
+        _decision(
+            target_id,
+            relation="supersedes",
+            option={
+                "attribute": "default programming language",
+                "value": "Python",
+                "category": "preference",
+            } if review_required else None,
+        ),
         before_decision=concurrent_change,
+        claim_state="uncertain_change" if review_required else "correction",
     )
     assert result["memories_created"] == 0
     assert result["pending_candidates_buffered"] == 1

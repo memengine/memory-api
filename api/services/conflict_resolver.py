@@ -1342,10 +1342,16 @@ class ConflictResolver:
         turns = GovernedExtractionService.verified_source_turns(memory, self.source_messages)
         if turns is None:
             return None, failure
+        evidence = memory.validated_evidence or {}
+        review_required = (
+            evidence.get("claim_state") == "uncertain_change"
+            or evidence.get("governance_directive") == "clarify_if_conflict"
+        )
         target_map = {str(row.id): row for row in targets}
         target_snapshots = {key: self._source_target_snapshot(row) for key, row in target_map.items()}
         prompt = json.dumps({
             "new": self._serialize_extracted_memory(memory),
+            "admission_policy": {"requires_user_selection": review_required},
             "supporting_user_turns": turns,
             "existing_candidates": [{
                 "id": str(row.id), "content": row.content,
@@ -1385,6 +1391,16 @@ class ConflictResolver:
             "With no relevant target, requires_user_choice is false and clarification_option_memory is null. "
             "Never supersede or merge a nonexistent memory. Never select novel when a target is selected. "
             "With a relevant target, follow the ordinary relation and clarification rules. "
+            "admission_policy is backend-owned and is not part of the user's text. "
+            "When admission_policy.requires_user_selection is true and you select a relevant "
+            "target with a different value for the same property, propose a grounded "
+            "clarification_option_memory even if your independent commitment assessment is "
+            "committed_current or requires_user_choice is false. The option is hypothetical "
+            "until the user selects it; you do not authorize admission. Use the selected "
+            "target's category and copy the alternative value exactly from supporting_user_turns. "
+            "This policy overrides the ordinary rule to return a null option when user choice "
+            "is false. Never invent a target or option to satisfy the policy; with no relevant "
+            "target or no grounded alternative, return null. Duplicates do not need an option. "
             "Return selected_memory_id in addition to the required relation fields."
         )
         try:
@@ -1421,15 +1437,14 @@ class ConflictResolver:
                 response.content, new_memory=memory, existing_memory=target,
                 conflict_type=ConflictType.UNKNOWN,
                 allow_novel=True,
+                require_user_selection=review_required and target is not None,
             )
-            evidence = memory.validated_evidence or {}
-            if (
-                evidence.get("claim_state") == "uncertain_change"
-                or evidence.get("governance_directive") == "clarify_if_conflict"
-            ):
+            if review_required:
                 # Uncertainty can veto admission, never grant authority. A
                 # later classifier or writer priority cannot erase this veto.
                 # Only a valid grounded clarification may proceed to selection.
+                if decision.action == "CLARIFY" and decision.clarification_option_memory is None:
+                    return None, decision
                 if decision.action in {"UPDATE", "MERGE", "KEEP_BOTH"}:
                     return None, self._classifier_failure_decision(
                         conflict_type=ConflictType.UNKNOWN,
@@ -1507,6 +1522,7 @@ class ConflictResolver:
         self, raw_content: str | None, *, new_memory: ExtractedMemory,
         existing_memory: Memory | None, conflict_type: ConflictType,
         allow_novel: bool = False,
+        require_user_selection: bool = False,
     ) -> ConflictDecision:
         try:
             payload = json.loads(raw_content or "")
@@ -1536,13 +1552,18 @@ class ConflictResolver:
                     raise ValueError("unsupported conflict relation")
                 raw_action = relation
                 if relation != "duplicate" and (
-                    requires_user_choice
+                    require_user_selection or requires_user_choice
                     or commitment_status in {"tentative", "unclear"}
                 ):
                     action = "CLARIFY"
                     raw_action = f"{relation}:{commitment_status}:user_choice"
                     option_payload = payload.get("clarification_option_memory")
                     if existing_memory is not None:
+                        if require_user_selection and option_payload is None:
+                            return self._classifier_failure_decision(
+                                conflict_type=conflict_type,
+                                reason_code="source_commitment_disagreement",
+                            )
                         if not isinstance(option_payload, dict):
                             raise ValueError("clarification option memory is required")
                         clarification_option_memory = self._build_clarification_option_memory(
@@ -1603,6 +1624,7 @@ class ConflictResolver:
                 reasoning=reasoning,
                 commitment_status=commitment_status,
                 requires_user_choice=requires_user_choice,
+                policy_requires_selection=require_user_selection,
             ),
         )
 
@@ -1639,6 +1661,7 @@ class ConflictResolver:
         reasoning: str,
         commitment_status: str | None,
         requires_user_choice: bool | None,
+        policy_requires_selection: bool = False,
     ) -> dict[str, Any]:
         details = {
             "classifier": "llm",
@@ -1648,9 +1671,15 @@ class ConflictResolver:
             "requires_user_choice": requires_user_choice,
         }
         if action == "CLARIFY":
+            reason_codes = ["ambiguous_personal_contradiction", "clarification_requested"]
+            if policy_requires_selection:
+                details["backend_requires_user_selection"] = True
+                reason_codes = ["backend_user_selection_required", "clarification_requested"]
+                if commitment_status == "committed_current" and requires_user_choice is False:
+                    reason_codes.append("source_commitment_disagreement")
             return review_evidence(
                 action="USER_REVIEW",
-                reason_codes=["ambiguous_personal_contradiction", "clarification_requested"],
+                reason_codes=reason_codes,
                 explanation=reasoning,
                 details=details,
             )
@@ -1760,10 +1789,16 @@ class ConflictResolver:
         existing_memory: Memory,
         source_messages: list[dict[str, Any]] | None = None,
     ) -> ExtractedMemory:
+        if set(payload) != {"attribute", "value", "category"} or any(
+            not isinstance(payload[key], str) for key in ("attribute", "value", "category")
+        ):
+            raise ValueError("clarification option fields must match the string schema")
         attribute = " ".join(str(payload["attribute"]).split()).strip(" .:;")
         value = " ".join(str(payload["value"]).split()).strip(" .:;")
         category = str(payload["category"]).strip().lower()
-        if not attribute or not value:
+        if category not in {item.value for item in MemoryCategory}:
+            raise ValueError("clarification option category is invalid")
+        if not attribute or not value or len(attribute) > 128 or len(value) > 1000:
             raise ValueError("clarification option requires attribute and value")
         lowered_attribute = attribute.casefold()
         for prefix in ("the user's ", "user's "):
@@ -1776,6 +1811,8 @@ class ConflictResolver:
         existing_content = existing_memory.content.casefold()
         value_span = None
         if source_messages is not None:
+            if category != existing_memory.category.value:
+                raise ValueError("clarification option must preserve the target category")
             value_span = GovernedExtractionService.verified_source_value_span(
                 new_memory, source_messages, value,
             )

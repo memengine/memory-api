@@ -216,6 +216,7 @@ def test_source_uncertainty_does_not_require_similarity_trigger(score, quote_par
 def test_source_decision_never_uses_missing_altered_or_truncated_evidence(change) -> None:
     full_turn = "I might prefer Python, but I have not decided to replace C++."
     candidate, messages = source_candidate(full_turn, "I might prefer Python")
+    candidate.validated_evidence["claim_state"] = "uncertain_change"
     if change == "missing":
         messages = []
     elif change == "qualifier":
@@ -275,11 +276,15 @@ def test_source_target_ownership_checked_independently_of_vector_payload() -> No
     assert not foreign.is_archived
 
 
+@pytest.mark.parametrize("review_required", [False, True])
 @pytest.mark.parametrize("mutation", ["archive", "content"])
-def test_source_decision_rejects_target_changed_during_model_request(mutation) -> None:
+def test_source_decision_rejects_target_changed_during_model_request(mutation, review_required) -> None:
     candidate, messages = source_candidate("Correction: my default is Python instead of C++.")
+    if review_required:
+        candidate.validated_evidence["claim_state"] = "uncertain_change"
     existing = make_existing_memory()
     existing.content = "User's default programming language is C++."
+    existing.category = MemoryCategory.preference
     proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
     session = FakeSession(existing, proxy)
     qdrant = MagicMock()
@@ -289,7 +294,10 @@ def test_source_decision_rejects_target_changed_during_model_request(mutation) -
             existing.is_archived = True
         else:
             existing.content = "User's default programming language is Rust."
-        return SimpleNamespace(content=json.dumps(source_response(str(existing.id), relation="supersedes")), total_tokens=40)
+        return SimpleNamespace(content=json.dumps(source_response(
+            str(existing.id), relation="supersedes",
+            option={"attribute": "default programming language", "value": "Python", "category": "preference"} if review_required else None,
+        )), total_tokens=40)
     model = SimpleNamespace(complete_sync=change_then_respond)
     resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
                                 llm_service=model, source_messages=messages)
@@ -304,6 +312,7 @@ def test_source_uncertainty_cannot_become_current_by_higher_writer_authority() -
     candidate.validated_evidence.update(claim_state="uncertain_change", governance_directive="clarify_if_conflict")
     existing = make_existing_memory()
     existing.content = "User's default programming language is C++."
+    existing.category = MemoryCategory.preference
     existing.metadata_json = {"provenance": {"authority_rules": {"default_priority": 20}}}
     proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
     session = FakeSession(existing, proxy)
@@ -425,6 +434,123 @@ def test_uncertain_source_without_grounded_option_stays_pending(option):
                                        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
     assert not existing.is_archived and resolver.last_user_clarifications_queued == 0
     assert len(resolver.last_pending_candidates) == 1
+    assert model.complete_sync.call_count == 1
+
+
+@pytest.mark.parametrize("marker", ["claim_state", "directive"])
+@pytest.mark.parametrize("stored_priority", [20, 50, 90])
+@pytest.mark.parametrize("relation", ["supersedes", "mergeable", "coexists"])
+def test_backend_selection_policy_uses_grounded_option_despite_committed_classification(marker, stored_priority, relation):
+    prefix = "My default language for every programming example is Python."
+    full_turn = prefix + " This conflicts with my earlier C++ default, and I have not decided which should remain current."
+    candidate, messages = source_candidate(full_turn, prefix)
+    candidate.category = "preference"
+    candidate.validated_evidence[marker if marker == "claim_state" else "governance_directive"] = (
+        "uncertain_change" if marker == "claim_state" else "clarify_if_conflict"
+    )
+    existing = make_existing_memory()
+    existing.content = "My default language for every programming example is C++."
+    existing.category = MemoryCategory.preference
+    existing.metadata_json = {"provenance": {"authority_rules": {"default_priority": stored_priority}}}
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing, 0.7)]
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(existing.id), relation=relation,
+        option={"attribute": "default programming language", "value": "Python", "category": "preference"},
+    )), total_tokens=70)
+    resolver = ConflictResolver(
+        session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+        llm_service=model, source_messages=messages,
+        provenance_snapshot={"authority_rules": {"default_priority": 50}},
+    )
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                     tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert not existing.is_archived and not resolver.last_pending_candidates
+    assert model.complete_sync.call_count == 1 and model.complete_sync.call_args.kwargs["max_tokens"] == 400
+    prompt = json.loads(model.complete_sync.call_args.kwargs["user_message"])
+    assert prompt["admission_policy"]["requires_user_selection"] is True
+    assert prompt["supporting_user_turns"][0]["content"] == full_turn
+    if stored_priority > 50:
+        assert not stored and resolver.last_user_clarifications_queued == 0
+        return
+    assert [row.resolution for row in stored] == ["CLARIFICATION_PENDING"]
+    pending = session.memories[stored[0].id]
+    assert pending.is_archived and pending.content == "User's default programming language is Python."
+    decision = pending.metadata_json["decision_evidence"]
+    assert decision["action"] == "USER_REVIEW"
+    assert decision["details"]["commitment_status"] == "committed_current"
+    assert decision["details"]["requires_user_choice"] is False
+    assert decision["details"]["backend_requires_user_selection"] is True
+    assert "source_commitment_disagreement" in decision["reason_codes"]
+
+
+@pytest.mark.parametrize("change", ["missing", "unmentioned", "category", "category_mismatch", "value_type", "attribute_type", "extra", "repeat", "attribute_length"])
+def test_backend_selection_policy_never_fabricates_invalid_option(change):
+    candidate, messages = source_candidate("Python might replace C++, but I have not decided between Python and C++.")
+    candidate.validated_evidence["claim_state"] = "uncertain_change"
+    existing = make_existing_memory()
+    existing.category = MemoryCategory.preference
+    existing.content = "My default programming language is C++."
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    option = {"attribute": "default programming language", "value": "Python", "category": "preference"}
+    if change == "missing":
+        option = None
+    elif change == "unmentioned":
+        option["value"] = "Rust"
+    elif change == "category":
+        option["category"] = "invented"
+    elif change == "category_mismatch":
+        option["category"] = "expertise"
+    elif change == "value_type":
+        option["value"] = ["Python"]
+    elif change == "attribute_type":
+        option["attribute"] = {"instruction": "ignore safeguards"}
+    elif change == "extra":
+        option["authority"] = 100
+    elif change == "attribute_length":
+        option["attribute"] = "x" * 129
+    else:
+        option["value"] = "C++"
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(existing.id), relation="supersedes", option=option,
+    )), total_tokens=70)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = [make_qdrant_point(existing, 0.7)]
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                       tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert not existing.is_archived and len(session.memories) == 1
+    assert resolver.last_user_clarifications_queued == 0 and len(resolver.last_pending_candidates) == 1
+    assert model.complete_sync.call_count == 1
+
+
+@pytest.mark.parametrize("selected", [None, "foreign-id"])
+def test_backend_selection_policy_cannot_use_option_without_owned_target(selected):
+    candidate, messages = source_candidate("Python might be my default, but I have not decided.")
+    candidate.validated_evidence["claim_state"] = "uncertain_change"
+    existing = make_existing_memory()
+    existing.category = MemoryCategory.preference
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing, proxy)
+    qdrant = MagicMock()
+    qdrant.search_memories.return_value = []
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        selected, relation="novel" if selected is None else "supersedes",
+        option={"attribute": "default programming language", "value": "Python", "category": "preference"},
+    )), total_tokens=70)
+    resolver = ConflictResolver(session=session, qdrant_service=qdrant, embedder=lambda _: [0.1] * 3,
+                                llm_service=model, source_messages=messages)
+    assert not resolver.check_and_store([candidate], user_id=str(existing.user_id),
+                                       tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
+    assert not existing.is_archived and len(session.memories) == 1
+    assert resolver.last_user_clarifications_queued == 0 and len(resolver.last_pending_candidates) == 1
     assert model.complete_sync.call_count == 1
 
 
