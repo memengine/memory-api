@@ -353,6 +353,46 @@ def test_phase0_provenance_requires_user_evidence_and_matching_conversation() ->
     assert tool_only["passed"] is False
 
 
+def test_phase0_proposal_provenance_allows_linked_assistant_and_user_turns() -> None:
+    response = {
+        "data": [
+            {
+                "id": "proposal-memory",
+                "provenance": {
+                    "event_id": "event-1",
+                    "external_conversation_id": "conversation-1",
+                    "extraction_evidence": {
+                        "authority": {"label": "client_assertion", "level": 20},
+                        "relation": "user_confirmed_assistant_proposal",
+                        "turn_references": [
+                            {
+                                "role": "assistant",
+                                "source_kind": "assistant_output",
+                            },
+                            {"role": "user", "source_kind": ""},
+                        ],
+                    },
+                },
+            }
+        ]
+    }
+
+    assert replay.evaluate_provenance(
+        response,
+        expected_conversation_id="conversation-1",
+        expected_authority_label="client_assertion",
+        expected_authority_level=20,
+    )["passed"] is True
+
+    response["data"][0]["provenance"]["extraction_evidence"]["turn_references"][
+        1
+    ]["source_kind"] = "tool_output"
+    assert replay.evaluate_provenance(
+        response,
+        expected_conversation_id="conversation-1",
+    )["passed"] is False
+
+
 def test_phase0_idempotency_requires_same_nonempty_job_id() -> None:
     assert (
         replay.evaluate_idempotency({"job_id": "job-1"}, {"job_id": "job-1"})["passed"]

@@ -362,6 +362,16 @@ def evaluate_provenance(
         authority = authority if isinstance(authority, dict) else {}
         references = extraction.get("turn_references")
         references = references if isinstance(references, list) else []
+        eligible_user_references = [
+            reference
+            for reference in references
+            if isinstance(reference, dict)
+            and reference.get("role") == "user"
+            and str(reference.get("source_kind") or "direct_user_input")
+            .strip()
+            .lower()
+            in {"direct_user_input", "client_assertion"}
+        ]
         checks = {
             "source_event_present": bool(provenance.get("event_id")),
             "external_conversation_matches": (
@@ -369,11 +379,7 @@ def evaluate_provenance(
             ),
             "authority_present": bool(authority.get("label"))
             and isinstance(authority.get("level"), int),
-            "user_evidence_present": bool(references)
-            and all(
-                isinstance(reference, dict) and reference.get("role") == "user"
-                for reference in references
-            ),
+            "user_evidence_present": bool(eligible_user_references),
         }
         if expected_authority_label is not None:
             checks["authority_label_matches"] = (
