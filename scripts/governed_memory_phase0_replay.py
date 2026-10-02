@@ -67,15 +67,20 @@ def validate_fixture(payload: dict[str, Any]) -> dict[str, Any]:
             scenario["safety_critical"], bool
         ):
             raise TypeError(f"{scenario_id}.safety_critical must be boolean")
-        for field in ("initial_messages", "update_messages"):
+        fields = ["initial_messages", "update_messages"]
+        if "setup_messages" in scenario:
+            fields.append("setup_messages")
+        for field in fields:
             messages = scenario.get(field)
             if not isinstance(messages, list) or not messages:
                 raise ValueError(f"{scenario_id}.{field} must contain messages")
             if any(
-                message.get("role") not in {"user", "assistant", "system"}
+                not isinstance(message, dict)
+                or message.get("role") not in {"user", "assistant", "system"}
+                or not str(message.get("content") or "").strip()
                 for message in messages
             ):
-                raise ValueError(f"{scenario_id}.{field} contains an unsupported role")
+                raise ValueError(f"{scenario_id}.{field} contains an invalid message")
         for field in ("warm_query", "verification_query"):
             if not str(scenario.get(field) or "").strip():
                 raise ValueError(f"{scenario_id}.{field} must be non-empty")
@@ -167,7 +172,11 @@ def build_add_payload(
     phase: str,
     fixture_version: str = DEFAULT_FIXTURE_VERSION,
 ) -> dict[str, Any]:
-    messages_field = "initial_messages" if phase == "initial" else "update_messages"
+    messages_field = {
+        "setup": "setup_messages",
+        "initial": "initial_messages",
+        "update": "update_messages",
+    }[phase]
     return {
         "external_user_id": external_user_id,
         "messages": scenario[messages_field],
@@ -670,6 +679,7 @@ async def replay_restatement(
     run_id: str,
     fixture_version: str,
     args: argparse.Namespace,
+    setup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One optional extension of the existing journey, not a second runner."""
     config = scenario["restatement"]
@@ -677,6 +687,10 @@ async def replay_restatement(
     checks = record["checks"]
     for name, operation in (("initial", initial), ("uncertainty", update)):
         checks[f"{name}_job_completed"] = (operation.get("terminal") or {}).get(
+            "job", {}
+        ).get("status") == "completed"
+    if "setup_messages" in scenario:
+        checks["setup_job_completed"] = ((setup or {}).get("terminal") or {}).get(
             "job", {}
         ).get("status") == "completed"
     try:
@@ -691,9 +705,18 @@ async def replay_restatement(
         }
     old_id, general_id = str(old["id"]), str(general["id"])
     checks["distinct_scoped_memories"] = old_id != general_id
-    checks["initial_ids_verified"] = {old_id, general_id}.issubset(
-        created_memory_ids(initial)
+    checks["initial_ids_verified"] = (
+        old_id in created_memory_ids(initial)
+        and general_id in created_memory_ids(setup or {})
+        if "setup_messages" in scenario
+        else {old_id, general_id}.issubset(created_memory_ids(initial))
     )
+    if not all(checks.values()):
+        return {
+            **record,
+            "passed": False,
+            "error": "Initial write preconditions failed",
+        }
     uncertainty_memories = [
         await memory_snapshot(client, memory_id)
         for memory_id in sorted(created_memory_ids(update))
@@ -954,6 +977,21 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             scenario_id = scenario["id"]
             external_user_id = f"phase0-{scenario_id}-{run_id}"
             conversation_id = f"phase0:{scenario_id}:{run_id}"
+            setup = None
+            if "setup_messages" in scenario:
+                setup = await add_and_wait(
+                    client,
+                    build_add_payload(
+                        scenario,
+                        external_user_id=external_user_id,
+                        conversation_id=conversation_id,
+                        phase="setup",
+                        fixture_version=str(fixture["version"]),
+                    ),
+                    idempotency_key=f"phase0:{run_id}:{scenario_id}:setup",
+                    poll_seconds=args.poll_seconds,
+                    timeout_seconds=args.job_timeout,
+                )
             initial = await add_and_wait(
                 client,
                 build_add_payload(
@@ -1118,8 +1156,15 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=run_id,
                     fixture_version=str(fixture["version"]),
                     args=args,
+                    setup=setup,
                 )
             journey_checks = {
+                "setup": setup is None
+                or (
+                    (setup.get("terminal") or {}).get("job", {}).get("status")
+                    == "completed"
+                    and bool(created_memory_ids(setup))
+                ),
                 "memory_policy": scenario_evaluation["passed"],
                 "provenance": provenance_evaluation["passed"],
                 "resolution": (
@@ -1162,6 +1207,7 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "external_user_id": external_user_id,
                 "conversation_id": conversation_id,
                 "initial_add": initial,
+                "setup_add": setup,
                 "warm_retrieval": warm,
                 "update_add": update,
                 "idempotency_replay": idempotency_replay,
@@ -1272,7 +1318,7 @@ def _timing_summary(
     reviews: list[float] = []
     for scenario in scenarios:
         restatement = scenario.get("restatement_evaluation") or {}
-        for field in ("initial_add", "update_add", "idempotency_replay"):
+        for field in ("setup_add", "initial_add", "update_add", "idempotency_replay"):
             operation = scenario.get(field)
             if not isinstance(operation, dict):
                 continue

@@ -99,6 +99,25 @@ Inspect the plan without credentials or network calls:
 python scripts/governed_memory_phase0_replay.py --fixture benchmarks/internal/datasets/governed_memory/development/scoped_review_v1.json
 ```
 
+The failed live batched development run is preserved unchanged: its initial extraction returned
+only the general C++ memory and omitted the project-only turn. The separate-write comparison
+`datasets/governed_memory/development/scoped_review_separate_writes_v1.json` uses identical user
+sentences, selectors, and policy assertions. Only grouping changes: a setup job creates the general
+default before a separate initial job receives the project default, using the same synthetic user
+and external conversation ID. Each memory must belong to the appropriate job's created IDs;
+failed setup or initial preconditions prevent review actions and replacement writes. The runner
+records setup acknowledgement/processing separately. This is a diagnostic comparison, not an
+extraction fix, a new ingestion contract, or evidence that customers should avoid batching.
+One comparison cannot establish a stochastic model's general reliability or prove causality.
+
+The one approved separate-write live comparison also failed on deployed version `15da090`.
+Public memory/history reads established `resolution=MERGE`: the source classifier acknowledged
+the project context, but the stored successor kept only the general wording and archived the
+general predecessor. This rules out batching as the sole explanation and identifies a destructive
+merge that lost scope, not a retrieval cache or assistant-only failure. It does not establish the
+exact pre-merge extraction content, which these public endpoints do not expose. See
+`reports/scoped-review-write-comparison-20261002.md`; no production repair is included here.
+
 Local contracts (controlled model/HTTP/session responses, not a live database or provider eval):
 
 ```powershell
