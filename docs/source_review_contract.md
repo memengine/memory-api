@@ -1,6 +1,8 @@
 # Non-activating source reviews
 
-Release status: implemented locally; not yet deployed or published in either SDK.
+Release status: backend commit `15da090` verified live on 2026-10-02;
+not yet published in either SDK. Verification used the checkout's Python client,
+not an installed published release.
 This is a review-delivery fallback, not a new semantic classifier or an extraction
 accuracy certificate. Existing two-memory clarification contracts are unchanged.
 
@@ -100,3 +102,27 @@ record, review projection and locked answer. Existing canonical clarification
 selection tests verify later retrieval returns its winner.
 Model outputs and embeddings in these lifecycle tests are controlled. They are
 not fresh real-model evaluations, independent holdouts, or load tests.
+
+### Live release smoke (2026-10-02)
+
+One fresh synthetic user was exercised through `https://api.memoryo.dev` with
+normal authenticated add, job-status, retrieve and review-answer calls. Health
+reported `15da090` and all three dependencies healthy; OpenAPI exposed the new
+field and answer route. Two ingestion jobs completed without retries:
+
+- A C++ default created one memory.
+- A natural uncertain C++/Python statement created zero memories, buffered one
+  candidate and surfaced a target-bound review on retrieval.
+- Repeated reads returned the same review/version. `restate` left it pending
+  and requested normal ingestion. `keep_current` closed it; content, archive
+  state and authority remained unchanged. Closed reviews disappeared on retrieval.
+- Unknown-user answers returned 404; stale versions and closed replays returned 409.
+
+Four warm retrieval calls took 157-187 ms end-to-end from this machine. This is
+not a p99, added-latency estimate, or load result. Extraction remained async;
+job processing took about 20.3 s initially and 10.4 s for the uncertain update.
+The journey used real backend model calls, but one result does not establish
+semantic accuracy. No holdout, prompt tuning or direct provider experiment ran.
+Actual billing is not returned by job status: primary extraction reported 9,572
+input and 269 output tokens; source decisions reported 2,819 total tokens with
+no input/output split. Embedding charges and exact total cost are not measured.
