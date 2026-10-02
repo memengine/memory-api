@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -219,7 +220,9 @@ def test_concurrent_watchdogs_dispatch_stranded_queued_job_once(monkeypatch) -> 
     proxy_user_id = uuid.uuid4()
     job_id = uuid.uuid4()
     apply_async = MagicMock()
-    monkeypatch.setattr(watchdog_tasks.process_extraction_job, "apply_async", apply_async)
+    # Celery's shared-task proxy resolves against each thread's current app.
+    # Replace the module dependency, not one thread's resolved task instance.
+    monkeypatch.setattr(watchdog_tasks, "process_extraction_job", SimpleNamespace(apply_async=apply_async))
     try:
         with engine.begin() as connection:
             connection.execute(text("""

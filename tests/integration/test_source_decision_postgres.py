@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -35,6 +36,8 @@ from api.db.models import (
     Tenant,
     User,
     VectorSyncOutbox,
+    VectorSyncOperation,
+    VectorSyncStatus,
 )
 from api.errors import APIError
 from api.routers.memories import answer_memory_clarification
@@ -169,6 +172,9 @@ def sql_scope(monkeypatch):
         yield scope
     finally:
         with factory.begin() as session:
+            session.execute(delete(VectorSyncOutbox).where(VectorSyncOutbox.memory_id.in_(
+                select(Memory.id).where(Memory.proxy_user_id.in_(scope.proxy_ids))
+            )))
             session.execute(delete(Tenant).where(Tenant.id.in_(scope.tenant_ids)))
             session.execute(
                 delete(User).where(
@@ -181,7 +187,7 @@ def sql_scope(monkeypatch):
 
 
 def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=None,
-         claim_state="asserted", extracted_content=None):
+         claim_state="asserted", extracted_content=None, search_error=None):
     model = _Model(extracted_content or content, decision, before_decision, claim_state=claim_state)
     cache = AsyncMock()
     extractor = ExtractionService(
@@ -194,6 +200,8 @@ def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=
 
     class Search:
         def search_memories(self, **kwargs):
+            if search_error is not None:
+                raise search_error
             if points is not None:
                 return points
             with scope.factory() as session:
@@ -272,6 +280,87 @@ def test_pending_decision_survives_worker_processing_without_active_memory(
     assert model.source_prompts[0]["supporting_user_turns"][0]["content"] == content
 
 
+def _seed_context(scope, monkeypatch, *, additional=0, gaps=0):
+    initial, _, _ = _run(scope, monkeypatch, "My default programming language is C++.", _decision())
+    base_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    row_ids = []
+    with scope.factory.begin() as session:
+        base = session.get(Memory, base_id)
+        session.execute(update(VectorSyncOutbox).where(VectorSyncOutbox.memory_id == base_id)
+            .values(status=VectorSyncStatus.done))
+        for index in range(additional):
+            row_id = uuid.uuid4()
+            session.add(Memory(id=row_id, user_id=base.user_id, proxy_user_id=base.proxy_user_id,
+                content=f"Independent preference {index}", category=base.category,
+                importance_score=1, confidence_score=0.9, embedding_id=str(row_id),
+                embedding_model_id=base.embedding_model_id,
+                source_conversation_id=base.source_conversation_id))
+            row_ids.append(row_id)
+        session.flush()
+        for row_id in row_ids[-gaps:] if gaps else []:
+            session.get(Memory, row_id).importance_score = 0
+            session.add(VectorSyncOutbox(memory_id=row_id, operation=VectorSyncOperation.upsert,
+                status=VectorSyncStatus.pending, payload={}))
+    return base_id, row_ids
+
+
+@pytest.mark.parametrize("gaps", [0, 1, 20, 21])
+def test_large_sql_context_includes_bounded_index_gaps(sql_scope, monkeypatch, gaps):
+    base_id, row_ids = _seed_context(sql_scope, monkeypatch, additional=70, gaps=gaps)
+    with sql_scope.factory() as session:
+        context = extraction_tasks._load_existing_memories_for_context(session, str(sql_scope.proxy_id))
+        assert context.available and not context.complete
+        assert context.index_gaps_complete is (gaps <= 20)
+        ids = {row.id for row in context.memories}
+        assert base_id in ids and len(ids) <= 70
+        if 0 < gaps <= 20:
+            assert set(row_ids[-gaps:]).issubset(ids)
+    if gaps == 21:
+        result, model, _ = _run(sql_scope, monkeypatch, "My default is now Python.", _decision(), points=[])
+        assert result["pending_candidates_buffered"] == 1 and not result["memories_created"]
+        assert not model.source_prompts
+        assert not result["extraction_metadata"]["source_decision"]["context"]["index_gaps_complete"]
+
+
+@pytest.mark.parametrize("field", ["expires_at", "effective_until", "effective_from", "is_archived"])
+def test_sql_context_filters_noncurrent_memory(sql_scope, monkeypatch, field):
+    base_id, _ = _seed_context(sql_scope, monkeypatch)
+    now = datetime.now(UTC)
+    value = True if field == "is_archived" else now + timedelta(days=1 if field == "effective_from" else -1)
+    with sql_scope.factory.begin() as session:
+        setattr(session.get(Memory, base_id), field, value)
+    with sql_scope.factory() as session:
+        context = extraction_tasks._load_existing_memories_for_context(session, str(sql_scope.proxy_id))
+        assert context.available and context.complete and not context.memories
+
+
+def test_sync_gaps_already_in_sql_context_do_not_consume_extra_gap_budget(sql_scope, monkeypatch):
+    _seed_context(sql_scope, monkeypatch, additional=51)
+    with sql_scope.factory.begin() as session:
+        rows = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)
+            .order_by(Memory.importance_score.desc(), Memory.id).limit(50)).all()
+        for row in rows:
+            session.add(VectorSyncOutbox(memory_id=row.id, operation=VectorSyncOperation.upsert,
+                status=VectorSyncStatus.pending, payload={}))
+    with sql_scope.factory() as session:
+        context = extraction_tasks._load_existing_memories_for_context(session, str(sql_scope.proxy_id))
+        assert not context.complete and context.index_gaps_complete
+        assert len(context.memories) == 50
+
+
+def test_large_context_search_failure_preserves_current_memory(sql_scope, monkeypatch):
+    from api.db.vector_store import VectorSearchUnavailable
+
+    base_id, _ = _seed_context(sql_scope, monkeypatch, additional=51)
+
+    result, model, _ = _run(sql_scope, monkeypatch, "My default is now Python.",
+        _decision(), search_error=VectorSearchUnavailable("Controlled index outage"))
+    assert result["pending_candidates_buffered"] == 1 and not result["memories_created"]
+    assert not model.source_prompts
+    with sql_scope.factory() as session:
+        assert not session.get(Memory, base_id).is_archived
+
+
 @pytest.mark.parametrize("kind", ["unavailable", "forged_index", "old_contract"])
 def test_source_v2_failure_is_persisted_without_activating_an_option(sql_scope, monkeypatch, kind):
     initial, _, _ = _run(sql_scope, monkeypatch, "My default code language is Go.", _decision())
@@ -339,11 +428,14 @@ def test_chat_choice_persists_provenance_ledger_and_retrieves_only_winner(
             },
         ),
         claim_state="uncertain_change",
+        points=[],  # The earlier write is still in the asynchronous vector outbox.
     )
     assert result["clarification_queued"] is True
     assert len(model.primary_formats) == 1
     assert model.primary_formats[0].schema["properties"]["memory_clarification"] == {"type": "null"}
     source_metrics = result["extraction_metadata"]["source_decision"]
+    assert source_metrics["context"]["sql_complete"] is True
+    assert source_metrics["context"]["vector_calls"] == 0
     assert source_metrics["complete_calls"] == 1 and source_metrics["tokens_used"] == 20
     assert source_metrics["wall_latency_ms"] >= 0
     assert model.source_prompts[0]["admission_policy"]["requires_user_selection"] is True
@@ -559,6 +651,7 @@ def test_explicit_correction_replaces_current_memory_and_preserves_source(
         "Correction: my default is Python instead of C++.",
         _decision(old_id, relation="supersedes"),
         claim_state="correction",
+        points=[],
     )
     assert result["conflicts_resolved"] == 1
     new_id = uuid.UUID(result["stored_memories"][0]["id"])
@@ -628,20 +721,25 @@ def test_foreign_vector_target_cannot_be_selected_or_overwritten(
 
 
 @pytest.mark.parametrize("review_required", [False, True])
+@pytest.mark.parametrize("field", ["content", "expires_at", "effective_from", "effective_until"])
 def test_source_decision_rechecks_target_changed_by_concurrent_connection(
-    sql_scope, monkeypatch, review_required
+    sql_scope, monkeypatch, review_required, field
 ):
     initial, _, _ = _run(
         sql_scope, monkeypatch, "My default programming language is C++.", _decision()
     )
     target_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    value = (
+        "My default programming language is Rust." if field == "content"
+        else datetime.now(UTC) + timedelta(days=1 if field == "effective_from" else -1)
+    )
 
     def concurrent_change():
         with sql_scope.factory.begin() as other_session:
             other_session.execute(
                 update(Memory)
                 .where(Memory.id == target_id)
-                .values(content="My default programming language is Rust.")
+                .values(**{field: value})
             )
 
     result, _, _ = _run(
@@ -664,7 +762,7 @@ def test_source_decision_rechecks_target_changed_by_concurrent_connection(
     assert result["pending_candidates_buffered"] == 1
     with sql_scope.factory() as session:
         target = session.get(Memory, target_id)
-        assert target.content.endswith("Rust.") and not target.is_archived
+        assert getattr(target, field) == value and not target.is_archived
         pending = session.scalars(select(PendingExtractionCandidate).where(
             PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id,
         )).one()

@@ -25,6 +25,14 @@ def get_qdrant_url(url: str | None = None) -> str:
     return validate_qdrant_transport(resolved_url, app_env=get_settings().app_env)
 
 
+class VectorSearchUnavailable(RuntimeError):
+    """A governance search did not obtain a completed search response."""
+
+
+def _raise_search_unavailable() -> list[Any]:
+    raise VectorSearchUnavailable("Vector search unavailable")
+
+
 class QdrantService:
     COLLECTION_NAME = "memories"
     UNIVERSAL_COLLECTION_NAME = "universal_memories"
@@ -220,6 +228,7 @@ class QdrantService:
         collection_name: str | None = None,
         collection_names: list[str] | None = None,
         created_after: datetime | str | None = None,
+        require_available: bool = False,
     ) -> list[qmodels.ScoredPoint]:
         target_collections = collection_names or [collection_name or self.COLLECTION_NAME]
         for target_collection in target_collections:
@@ -236,17 +245,22 @@ class QdrantService:
 
         merged_points: dict[str, qmodels.ScoredPoint] = {}
         for target_collection in target_collections:
-            response = self._with_retries(
-                self.client.query_points,
-                collection_name=target_collection,
-                query=query_embedding,
-                query_filter=qmodels.Filter(must=must_conditions),
-                limit=limit,
-                with_payload=True,
-                with_vectors=False,
-                _fallback=on_qdrant_open,
-                _fallback_on_error=True,
-            )
+            try:
+                response = self._with_retries(
+                    self.client.query_points,
+                    collection_name=target_collection,
+                    query=query_embedding,
+                    query_filter=qmodels.Filter(must=must_conditions),
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=False,
+                    _fallback=_raise_search_unavailable if require_available else on_qdrant_open,
+                    _fallback_on_error=True,
+                )
+            except (ConnectionError, ResponseHandlingException, CircuitOpenError) as exc:
+                if require_available:
+                    raise VectorSearchUnavailable("Vector search unavailable") from exc
+                raise
             points = response if isinstance(response, list) else list(response.points)
             for point in points:
                 point_id = str(getattr(point, "id", ""))

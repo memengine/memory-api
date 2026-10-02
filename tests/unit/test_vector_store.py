@@ -2,10 +2,34 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pytest
+
 from qdrant_client.http import models as qmodels
 
 from api.db.vector_store import QdrantService
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
+
+
+def test_strict_search_distinguishes_unavailable_from_empty() -> None:
+    from api.db.vector_store import VectorSearchUnavailable
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    client = MagicMock()
+    client.collection_exists.return_value = True
+    service = QdrantService(client=client)
+    client.query_points.side_effect = ResponseHandlingException(TimeoutError())
+    with pytest.raises(VectorSearchUnavailable):
+        service.search_memories(query_embedding=[0.1], user_id="user", require_available=True)
+    # Existing retrieval callers retain additive/degraded behavior.
+    assert service.search_memories(query_embedding=[0.1], user_id="user") == []
+
+
+def test_strict_healthy_empty_search_is_not_an_outage() -> None:
+    client = MagicMock()
+    client.collection_exists.return_value = True
+    client.query_points.return_value = SimpleNamespace(points=[])
+    service = QdrantService(client=client)
+    assert service.search_memories(query_embedding=[0.1], user_id="user", require_available=True) == []
 
 
 def setup_function() -> None:

@@ -19,7 +19,7 @@ import sentry_sdk
 from celery import shared_task
 from celery.signals import task_postrun
 from celery.signals import worker_process_shutdown
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -39,12 +39,13 @@ from api.db.models import MemorySourceEvent
 from api.db.models import PendingExtractionCandidate
 from api.db.models import ProxyUser
 from api.db.models import User
+from api.db.models import VectorSyncOutbox, VectorSyncOperation, VectorSyncStatus
 from api.db.vector_store import QdrantService
 from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.schemas.memory_schemas import ExtractedMemory
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
 from api.infra.fallbacks import on_redis_open
-from api.services.conflict_resolver import ConflictResolver
+from api.services.conflict_resolver import ConflictResolver, SourceMemoryContext
 from api.services.domain_schemas.registry import get_domain_schema
 from api.services.embedding_service import EmbeddingService
 from api.services.extraction_service import ExtractionError
@@ -818,24 +819,41 @@ def _claim_confirmed_proposals(
     return accepted, len(memories) - len(accepted)
 
 
-def _load_existing_memories_for_context(session: Session, proxy_user_id: str) -> list[Memory]:
-    try:
-        proxy_user_uuid = uuid.UUID(str(proxy_user_id))
-    except (TypeError, ValueError):
-        return []
-    try:
-        result = session.execute(
-            select(Memory)
-            .where(
-                Memory.proxy_user_id == proxy_user_uuid,
-                Memory.is_archived.is_(False),
-            )
-            .order_by(Memory.importance_score.desc())
-            .limit(50)
-        )
-        return list(result.scalars().all())
-    except Exception:
-        return []
+def _load_existing_memories_for_context(session: Session, proxy_user_id: str) -> SourceMemoryContext:
+    proxy_user_uuid = uuid.UUID(str(proxy_user_id))
+    if not hasattr(session, "execute"):
+        # Legacy injected sessions have no SQL context; do not claim it is empty.
+        return SourceMemoryContext((), available=False)
+    now = datetime.now(UTC)
+    conditions = (
+        Memory.proxy_user_id == proxy_user_uuid,
+        Memory.is_archived.is_(False),
+        or_(Memory.effective_from.is_(None), Memory.effective_from <= now),
+        or_(Memory.effective_until.is_(None), Memory.effective_until > now),
+        or_(Memory.expires_at.is_(None), Memory.expires_at > now),
+    )
+    # Look ahead one row in the existing bounded query. SQL failure propagates
+    # to the worker's normal failed/retry path, never to a false empty profile.
+    rows = list(session.scalars(select(Memory).where(*conditions)
+        .order_by(Memory.importance_score.desc(), Memory.id).limit(51)).all())
+    complete = len(rows) <= 50
+    rows = rows[:50]
+    gaps_complete = True
+    if not complete:
+        # Only large profiles need a second, indexed, bounded sync-gap lookup.
+        # A low-importance recent write must not disappear behind top-50 context.
+        unsynced = select(VectorSyncOutbox.id).where(
+            VectorSyncOutbox.memory_id == Memory.id,
+            VectorSyncOutbox.operation == VectorSyncOperation.upsert,
+            VectorSyncOutbox.status != VectorSyncStatus.done,
+        ).exists()
+        seen = {row.id for row in rows}
+        gaps = list(session.scalars(select(Memory).where(
+            *conditions, unsynced, Memory.id.not_in(seen))
+            .order_by(Memory.created_at.desc(), Memory.id).limit(21)).all())
+        gaps_complete = len(gaps) <= 20
+        rows.extend(gaps[:20])
+    return SourceMemoryContext(tuple(rows), complete=complete, index_gaps_complete=gaps_complete)
 
 
 def _tenant_domain_schema(session: Session, tenant_id: str) -> str | None:
@@ -1310,6 +1328,8 @@ def run_extraction_pipeline(
         proxy_user = session.get(ProxyUser, uuid.UUID(proxy_user_id))
         if proxy_user is None:
             raise ValueError(f"Proxy user {proxy_user_id} not found.")
+        if str(proxy_user.tenant_id) != tenant_id:
+            raise ValueError("Extraction job tenant does not own the proxy user.")
 
         stage = "create_conversation"
         backing_user = _ensure_proxy_backing_user(session, proxy_user_id)
@@ -1322,7 +1342,8 @@ def run_extraction_pipeline(
         session.commit()
 
         stage = "load_context"
-        existing_memories = _load_existing_memories_for_context(session, proxy_user_id)
+        source_memory_context = _load_existing_memories_for_context(session, proxy_user_id)
+        existing_memories = list(source_memory_context.memories)
         domain_schema_name = _tenant_domain_schema(session, tenant_id)
         source_event = (
             session.get(MemorySourceEvent, uuid.UUID(str(source_event_id)))
@@ -1495,6 +1516,7 @@ def run_extraction_pipeline(
             agent_id=str(agent_id) if agent_id else None,
             auto_commit=False,
             clarification_requested=False,
+            source_context=source_memory_context,
         )
         source_pending = list(getattr(resolver, "last_pending_candidates", []) or [])
         if source_pending:
@@ -1511,6 +1533,7 @@ def run_extraction_pipeline(
             "pending_count": len(source_pending), "tokens_used": source_tokens,
             "complete_calls": int(getattr(resolver, "last_source_decision_calls", 0) or 0),
             "wall_latency_ms": int(getattr(resolver, "last_source_decision_wall_latency_ms", 0) or 0),
+            "context": dict(getattr(resolver, "last_source_context_metrics", {}) or {}),
         }
         extraction_meta["extraction_metadata"] = metadata
         clarification_queued = bool(getattr(resolver, "last_user_clarifications_queued", 0))

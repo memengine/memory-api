@@ -3,6 +3,9 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from api.db.models import Conversation
 from api.db.models import ConversationProcessingStatus
@@ -13,6 +16,24 @@ from api.db.models import PendingExtractionCandidate
 from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.services.extractor import ExtractedMemory
 from api.tasks import extraction_tasks
+
+
+def test_sql_context_failure_cannot_masquerade_as_an_empty_profile():
+    session = MagicMock()
+    session.scalars.side_effect = RuntimeError("Controlled SQL outage")
+    with pytest.raises(RuntimeError, match="Controlled SQL outage"):
+        extraction_tasks._load_existing_memories_for_context(session, str(uuid.uuid4()))
+
+
+@pytest.mark.parametrize("row_count,query_limits", [(0, [51]), (50, [51]), (51, [51, 21])])
+def test_sql_context_query_count_and_lookahead_are_bounded(row_count, query_limits):
+    session = MagicMock()
+    rows = [SimpleNamespace(id=uuid.uuid4()) for _ in range(row_count)]
+    session.scalars.side_effect = [SimpleNamespace(all=lambda: rows), SimpleNamespace(all=lambda: [])]
+    context = extraction_tasks._load_existing_memories_for_context(session, str(uuid.uuid4()))
+    assert context.complete is (row_count <= 50)
+    assert len(context.memories) == min(row_count, 50)
+    assert [call.args[0]._limit_clause.value for call in session.scalars.call_args_list] == query_limits
 
 
 class FakeSession:
@@ -210,6 +231,7 @@ def test_run_extraction_pipeline_persists_via_conflict_resolver(monkeypatch) -> 
     assert result["tokens_used"] == 77
     assert result["extraction_metadata"]["source_decision"] == {
         "pending_count": 1, "tokens_used": 77, "complete_calls": 2, "wall_latency_ms": 121,
+        "context": {},
     }
     assert buffered == resolver.last_pending_candidates
     assert result["stored_memories"][0]["proxy_user_id"] == str(proxy_user.id)

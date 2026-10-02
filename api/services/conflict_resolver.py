@@ -28,6 +28,7 @@ from api.db.models import MemoryCategory
 from api.db.models import ProxyUser
 from api.db.models import SharedContextEntityType
 from api.db.models import SharedContextSignal
+from api.db.vector_store import QdrantService, VectorSearchUnavailable
 from api.infra.llm_providers.openai_provider import DEFAULT_OPENAI_EXTRACT_MODEL
 from api.infra.llm_router import LLMRouter
 from api.services.llm_service import AllProvidersFailedError
@@ -73,6 +74,18 @@ CONFLICT_RELATION_TO_ACTION: dict[str, str] = {
 SOURCE_REPRESENTATION_UNAVAILABLE_REASONS = (
     "no_new_value", "no_relevant_target", "ambiguous_target", "unsupported_value",
 )
+
+# 50 existing SQL rows + 20 unindexed rows + 20 vector nominations. Provider
+# input is additionally bounded by the existing 32,000-character source cap.
+MAX_SOURCE_CONTEXT_CANDIDATES = 90
+
+
+@dataclass(frozen=True, slots=True)
+class SourceMemoryContext:
+    memories: tuple[Memory, ...]
+    complete: bool = False
+    available: bool = True
+    index_gaps_complete: bool = True
 
 CONFLICT_RESPONSE_FORMAT = JSONSchemaResponseFormat(
     name="memory_conflict_relation_v4",
@@ -666,6 +679,7 @@ class ConflictResolver:
         self.last_source_decision_calls = 0
         self.last_source_decision_wall_latency_ms = 0
         self.last_user_clarifications_queued = 0
+        self.last_source_context_metrics: dict[str, Any] = {}
 
     def queue_existing_memory_clarification(
         self,
@@ -839,6 +853,7 @@ class ConflictResolver:
         agent_id: str | None = None,
         auto_commit: bool = True,
         clarification_requested: bool = False,
+        source_context: SourceMemoryContext | None = None,
     ) -> list[StoredMemory]:
         stored_memories: list[StoredMemory] = []
         self.last_cross_user_conflicts_flagged = 0
@@ -849,8 +864,37 @@ class ConflictResolver:
         self.last_source_decision_calls = 0
         self.last_source_decision_wall_latency_ms = 0
         self.last_user_clarifications_queued = 0
+        context_rows = list(source_context.memories) if source_context is not None else []
+        stored_context_cursor = 0
+        self.last_source_context_metrics = {
+            "sql_count": len(context_rows),
+            "sql_complete": bool(source_context and source_context.complete),
+            "sql_available": bool(source_context and source_context.available),
+            "index_gaps_complete": bool(source_context and source_context.index_gaps_complete),
+            "vector_calls": 0, "vector_unavailable": 0, "max_candidates": 0,
+        }
 
         for new_memory in new_memories:
+            source_verified = (new_memory.validated_evidence or {}).get(
+                "grounding_mode"
+            ) == "verified_source_spans"
+            if source_verified and (
+                (source_context is not None and not source_context.available)
+                or (source_context is None and isinstance(self.qdrant_service, QdrantService))
+                or (source_context is not None and not source_context.index_gaps_complete)
+            ):
+                reason = "source_context_incomplete" if source_context and not source_context.index_gaps_complete else "source_context_unavailable"
+                self._buffer_source_candidate(new_memory, self._classifier_failure_decision(
+                    conflict_type=ConflictType.UNKNOWN, reason_code=reason,
+                ))
+                continue
+            # Earlier claims in this same batch have not reached the vector
+            # outbox either. Reuse their SQL rows before classifying the next one.
+            for stored in stored_memories[stored_context_cursor:]:
+                row = self.session.get(Memory, uuid.UUID(stored.id))
+                if row is not None:
+                    context_rows.append(row)
+            stored_context_cursor = len(stored_memories)
             governance_directive = str(
                 (new_memory.validated_evidence or {}).get("governance_directive")
                 or ""
@@ -868,16 +912,37 @@ class ConflictResolver:
                 search_kwargs["proxy_user_id"] = proxy_user_id
             else:
                 search_kwargs["user_id"] = user_id
-            try:
-                raw_candidates = self.qdrant_service.search_memories(**search_kwargs)
-            except TypeError:
-                search_kwargs.pop("collection_name", None)
-                raw_candidates = self.qdrant_service.search_memories(**search_kwargs)
-
-            source_verified = (new_memory.validated_evidence or {}).get(
-                "grounding_mode"
-            ) == "verified_source_spans"
+            raw_candidates = []
+            # A complete small-profile SQL snapshot already contains all current
+            # candidates. Avoid a redundant index query (and its indexing race).
+            if not (source_verified and source_context is not None and source_context.complete):
+                if source_verified and isinstance(self.qdrant_service, QdrantService):
+                    search_kwargs["require_available"] = True
+                self.last_source_context_metrics["vector_calls"] += int(source_verified)
+                try:
+                    try:
+                        raw_candidates = self.qdrant_service.search_memories(**search_kwargs)
+                    except TypeError:
+                        # Compatibility for injected legacy vector test adapters;
+                        # never downgrade the native governance search contract.
+                        if isinstance(self.qdrant_service, QdrantService):
+                            raise
+                        search_kwargs.pop("collection_name", None)
+                        raw_candidates = self.qdrant_service.search_memories(**search_kwargs)
+                except VectorSearchUnavailable:
+                    if not source_verified:
+                        raise
+                    self.last_source_context_metrics["vector_unavailable"] += 1
+                    self._buffer_source_candidate(new_memory, self._classifier_failure_decision(
+                        conflict_type=ConflictType.UNKNOWN, reason_code="source_search_unavailable",
+                    ))
+                    continue
             candidate_memories: list[Memory] = []
+            if source_verified:
+                for row in context_rows:
+                    if self._owned_active_target(row, user_id=user_id, tenant_id=tenant_id, proxy_user_id=proxy_user_id):
+                        if not any(old.id == row.id for old in candidate_memories):
+                            candidate_memories.append(row)
             for point in raw_candidates:
                 existing_memory = self._load_existing_memory(point)
                 if existing_memory is None:
@@ -901,8 +966,16 @@ class ConflictResolver:
 
             source_decision: ConflictDecision | None = None
             if source_verified:
+                self.last_source_context_metrics["max_candidates"] = max(
+                    self.last_source_context_metrics["max_candidates"], len(candidate_memories),
+                )
+                if len(candidate_memories) > MAX_SOURCE_CONTEXT_CANDIDATES:
+                    self._buffer_source_candidate(new_memory, self._classifier_failure_decision(
+                        conflict_type=ConflictType.UNKNOWN, reason_code="source_context_incomplete",
+                    ))
+                    continue
                 target, source_decision = self._classify_source_claim(
-                    new_memory, candidate_memories[:20]
+                    new_memory, candidate_memories
                 )
                 if target is None:
                     if source_decision.action != "KEEP_BOTH":
@@ -914,7 +987,9 @@ class ConflictResolver:
                     if not self._owned_active_target(
                         target, user_id=user_id, tenant_id=tenant_id, proxy_user_id=proxy_user_id,
                     ):
-                        self._buffer_source_candidate(new_memory, source_decision)
+                        self._buffer_source_candidate(new_memory, self._classifier_failure_decision(
+                            conflict_type=ConflictType.UNKNOWN, reason_code="source_target_stale",
+                        ))
                         continue
                     candidates = [ConflictCandidate(
                         new_memory=new_memory, existing_memory=target,
@@ -1314,6 +1389,16 @@ class ConflictResolver:
     ) -> bool:
         if memory.is_archived or str(memory.user_id) != str(user_id):
             return False
+        now = datetime.now(UTC)
+        for name, starts in (("effective_from", True), ("effective_until", False), ("expires_at", False)):
+            value = getattr(memory, name, None)
+            if value is None:
+                continue
+            if not isinstance(value, datetime):
+                return False
+            value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+            if (starts and value > now) or (not starts and value <= now):
+                return False
         if proxy_user_id:
             if str(memory.proxy_user_id) != str(proxy_user_id) or not tenant_id:
                 return False
@@ -1587,6 +1672,7 @@ class ConflictResolver:
             memory.content, memory.category, memory.is_archived,
             memory.user_id, memory.proxy_user_id, memory.updated_at,
             memory.expires_at, deepcopy(memory.metadata_json),
+            memory.effective_from, memory.effective_until,
         )
 
     def _classify_conflict(

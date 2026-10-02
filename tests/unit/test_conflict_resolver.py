@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -24,6 +25,191 @@ from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.extractor import ExtractedMemory
 from api.services.extraction_service import ExtractionService
 from api.services.llm_service import JSONSchemaResponseFormat
+
+
+def test_source_sql_context_survives_delayed_vector_index() -> None:
+    from api.services.conflict_resolver import SourceMemoryContext
+
+    existing = make_existing_memory()
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    candidate, messages = source_candidate("Go might replace Python, but I have not decided.")
+    candidate.validated_evidence.update(claim_state="uncertain_change", governance_directive="clarify_if_conflict")
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(existing.id), state="tentative", relation="ambiguous", option={
+            "attribute": "backend language", "value": "Go", "category": "expertise",
+        },
+    )), total_tokens=20)
+    vectors = MagicMock()
+    vectors.search_memories.return_value = []
+    resolver = ConflictResolver(session=FakeSession(existing, proxy), qdrant_service=vectors,
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((existing,), complete=True))
+    assert [row.resolution for row in stored] == ["CLARIFICATION_PENDING"]
+    assert not existing.is_archived
+    assert json.loads(model.complete_sync.call_args.kwargs["user_message"])["existing_candidates"][0]["id"] == str(existing.id)
+    vectors.search_memories.assert_not_called()
+
+
+def test_unknown_source_context_cannot_admit_a_novel_claim() -> None:
+    from api.db.vector_store import VectorSearchUnavailable
+    from api.services.conflict_resolver import SourceMemoryContext
+
+    candidate, messages = source_candidate("I now build backend APIs in Go.")
+    vectors = MagicMock()
+    vectors.search_memories.side_effect = VectorSearchUnavailable()
+    model = MagicMock()
+    resolver = ConflictResolver(session=FakeSession(), qdrant_service=vectors,
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    assert resolver.check_and_store([candidate], user_id=str(uuid.uuid4()),
+        source_context=SourceMemoryContext((), complete=False)) == []
+    assert "source_search_unavailable" in resolver.last_pending_candidates[0].validated_evidence["source_decision"]["reason_codes"]
+    model.complete_sync.assert_not_called()
+
+
+@pytest.mark.parametrize("context_kind", ["missing", "unavailable", "gap_overflow", "candidate_overflow"])
+def test_incomplete_source_context_stays_pending_without_model_call(context_kind):
+    from api.db.vector_store import QdrantService
+    from api.services.conflict_resolver import MAX_SOURCE_CONTEXT_CANDIDATES, SourceMemoryContext
+
+    existing = make_existing_memory()
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    rows = [existing]
+    if context_kind == "candidate_overflow":
+        for _ in range(MAX_SOURCE_CONTEXT_CANDIDATES):
+            row = make_existing_memory()
+            row.user_id, row.proxy_user_id = existing.user_id, existing.proxy_user_id
+            rows.append(row)
+    context = SourceMemoryContext(tuple(rows), complete=True,
+        available=context_kind != "unavailable", index_gaps_complete=context_kind != "gap_overflow")
+    candidate, messages = source_candidate("I now build backend APIs in Go.")
+    model = MagicMock()
+    vectors = MagicMock(spec=QdrantService)
+    resolver = ConflictResolver(session=FakeSession(existing, proxy), qdrant_service=vectors,
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    assert resolver.check_and_store([candidate], user_id=str(existing.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=None if context_kind == "missing" else context) == []
+    assert len(resolver.last_pending_candidates) == 1
+    model.complete_sync.assert_not_called()
+    vectors.search_memories.assert_not_called()
+
+
+def test_partial_context_requires_strict_search_and_deduplicates_sql_targets():
+    from api.db.vector_store import QdrantService
+    from api.services.conflict_resolver import SourceMemoryContext
+
+    existing = make_existing_memory()
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    candidate, messages = source_candidate("I now build backend APIs in Go.")
+    vectors = MagicMock(spec=QdrantService)
+    vectors.search_memories.return_value = [SimpleNamespace(id=str(existing.id), score=0.9, payload={})]
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(existing.id), relation="supersedes")), total_tokens=20)
+    resolver = ConflictResolver(session=FakeSession(existing, proxy), qdrant_service=vectors,
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    stored = resolver.check_and_store([candidate], user_id=str(existing.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((existing,), complete=False))
+    assert stored and existing.is_archived
+    assert vectors.search_memories.call_args.kwargs["require_available"] is True
+    assert len(json.loads(model.complete_sync.call_args.kwargs["user_message"])["existing_candidates"]) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("is_archived", True), ("user_id", uuid.uuid4()), ("proxy_user_id", uuid.uuid4()),
+    ("expires_at", datetime.now(UTC) - timedelta(days=1)),
+    ("effective_until", datetime.now(UTC) - timedelta(days=1)),
+    ("effective_from", datetime.now(UTC) + timedelta(days=1)),
+])
+def test_sql_context_cannot_nominate_noncurrent_or_foreign_targets(field, value):
+    from api.services.conflict_resolver import SourceMemoryContext
+
+    existing = make_existing_memory()
+    user_id, proxy_id = existing.user_id, existing.proxy_user_id
+    proxy = ProxyUser(id=proxy_id, tenant_id=uuid.uuid4())
+    setattr(existing, field, value)
+    candidate, messages = source_candidate("I now build backend APIs in Go.")
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(existing.id), relation="supersedes")), total_tokens=20)
+    resolver = ConflictResolver(session=FakeSession(existing, proxy), qdrant_service=MagicMock(),
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    assert resolver.check_and_store([candidate], user_id=str(user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy_id),
+        source_context=SourceMemoryContext((existing,), complete=True)) == []
+    assert json.loads(model.complete_sync.call_args.kwargs["user_message"])["existing_candidates"] == []
+
+
+def test_claims_in_same_batch_reuse_new_sql_memory_before_indexing():
+    from api.services.conflict_resolver import SourceMemoryContext
+
+    first, messages = source_candidate("I now build backend APIs in Go.")
+    second = make_new_memory(first.content)
+    second.validated_evidence = dict(first.validated_evidence)
+    model = MagicMock()
+    prompts = []
+
+    def decision(**kwargs):
+        prompt = json.loads(kwargs["user_message"])
+        prompts.append(prompt)
+        targets = prompt["existing_candidates"]
+        payload = source_response(targets[0]["id"], relation="duplicate") if targets else source_response()
+        return SimpleNamespace(content=json.dumps(payload), total_tokens=20)
+
+    model.complete_sync.side_effect = decision
+    proxy = ProxyUser(id=uuid.uuid4(), tenant_id=uuid.uuid4())
+    vectors = MagicMock()
+    session = FakeSession(proxy_user=proxy)
+    resolver = ConflictResolver(session=session, qdrant_service=vectors,
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    stored = resolver.check_and_store([first, second], user_id=str(uuid.uuid4()),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((), complete=True))
+    assert len(stored) == 1
+    assert prompts[0]["existing_candidates"] == []
+    assert prompts[1]["existing_candidates"][0]["id"] == stored[0].id
+    vectors.search_memories.assert_not_called()
+
+
+def test_oversized_sql_context_stays_pending_without_silent_truncation():
+    from api.services.conflict_resolver import SourceMemoryContext
+
+    existing = make_existing_memory()
+    existing.content = "x" * 32000
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    candidate, messages = source_candidate("I now build backend APIs in Go.")
+    model = MagicMock()
+    resolver = ConflictResolver(session=FakeSession(existing, proxy), qdrant_service=MagicMock(),
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    assert resolver.check_and_store([candidate], user_id=str(existing.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((existing,), complete=True)) == []
+    assert "source_input_limit" in resolver.last_pending_candidates[0].validated_evidence["source_decision"]["reason_codes"]
+    model.complete_sync.assert_not_called()
+
+
+def test_expiry_after_source_classification_stays_pending_with_stale_reason():
+    from api.services.conflict_resolver import ConflictDecision, SourceMemoryContext
+
+    existing = make_existing_memory()
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    candidate, messages = source_candidate("I now build backend APIs in Go.")
+    resolver = ConflictResolver(session=FakeSession(existing, proxy), qdrant_service=MagicMock(),
+        embedder=lambda _: [0.1] * 3, llm_service=MagicMock(), source_messages=messages)
+
+    def expires_before_apply(*_args):
+        existing.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        return existing, ConflictDecision(action="UPDATE", reasoning="Controlled decision")
+
+    resolver._classify_source_claim = expires_before_apply
+    assert resolver.check_and_store([candidate], user_id=str(existing.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((existing,), complete=True)) == []
+    assert "source_target_stale" in resolver.last_pending_candidates[0].validated_evidence["source_decision"]["reason_codes"]
 
 
 class FakeSession:
