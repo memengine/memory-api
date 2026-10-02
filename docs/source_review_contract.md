@@ -1,7 +1,8 @@
 # Non-activating source reviews
 
 Release status: backend commit `15da090` verified live on 2026-10-02;
-not yet published in either SDK. Verification used the checkout's Python client,
+Python SDK `0.1.1` published on main PyPI; TypeScript `0.1.1` upload blocked by
+npm's authenticator requirement (registry latest remains `0.1.0`). Live verification used the checkout's Python client,
 not an installed published release.
 This is a review-delivery fallback, not a new semantic classifier or an extraction
 accuracy certificate. Existing two-memory clarification contracts are unchanged.
@@ -126,3 +127,12 @@ semantic accuracy. No holdout, prompt tuning or direct provider experiment ran.
 Actual billing is not returned by job status: primary extraction reported 9,572
 input and 269 output tokens; source decisions reported 2,819 total tokens with
 no input/output split. Embedding charges and exact total cost are not measured.
+
+### SDK release verification (2026-10-02)
+
+The Python wheel and sdist passed `twine check`, uploaded to main PyPI, and their
+registry SHA-256 digests matched the local artifacts. A fresh registry install
+imported `Memory`, `AsyncMemory` and the new review types/methods successfully.
+Python SDK contract tests: 27 passed. TypeScript typecheck, ESM/CJS build and
+10 contract tests passed; the inspected seven-file npm tarball is ready for a
+user-completed publish with an authenticator code. No login retry loop ran.
