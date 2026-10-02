@@ -994,6 +994,33 @@ class ConflictResolver:
                             conflict_type=ConflictType.UNKNOWN, reason_code="source_target_stale",
                         ))
                         continue
+                    if source_decision.action == "MERGE":
+                        # Verified input spans do not validate generated merge
+                        # wording or its applicability scope. Contain this
+                        # before writer authority can turn it into an UPDATE.
+                        reasoning = (
+                            "MemoryOS preserved the current memory because automatic "
+                            "source-backed merging cannot yet verify scope preservation."
+                        )
+                        self._buffer_source_candidate(new_memory, ConflictDecision(
+                            action="CLARIFY",
+                            reasoning=reasoning,
+                            decision_evidence=review_evidence(
+                                action="USER_REVIEW",
+                                reason_codes=[
+                                    "source_merge_containment",
+                                    "scope_preservation_unverified",
+                                    "stored_source_remains_active",
+                                ],
+                                explanation=reasoning,
+                                details={
+                                    "policy": "source_merge_containment_v1",
+                                    "proposed_action": "MERGE",
+                                },
+                            ),
+                            source_review=review_intent(target),
+                        ))
+                        continue
                     candidates = [ConflictCandidate(
                         new_memory=new_memory, existing_memory=target,
                         detection_strategy="verified_source_relation",

@@ -104,6 +104,12 @@ the conflict transition on the backend.
 
 ### Source reviews (0.1.1)
 
+With source-merge containment deployed, reviews can also represent a blocked automatic
+merge, not only uncertainty. The current memory remains active and the incoming candidate
+is pending. This backend behavior uses the same SDK methods; it does not require a new
+package version. A completed ingestion job can create zero memories. Read the job outcome
+and present the returned review in your existing chat; do not report the merge as stored.
+
 When recognized uncertainty has no usable alternative, `result.source_reviews`
 may contain a non-activating review. Present its question and allowed actions in
 your existing chat. Submit the actual user's selection, never a model decision:

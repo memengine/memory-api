@@ -42,6 +42,11 @@ valid and permitted for the current request.
 | Operational reliability | Use queued extraction, transactional outbox delivery, retries, and dead-letter handling. |
 | Domain overlays | Add typed domain state without replacing the governed general engine. |
 
+Source-backed automatic merges are temporarily held for non-activating review because
+generated merged wording cannot yet guarantee applicability-scope preservation. The current
+memory remains active; this is containment, not complete automatic scope handling. See the
+[source review contract](docs/source_review_contract.md) for the release status and limits.
+
 ## Where It Fits
 
 MemoryOS does not replace an agent framework, a model, or a human knowledge base. It sits between

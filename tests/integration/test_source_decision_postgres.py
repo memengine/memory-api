@@ -342,6 +342,93 @@ def test_missing_option_review_survives_worker_and_owned_answer(sql_scope, monke
         assert pending.status == ("pending" if action == "restate" else "dismissed")
 
 
+@pytest.mark.parametrize("action", ["restate", "keep_current", "dismiss"])
+def test_contained_merge_persists_without_memory_churn_or_reinforcement_activation(
+    sql_scope, monkeypatch, action,
+):
+    """Real SQL persistence/answer lifecycle; classifier output is controlled."""
+    general = "My default language for every programming example is C++."
+    project = "For the Release Check project only, my default language for examples is C++."
+    initial, _, _ = _run(sql_scope, monkeypatch, general, _decision())
+    old_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    decision = _decision(old_id, relation="mergeable")
+    decision["merged_memory"] = {
+        "content": general, "category": "preference", "importance_score": 8,
+        "confidence": 0.99, "expiry": "permanent", "reasoning": "Controlled scope-erasing merge.",
+    }
+    with sql_scope.factory() as session:
+        original_metadata = dict(session.get(Memory, old_id).metadata_json)
+        original_versions = session.scalars(select(MemoryVersion).where(MemoryVersion.memory_id == old_id)).all()
+        original_outbox = session.scalars(select(VectorSyncOutbox).where(VectorSyncOutbox.memory_id == old_id)).all()
+        version_ids, outbox_ids = {row.id for row in original_versions}, {row.id for row in original_outbox}
+        claim_state = {(row.id, row.active_memory_id, row.winning_revision_id) for row in session.scalars(
+            select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)
+        )}
+        assert claim_state and {item[1] for item in claim_state} == {old_id}
+        revision_state = {(row.id, row.status) for row in session.scalars(
+            select(MemoryClaimRevision).where(MemoryClaimRevision.memory_id == old_id)
+        )}
+        assert revision_state
+    for repetition in range(2):
+        result, model, job_id = _run(sql_scope, monkeypatch, project, decision)
+        assert result["memories_created"] == 0 and result["stored_memories"] == []
+        assert result["pending_candidates_buffered"] == 1
+        assert result.get("pending_candidates_promoted", 0) == 0
+        assert len(model.source_prompts) == 1
+        with sql_scope.factory() as session:
+            memory, = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+            assert memory.id == old_id and memory.content == general and not memory.is_archived
+            assert memory.metadata_json == original_metadata and memory.previous_version_id is None
+            assert {row.id for row in session.scalars(select(MemoryVersion).where(MemoryVersion.memory_id == old_id))} == version_ids
+            assert {row.id for row in session.scalars(select(VectorSyncOutbox).where(VectorSyncOutbox.memory_id == old_id))} == outbox_ids
+            assert {(row.id, row.active_memory_id, row.winning_revision_id) for row in session.scalars(
+                select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)
+            )} == claim_state
+            assert {(row.id, row.status) for row in session.scalars(
+                select(MemoryClaimRevision).where(MemoryClaimRevision.memory_id == old_id)
+            )} == revision_state
+            pending, = session.scalars(select(PendingExtractionCandidate).where(PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id)).all()
+            assert pending.content == project and pending.status == "pending"
+            assert pending.reinforcement_count == repetition + 1 and pending.extraction_job_id == job_id
+            evidence = pending.metadata_json["extraction_evidence"]
+            assert evidence["source_spans"][0]["turn_id"] == str(job_id)
+            assert "source_merge_containment" in evidence["source_decision"]["reason_codes"]
+            assert evidence["source_review"] == review_intent(memory)
+
+    async def answer_and_verify():
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessions() as session:
+                scope = {"tenant_id": str(sql_scope.tenant_id), "proxy_user_id": str(sql_scope.proxy_id)}
+                reviews = await list_source_reviews(session, **scope)
+                assert len(reviews) == 1 and reviews[0].target_memory_id == str(old_id)
+                assert reviews == await list_source_reviews(session, **scope)
+                assert await list_source_reviews(session, tenant_id=str(uuid.uuid4()), proxy_user_id=str(sql_scope.proxy_id)) == []
+                request = Request({"type": "http", "method": "POST", "path": "/", "headers": []})
+                request.state.request_id = "contained-merge-sql"
+                cache = AsyncMock()
+                cache.client.get.return_value = None
+                service = ProxyUserService(session=session, cache_service=cache)
+                response = await answer_source_review(request, reviews[0].id, MemorySourceReviewAnswerRequest(
+                    external_user_id=sql_scope.external_id, version=reviews[0].version, action=action,
+                ), service, session, str(sql_scope.tenant_id))
+                assert response.data.resolved is (action != "restate")
+                assert response.data.next_step == ("add_memory" if action == "restate" else None)
+        finally:
+            await engine.dispose()
+    asyncio.run(answer_and_verify())
+    with sql_scope.factory() as session:
+        memory, = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert memory.id == old_id and not memory.is_archived and memory.content == general
+        assert memory.metadata_json == original_metadata
+        assert {(row.id, row.active_memory_id, row.winning_revision_id) for row in session.scalars(
+            select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)
+        )} == claim_state
+        pending = session.scalars(select(PendingExtractionCandidate).where(PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id)).one()
+        assert pending.status == ("pending" if action == "restate" else "dismissed")
+
+
 def test_source_review_target_change_does_not_authorize_old_answer(sql_scope, monkeypatch):
     initial, _, _ = _run(sql_scope, monkeypatch, "My default language is C++.", _decision())
     old_id = uuid.UUID(initial["stored_memories"][0]["id"])

@@ -6,6 +6,8 @@ Live verification used the checkout's Python client,
 not an installed published release.
 This is a review-delivery fallback, not a new semantic classifier or an extraction
 accuracy certificate. Existing two-memory clarification contracts are unchanged.
+The temporary merge containment described below is implemented in the checkout;
+its production deployment and live behavior have not yet been verified.
 
 ## Boundary
 
@@ -24,6 +26,26 @@ incorrect interpretations that pass the existing option checks remain separate
 limitations. This change does not fix or weaken those semantic checks.
 
 ## Retrieval contract
+
+### Temporary source-backed merge containment
+
+Source-backed `MERGE` decisions now preserve the existing active memory and buffer the
+original verified incoming candidate with decision reason `source_merge_containment`. The backend
+creates a target/version-bound source review through the existing pending store. This gate
+runs after owned-target and staleness validation, before authority resolution or any archive
+or replacement write. Higher writer priority cannot bypass it. It adds no provider call,
+new SDK schema, or customer UI requirement.
+
+This applies to every automatic merge on the `verified_source_spans` path, including
+apparently legitimate merges. Generated merge wording cannot yet prove preservation of
+source qualifiers and applicability scope. The generated merge is not stored or given the
+incoming evidence's authority. Existing ungrounded/legacy merge behavior is unchanged.
+
+This is containment, not an automatic scope repair: general/project coexistence is not
+guaranteed; source-backed `UPDATE`, extraction omissions, and semantic classification
+errors remain separate limitations. Existing review answers never activate this candidate.
+`restate` still requests normal ingestion and may remain pending again. Customers must
+use the actual job/retrieval outcome, not claim successful storage from an acknowledgement.
 
 Current `POST /v1/memories/retrieve` responses add `source_reviews`, defaulting to
 `[]`. Historical `as_of` requests do not surface current reviews. A review contains:
@@ -103,6 +125,13 @@ record, review projection and locked answer. Existing canonical clarification
 selection tests verify later retrieval returns its winner.
 Model outputs and embeddings in these lifecycle tests are controlled. They are
 not fresh real-model evaluations, independent holdouts, or load tests.
+
+The merge-containment regressions cover English/Hindi/Hinglish source text, higher/equal/lower
+writer priority, both apparently faithful and scope-erasing generated merges, and stale targets.
+Real PostgreSQL worker tests verify repeated input reinforces one pending candidate without
+archiving the current memory, creating a successor, changing its claim winner/revisions, or
+adding version/vector-outbox churn. Existing source review projection and all three review
+answers are exercised without activation. These tests establish containment, not model scope accuracy.
 
 ### Live release smoke (2026-10-02)
 
