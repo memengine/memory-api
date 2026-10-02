@@ -232,6 +232,24 @@ class MemoryClarification(BaseModel):
     expires_at: datetime | None = None
 
 
+class MemorySourceReview(BaseModel):
+    id: str
+    version: str
+    kind: Literal["restate_source"]
+    question: str
+    target_memory_id: str | None = None
+    current_memory_content: str | None = None
+    actions: list[Literal["keep_current", "restate", "dismiss"]]
+    expires_at: datetime
+
+
+class MemorySourceReviewAnswerResult(BaseModel):
+    review_id: str
+    resolved: bool
+    action: Literal["keep_current", "restate", "dismiss"]
+    next_step: Literal["add_memory"] | None = None
+
+
 class RetrieveResult(BaseModel):
     retrieval_id: str | None = None
     items: list[MemoryResult] = Field(default_factory=list)
@@ -245,6 +263,7 @@ class RetrieveResult(BaseModel):
     circuit_status: CircuitStatus = "HEALTHY"
     clarification_question: str | None = None
     clarification: MemoryClarification | None = None
+    source_reviews: list[MemorySourceReview] = Field(default_factory=list)
 
     @property
     def has_context(self) -> bool:
@@ -464,6 +483,7 @@ class RetrieveEnvelope(EnvelopeBase):
     quota_mode: QuotaMode = "FULL"
     clarification_question: str | None = None
     clarification: MemoryClarification | None = None
+    source_reviews: list[MemorySourceReview] = Field(default_factory=list)
 
 
 class RetrievalFeedbackEnvelope(EnvelopeBase):
@@ -472,6 +492,10 @@ class RetrievalFeedbackEnvelope(EnvelopeBase):
 
 class MemoryClarificationAnswerEnvelope(EnvelopeBase):
     data: MemoryClarificationAnswerResult
+
+
+class MemorySourceReviewAnswerEnvelope(EnvelopeBase):
+    data: MemorySourceReviewAnswerResult
 
 
 class MemoryListEnvelope(EnvelopeBase):

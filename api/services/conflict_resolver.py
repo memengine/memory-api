@@ -52,6 +52,7 @@ from api.services.extractor import ExtractedMemory
 from api.schemas.extraction_schemas import PendingExtractedMemory
 from api.services.extraction_service import ExtractionService as GovernedExtractionService
 from api.services.temporal_validity import temporal_validity_from_provenance
+from api.services.source_review_service import review_intent
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_archive
 from api.infra.protected_storage import encrypt_text_for_dual_write
@@ -253,6 +254,8 @@ class ConflictDecision:
     merged_memory: ExtractedMemory | None = None
     clarification_option_memory: ExtractedMemory | None = None
     decision_evidence: dict[str, Any] | None = None
+    # Backend-only outcome; never sourced from an LLM response or public input.
+    source_review: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -1419,6 +1422,7 @@ class ConflictResolver:
             validated_evidence={
                 **dict(memory.validated_evidence or {}),
                 "source_decision": decision.decision_evidence or {},
+                **({"source_review": decision.source_review} if decision.source_review else {}),
             },
         ))
 
@@ -1445,13 +1449,20 @@ class ConflictResolver:
             "candidate_count": len(target_map),
             "backend_requires_user_selection": review_required,
         }
+        pending_review = None
 
         def fail(reason_code: str) -> tuple[Memory | None, ConflictDecision]:
-            return None, self._classifier_failure_decision(
+            decision = self._classifier_failure_decision(
                 conflict_type=ConflictType.UNKNOWN,
                 reason_code=reason_code,
                 details=source_details,
             )
+            if reason_code in {
+                "source_target_missing", "source_representation_unavailable",
+                "source_option_invalid", "source_option_missing", "source_commitment_disagreement",
+            }:
+                decision.source_review = pending_review
+            return None, decision
 
         target_snapshots = {key: self._source_target_snapshot(row) for key, row in target_map.items()}
         prompt = json.dumps({
@@ -1556,6 +1567,10 @@ class ConflictResolver:
                     ).scalar_one_or_none()
                 if target is None or self._source_target_snapshot(target) != target_snapshots[str(target.id)]:
                     return fail("source_target_stale")
+            if isinstance(payload.get("reasoning"), str) and payload["reasoning"].strip() and (
+                review_required or requires_user_choice or payload["relation"] == "ambiguous"
+            ):
+                pending_review = review_intent(target)
             if review_required and target is None:
                 return fail("source_target_missing")
             value_turn_index = None
@@ -1611,6 +1626,8 @@ class ConflictResolver:
                     decision.decision_evidence or {}
                 ).get("reason_codes", []):
                     return fail("source_target_missing")
+                if "source_option_invalid" in (decision.decision_evidence or {}).get("reason_codes", []):
+                    decision.source_review = pending_review
                 return None, decision
             if review_required:
                 # Uncertainty can veto admission, never grant authority. A

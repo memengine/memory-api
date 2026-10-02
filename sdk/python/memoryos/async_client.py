@@ -27,6 +27,8 @@ from memoryos.types import (
     MemoryListEnvelope,
     MemoryPage,
     MemorySource,
+    MemorySourceReviewAnswerEnvelope,
+    MemorySourceReviewAnswerResult,
     QuotaMode,
     RetrievalFeedbackEnvelope,
     RetrievalFeedbackRequest,
@@ -203,6 +205,7 @@ class AsyncMemory:
             circuit_status=self._circuit_status_from_response(response),
             clarification_question=parsed.clarification_question,
             clarification=parsed.clarification,
+            source_reviews=parsed.source_reviews,
         )
 
     async def get_job_status(self, job_id: str) -> MemoryJobStatus:
@@ -262,6 +265,18 @@ class AsyncMemory:
         )
         parsed = RetrievalFeedbackEnvelope.model_validate(self._parse_json(response))
         return parsed.data
+
+    async def answer_source_review(
+        self, review_id: str, *, external_user_id: str, version: str, action: str,
+    ) -> MemorySourceReviewAnswerResult:
+        """Non-activating review response. Restate requires a normal add() call."""
+        if action not in {"keep_current", "restate", "dismiss"}:
+            raise ValueError("action must be one of: keep_current, restate, dismiss")
+        response = await self._request_response(
+            "POST", f"/v1/memories/source-reviews/{quote(review_id, safe='')}/answer",
+            json={"external_user_id": external_user_id, "version": version, "action": action},
+        )
+        return MemorySourceReviewAnswerEnvelope.model_validate(self._parse_json(response)).data
 
     async def answer_clarification(
         self,

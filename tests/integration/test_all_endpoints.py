@@ -300,6 +300,9 @@ class StubExecuteResult:
     def mappings(self):
         return StubMappingsResult(self._rows)
 
+    def scalars(self):
+        return StubMappingsResult(self._rows)
+
 
 class StubInternalSession:
     async def execute(self, _statement):
@@ -513,6 +516,7 @@ def test_health_docs_idempotency_and_core_endpoints(monkeypatch) -> None:
     assert second_add_response.status_code == 200
     assert first_add_response.json()["job_id"] == second_add_response.json()["job_id"]
     assert retrieve_response.status_code == 200
+    assert retrieve_response.json()["source_reviews"] == []
     assert "What you know about this user:" in retrieve_response.json()["system_prompt_addition"]
 
 

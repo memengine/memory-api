@@ -35,10 +35,13 @@ from api.db.models import ClarificationQueueStatus
 from api.db.models import CrossUserConflict
 from api.db.models import CrossUserConflictStatus
 from api.db.models import EdTechMemory
+from api.db.models import Memory
+from api.db.models import PendingExtractionCandidate
 from api.db.models import Tenant
 from api.db.cache import CacheService
 from api.schemas.requests import MemoryAddRequest
 from api.schemas.requests import MemoryClarificationAnswerRequest
+from api.schemas.requests import MemorySourceReviewAnswerRequest
 from api.schemas.requests import MemoryRetrieveRequest
 from api.schemas.requests import MemoryUpdateRequest
 from api.schemas.requests import RetrievalFeedbackRequest
@@ -58,6 +61,8 @@ from api.schemas.responses import MemoryListResponse
 from api.schemas.responses import MemoryMutationResponse
 from api.schemas.responses import MemoryRetrieveResponse
 from api.schemas.responses import MemorySearchResult
+from api.schemas.responses import MemorySourceReviewAnswerData
+from api.schemas.responses import MemorySourceReviewAnswerResponse
 from api.schemas.responses import RetrievalFeedbackData
 from api.schemas.responses import RetrievalFeedbackResponse
 from api.schemas.edtech_schemas import EdTechMemoryView
@@ -72,6 +77,7 @@ from api.services.quality_gate import QualityGateService
 from api.services.retriever import RetrieverService
 from api.services.retrieval_feedback_service import RetrievalFeedbackService
 from api.services.version_service import VersionService
+from api.services.source_review_service import list_source_reviews, intent_for, view_review
 from api.routers.common import get_request_id
 from api.routers.common import utc_now
 from api.tasks.queue_router import get_processing_eta
@@ -459,6 +465,9 @@ async def retrieve_memories(
     )
     clarification_question = clarification.question if clarification is not None else None
     clarification_ms = (time.perf_counter() - clarification_started) * 1000
+    source_reviews = await list_source_reviews(
+        session, tenant_id=tenant_id, proxy_user_id=str(proxy_user.id),
+    ) if payload.as_of is None else []
     retrieval_id = None
     feedback_started = time.perf_counter()
     try:
@@ -506,11 +515,72 @@ async def retrieve_memories(
         context_token_count=context_token_count,
         clarification_question=clarification_question,
         clarification=clarification,
+        source_reviews=source_reviews,
         quota_mode=getattr(retriever_service, "last_quota_mode", None),
         is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
         is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",
         request_id=get_request_id(request),
         timestamp=utc_now(),
+    )
+
+
+@router.post("/source-reviews/{review_id}/answer", response_model=MemorySourceReviewAnswerResponse)
+async def answer_source_review(
+    request: Request,
+    review_id: str,
+    payload: MemorySourceReviewAnswerRequest,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+) -> MemorySourceReviewAnswerResponse:
+    """Close a review, or request normal ingestion; never activate source text."""
+    try:
+        parsed_id = uuid.UUID(review_id)
+    except ValueError as exc:
+        raise APIError(status_code=404, code="REV_404", error="source_review_not_found") from exc
+    proxy = await proxy_user_service.find_existing(
+        tenant_id=tenant_id, external_user_id=payload.external_user_id,
+    )
+    if proxy is None:
+        raise APIError(status_code=404, code="REV_404", error="source_review_not_found")
+    candidate = (await session.execute(select(PendingExtractionCandidate).where(
+        PendingExtractionCandidate.id == parsed_id,
+        PendingExtractionCandidate.tenant_id == uuid.UUID(tenant_id),
+        PendingExtractionCandidate.proxy_user_id == proxy.id,
+    ).with_for_update())).scalar_one_or_none()
+    intent = intent_for(candidate) if candidate is not None else None
+    if intent is None:
+        raise APIError(status_code=404, code="REV_404", error="source_review_not_found")
+    target = None
+    if intent.get("target_memory_id"):
+        target = (await session.execute(select(Memory).where(
+            Memory.id == uuid.UUID(intent["target_memory_id"]),
+            Memory.proxy_user_id == proxy.id,
+        ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+    view = view_review(candidate, target, now=utc_now())
+    if view is None or view.version != payload.version:
+        raise APIError(status_code=409, code="REV_409", error="source_review_stale_or_closed")
+    if payload.action not in view.actions:
+        raise APIError(status_code=422, code="REV_422", error="source_review_action_unavailable")
+    resolved = payload.action != "restate"
+    if resolved:
+        # Dismiss a pending interpretation, not a stored memory. Keep-current
+        # does not increase authority or reactivate any previously archived row.
+        candidate.status = "dismissed"
+        candidate.updated_at = utc_now()
+        candidate.metadata_json = {
+            **dict(candidate.metadata_json or {}),
+            "source_review_resolution": {
+                "action": payload.action, "version": payload.version,
+                "resolved_at": utc_now().isoformat(),
+            },
+        }
+        await session.commit()
+    return MemorySourceReviewAnswerResponse(
+        data=MemorySourceReviewAnswerData(
+            review_id=review_id, resolved=resolved, action=payload.action,
+            next_step="add_memory" if not resolved else None,
+        ), request_id=get_request_id(request), timestamp=utc_now(),
     )
 
 

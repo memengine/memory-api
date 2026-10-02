@@ -140,7 +140,26 @@ export interface RetrieveResult {
   circuitStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
   clarificationQuestion: string | null;
   clarification: MemoryClarification | null;
+  sourceReviews?: MemorySourceReview[];
   readonly hasContext: boolean;
+}
+
+export interface MemorySourceReview {
+  id: string;
+  version: string;
+  kind: "restate_source";
+  question: string;
+  targetMemoryId: string | null;
+  currentMemoryContent: string | null;
+  actions: Array<"keep_current" | "restate" | "dismiss">;
+  expiresAt: string;
+}
+
+export interface MemorySourceReviewAnswerResult {
+  reviewId: string;
+  resolved: boolean;
+  action: "keep_current" | "restate" | "dismiss";
+  nextStep: "add_memory" | null;
 }
 
 export interface MemoryClarificationOption {
@@ -378,6 +397,11 @@ interface RetrieveEnvelope {
   memories_from_hot_tier?: number;
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
   clarification_question?: string | null;
+  source_reviews?: Array<{
+    id: string; version: string; kind: "restate_source"; question: string;
+    target_memory_id?: string | null; current_memory_content?: string | null;
+    actions: Array<"keep_current" | "restate" | "dismiss">; expires_at: string;
+  }>;
   clarification?: {
     id: string;
     conflict_id?: string | null;
@@ -938,6 +962,12 @@ export class MemoryOS {
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
       clarificationQuestion: payload.clarification_question ?? null,
+      sourceReviews: (payload.source_reviews ?? []).map((review) => ({
+        id: review.id, version: review.version, kind: review.kind, question: review.question,
+        targetMemoryId: review.target_memory_id ?? null,
+        currentMemoryContent: review.current_memory_content ?? null,
+        actions: review.actions, expiresAt: review.expires_at,
+      })),
       clarification: payload.clarification
         ? {
             id: payload.clarification.id,
@@ -954,6 +984,29 @@ export class MemoryOS {
       get hasContext() {
         return Boolean(payload.system_prompt_addition) && quotaMode !== "PASSTHROUGH";
       },
+    };
+  }
+
+  async answerSourceReview(params: {
+    reviewId: string; externalUserId: string; version: string;
+    action: "keep_current" | "restate" | "dismiss";
+  }): Promise<MemorySourceReviewAnswerResult> {
+    if (!["keep_current", "restate", "dismiss"].includes(params.action)) {
+      throw new Error("Invalid source review action");
+    }
+    const response = await this.requestResponse(
+      "POST", `/v1/memories/source-reviews/${encodeURIComponent(params.reviewId)}/answer`,
+      { body: JSON.stringify({
+        external_user_id: params.externalUserId, version: params.version, action: params.action,
+      }) },
+    );
+    const payload = (await this.parseJson(response)) as { data: {
+      review_id: string; resolved: boolean; action: "keep_current" | "restate" | "dismiss";
+      next_step?: "add_memory" | null;
+    } };
+    return {
+      reviewId: payload.data.review_id, resolved: payload.data.resolved,
+      action: payload.data.action, nextStep: payload.data.next_step ?? null,
     };
   }
 

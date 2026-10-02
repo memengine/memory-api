@@ -554,12 +554,13 @@ def _normalize_candidate_text(value: str) -> str:
 
 
 def _candidate_fingerprint(candidate: PendingExtractedMemory) -> str:
-    canonical = repr(
-        {
-            "category": str(candidate.category).lower(),
-            "content": _normalize_candidate_text(candidate.content),
-        }
-    )
+    fields = {
+        "category": str(candidate.category).lower(),
+        "content": _normalize_candidate_text(candidate.content),
+    }
+    if (review := candidate.validated_evidence.get("source_review")) is not None:
+        fields["source_review"] = review
+    canonical = repr(fields)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -606,6 +607,12 @@ def _candidate_polarity(value: str) -> str:
 
 
 def _can_reinforce_candidate(existing: Any, candidate: PendingExtractedMemory) -> bool:
+    incoming_review = (candidate.validated_evidence or {}).get("source_review")
+    existing_review = ((getattr(existing, "metadata_json", None) or {}).get("extraction_evidence") or {}).get("source_review")
+    # Reviews for different targets/snapshots cannot reinforce or overwrite one
+    # another merely because their prose is similar.
+    if incoming_review != existing_review:
+        return False
     return (
         _candidate_similarity(str(getattr(existing, "content", "") or ""), candidate.content)
         >= _PENDING_SIMILARITY_THRESHOLD

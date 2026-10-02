@@ -3,6 +3,35 @@ import test from "node:test";
 
 import { MemoryOS, UniversalMemoryOS } from "../dist/index.js";
 
+test("source reviews preserve lifecycle and do not submit extracted claims", async () => {
+  let body;
+  const review = {
+    id: "review-1", version: "a".repeat(64), kind: "restate_source",
+    question: "What should remain current?", target_memory_id: "memory-1",
+    current_memory_content: "User prefers C++.",
+    actions: ["keep_current", "restate", "dismiss"], expires_at: "2026-10-09T00:00:00Z",
+  };
+  const client = new MemoryOS("mem_test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (url, init) => {
+    if (url.endsWith("/retrieve")) {
+      return new Response(JSON.stringify({ data: [], cached: false, system_prompt_addition: "", source_reviews: [review] }));
+    }
+    assert.ok(url.endsWith("/source-reviews/review-1/answer"));
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ data: {
+      review_id: "review-1", resolved: false, action: "restate", next_step: "add_memory",
+    } }));
+  });
+  const retrieved = await client.get("language", "user-1");
+  assert.equal(retrieved.sourceReviews[0].targetMemoryId, "memory-1");
+  assert.equal(retrieved.sourceReviews[0].currentMemoryContent, review.current_memory_content);
+  const result = await client.answerSourceReview({
+    reviewId: "review-1", version: review.version, externalUserId: "user-1", action: "restate",
+  });
+  assert.equal(result.resolved, false);
+  assert.equal(result.nextStep, "add_memory");
+  assert.deepEqual(body, { external_user_id: "user-1", version: review.version, action: "restate" });
+});
+
 test("add forwards Idempotency-Key without adding it to the body", async () => {
   let captured;
   const fetchImpl = async (url, init) => {

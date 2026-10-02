@@ -40,8 +40,9 @@ from api.db.models import (
     VectorSyncStatus,
 )
 from api.errors import APIError
-from api.routers.memories import answer_memory_clarification
-from api.schemas.requests import MemoryClarificationAnswerRequest
+from api.routers.memories import answer_memory_clarification, answer_source_review
+from api.schemas.requests import MemoryClarificationAnswerRequest, MemorySourceReviewAnswerRequest
+from api.services.source_review_service import list_source_reviews, review_intent, view_review
 from api.services.conflict_resolver import ConflictResolver
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID, EmbeddingResult
 from api.services.extraction_service import ExtractionService
@@ -278,6 +279,139 @@ def test_pending_decision_survives_worker_processing_without_active_memory(
             select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)
         ).all()
     assert model.source_prompts[0]["supporting_user_turns"][0]["content"] == content
+
+
+@pytest.mark.parametrize("action", ["keep_current", "dismiss", "restate"])
+def test_missing_option_review_survives_worker_and_owned_answer(sql_scope, monkeypatch, action):
+    """Actual SQL worker -> public review -> locked answer; no model-quality claim."""
+    initial, _, _ = _run(sql_scope, monkeypatch, "My default code language is C++.", _decision())
+    old_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    result, _, _ = _run(sql_scope, monkeypatch,
+        "Python could replace C++, but I have not decided.",
+        _decision(old_id, state="tentative", relation="ambiguous"), claim_state="uncertain_change")
+    assert result["memories_created"] == 0 and result["pending_candidates_buffered"] == 1
+
+    async def exercise():
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessions() as session:
+                kwargs = {"tenant_id": str(sql_scope.tenant_id), "proxy_user_id": str(sql_scope.proxy_id)}
+                reviews = await list_source_reviews(session, **kwargs)
+                assert len(reviews) == 1 and reviews[0].target_memory_id == str(old_id)
+                assert reviews == await list_source_reviews(session, **kwargs)
+                assert await list_source_reviews(session, tenant_id=str(uuid.uuid4()), proxy_user_id=str(sql_scope.proxy_id)) == []
+                request = Request({"type": "http", "method": "POST", "path": "/", "headers": []})
+                request.state.request_id = "source-review-sql"
+                cache = AsyncMock()
+                cache.client.get.return_value = None
+                proxy_service = ProxyUserService(session=session, cache_service=cache)
+                with pytest.raises(APIError) as foreign:
+                    await answer_source_review(request, reviews[0].id, MemorySourceReviewAnswerRequest(
+                        external_user_id="foreign-user", version=reviews[0].version, action=action,
+                    ), proxy_service, session, str(sql_scope.tenant_id))
+                assert foreign.value.status_code == 404
+                with pytest.raises(APIError) as wrong_tenant:
+                    await answer_source_review(request, reviews[0].id, MemorySourceReviewAnswerRequest(
+                        external_user_id=sql_scope.external_id, version=reviews[0].version, action=action,
+                    ), proxy_service, session, str(uuid.uuid4()))
+                assert wrong_tenant.value.status_code == 404
+                answer = await answer_source_review(request, reviews[0].id, MemorySourceReviewAnswerRequest(
+                    external_user_id=sql_scope.external_id, version=reviews[0].version, action=action,
+                ), proxy_service, session, str(sql_scope.tenant_id))
+                assert answer.data.resolved is (action != "restate")
+                assert answer.data.next_step == ("add_memory" if action == "restate" else None)
+                if action != "restate":
+                    assert await list_source_reviews(session, **kwargs) == []
+                    with pytest.raises(APIError) as replay:
+                        await answer_source_review(request, reviews[0].id, MemorySourceReviewAnswerRequest(
+                            external_user_id=sql_scope.external_id, version=reviews[0].version, action=action,
+                        ), proxy_service, session, str(sql_scope.tenant_id))
+                    assert replay.value.status_code == 409
+                else:
+                    assert len(await list_source_reviews(session, **kwargs)) == 1
+        finally:
+            await engine.dispose()
+    asyncio.run(exercise())
+    with sql_scope.factory() as session:
+        memories = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(memories) == 1 and memories[0].id == old_id and not memories[0].is_archived
+        pending = session.scalars(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id,
+        )).one()
+        assert pending.status == ("pending" if action == "restate" else "dismissed")
+
+
+def test_source_review_target_change_does_not_authorize_old_answer(sql_scope, monkeypatch):
+    initial, _, _ = _run(sql_scope, monkeypatch, "My default language is C++.", _decision())
+    old_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    _run(sql_scope, monkeypatch, "Python might replace C++, but I have not chosen.",
+        _decision(old_id, state="tentative", relation="ambiguous"), claim_state="uncertain_change")
+    async def exercise():
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessions() as session:
+                kwargs = {"tenant_id": str(sql_scope.tenant_id), "proxy_user_id": str(sql_scope.proxy_id)}
+                review = (await list_source_reviews(session, **kwargs))[0]
+                # End the read transaction; a separate writer changes the target.
+                await session.rollback()
+                with sql_scope.factory.begin() as writer:
+                    writer.get(Memory, old_id).content = "A changed current preference"
+                request = Request({"type": "http", "method": "POST", "path": "/", "headers": []})
+                request.state.request_id = "stale-source-review"
+                cache = AsyncMock()
+                cache.client.get.return_value = None
+                with pytest.raises(APIError) as stale:
+                    await answer_source_review(request, review.id, MemorySourceReviewAnswerRequest(
+                        external_user_id=sql_scope.external_id, version=review.version, action="keep_current",
+                    ), ProxyUserService(session=session, cache_service=cache), session, str(sql_scope.tenant_id))
+                assert stale.value.status_code == 409
+                await session.rollback()
+                assert await list_source_reviews(session, **kwargs) == []
+        finally:
+            await engine.dispose()
+    asyncio.run(exercise())
+
+
+def test_stale_review_cleanup_does_not_overwrite_concurrent_refresh(sql_scope, monkeypatch):
+    initial, _, _ = _run(sql_scope, monkeypatch, "My default language is C++.", _decision())
+    old_id = uuid.UUID(initial["stored_memories"][0]["id"])
+    _run(sql_scope, monkeypatch, "Python could replace C++, but I have not decided.",
+        _decision(old_id, state="tentative", relation="ambiguous"), claim_state="uncertain_change")
+    with sql_scope.factory.begin() as writer:
+        writer.get(Memory, old_id).content = "A changed current preference"
+    refreshed = False
+    def refresh_between_read_and_expire(candidate, target, *, now):
+        nonlocal refreshed
+        view = view_review(candidate, target, now=now)
+        if not refreshed:
+            refreshed = True
+            with sql_scope.factory.begin() as writer:
+                live = writer.get(PendingExtractionCandidate, candidate.id)
+                evidence = dict(live.metadata_json["extraction_evidence"])
+                evidence["source_review"] = review_intent(writer.get(Memory, old_id))
+                live.metadata_json = {"extraction_evidence": evidence}
+        return view
+    monkeypatch.setattr("api.services.source_review_service.view_review", refresh_between_read_and_expire)
+    async def exercise():
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessions() as session:
+                kwargs = {"tenant_id": str(sql_scope.tenant_id), "proxy_user_id": str(sql_scope.proxy_id)}
+                assert await list_source_reviews(session, **kwargs) == []
+                await session.rollback()
+                # Refresh remains pending and becomes visible on the next read.
+                assert len(await list_source_reviews(session, **kwargs)) == 1
+        finally:
+            await engine.dispose()
+    asyncio.run(exercise())
+    with sql_scope.factory() as session:
+        candidate = session.scalars(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id,
+        )).one()
+        assert candidate.status == "pending"
 
 
 def _seed_context(scope, monkeypatch, *, additional=0, gaps=0):

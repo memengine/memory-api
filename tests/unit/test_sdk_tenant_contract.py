@@ -13,6 +13,47 @@ if str(SDK_PATH) not in sys.path:
 
 from memoryos import AsyncMemory, Memory
 
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.asyncio
+async def test_sdk_preserves_source_review_and_nonterminal_restatement(asynchronous):
+    import json
+    review = {
+        "id": "review-1", "version": "a" * 64, "kind": "restate_source",
+        "question": "What should be remembered?", "actions": ["restate", "dismiss"],
+        "expires_at": "2026-10-09T00:00:00Z",
+    }
+    captured = []
+    def handler(request):
+        if request.url.path.endswith("retrieve"):
+                return httpx.Response(200, json={"data": [], "cached": False,
+                    "system_prompt_addition": "", "source_reviews": [review],
+                    "request_id": "test", "timestamp": "2026-10-02T00:00:00Z"})
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"review_id": "review-1",
+            "resolved": False, "action": "restate", "next_step": "add_memory"},
+            "request_id": "test", "timestamp": "2026-10-02T00:00:00Z"})
+    client = AsyncMemory("test") if asynchronous else Memory("test")
+    if asynchronous:
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(base_url=client.base_url, transport=httpx.MockTransport(handler))
+        try:
+            retrieved = await client.get(query="language", external_user_id="u1")
+            answer = await client.answer_source_review("review-1", external_user_id="u1", version=review["version"], action="restate")
+        finally:
+            await client.close()
+    else:
+        client._client.close()
+        client._client = httpx.Client(base_url=client.base_url, transport=httpx.MockTransport(handler))
+        try:
+            retrieved = client.get(query="language", external_user_id="u1")
+            answer = client.answer_source_review("review-1", external_user_id="u1", version=review["version"], action="restate")
+        finally:
+            client.close()
+    assert retrieved.source_reviews[0].version == review["version"]
+    assert not answer.resolved and answer.next_step == "add_memory"
+    assert captured == [{"external_user_id": "u1", "version": review["version"], "action": "restate"}]
+
 ADD_RESPONSE = {
     "job_id": "job-123",
     "status": "queued",

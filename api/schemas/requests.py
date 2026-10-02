@@ -125,6 +125,12 @@ class MemoryRetrieveRequest(BaseModel):
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
 
 
+class MemorySourceReviewAnswerRequest(BaseModel):
+    external_user_id: str = Field(min_length=1)
+    version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    action: Literal["keep_current", "restate", "dismiss"]
+
+
 class MemoryClarificationAnswerRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     answer: Literal["A", "B", "both", "neither"]

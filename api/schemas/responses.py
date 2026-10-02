@@ -165,6 +165,28 @@ class MemoryClarificationData(BaseModel):
     expires_at: datetime | None = None
 
 
+class MemorySourceReview(BaseModel):
+    id: str
+    version: str
+    kind: Literal["restate_source"]
+    question: str
+    target_memory_id: str | None = None
+    current_memory_content: str | None = Field(default=None, description="Bounded preview of stored content, not a grant of user-confirmed authority.")
+    actions: list[Literal["keep_current", "restate", "dismiss"]]
+    expires_at: datetime
+
+
+class MemorySourceReviewAnswerData(BaseModel):
+    review_id: str
+    resolved: bool
+    action: Literal["keep_current", "restate", "dismiss"]
+    next_step: Literal["add_memory"] | None = None
+
+
+class MemorySourceReviewAnswerResponse(ResponseEnvelope):
+    data: MemorySourceReviewAnswerData
+
+
 class MemoryRetrieveResponse(ResponseEnvelope):
     retrieval_id: str | None = None
     data: list[MemorySearchResult]
@@ -173,6 +195,7 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     context_token_count: int = 0
     clarification_question: str | None = None
     clarification: MemoryClarificationData | None = None
+    source_reviews: list[MemorySourceReview] = Field(default_factory=list)
     quota_mode: str | None = None
     is_degraded: bool = False
     is_passthrough: bool = False
