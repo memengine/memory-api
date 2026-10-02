@@ -102,6 +102,33 @@ existing chat and send the user's answer back with
 `client.answer_clarification(...)`. MemoryOS validates identity, expiry, and
 the conflict transition on the backend.
 
+### Source reviews (0.1.1)
+
+When recognized uncertainty has no usable alternative, `result.source_reviews`
+may contain a non-activating review. Present its question and allowed actions in
+your existing chat. Submit the actual user's selection, never a model decision:
+
+```python
+review = result.source_reviews[0] if result.source_reviews else None
+if review:
+    # user_action is the user's choice from review.actions in your chat.
+    resolution = client.answer_source_review(
+        review.id,
+        external_user_id="user_1",
+        version=review.version,
+        action=user_action,
+    )
+```
+
+`keep_current` and `dismiss` close the pending interpretation without changing
+stored memory or raising authority. `restate` leaves it pending and returns
+`resolved=False`, `next_step="add_memory"`: obtain the user's actual new statement
+and submit it through normal `add()` ingestion. It is not completed storage.
+The same methods are available with `await` on `AsyncMemory`.
+Reviews are bounded to three recent items, expire seven days after the server's
+last observation, and are absent for historical retrieval. This fallback does
+not fix semantic misclassification or suppress all pending-property context.
+
 ### Filtering by time
 
 ```python

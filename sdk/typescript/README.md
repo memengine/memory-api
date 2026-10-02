@@ -154,6 +154,36 @@ When retrieval returns `result.clarification`, render its question in your
 existing chat and send the user's selected answer with
 `client.answerClarification(...)`. MemoryOS—not the model—validates identity,
 expiry, and the conflict transition.
+
+## Source reviews (0.1.1)
+
+When recognized uncertainty has no usable alternative, `result.sourceReviews`
+may contain a non-activating review. Present its question and allowed actions in
+your existing chat. Submit the actual user's selection, never a model decision:
+
+```ts
+const review = result.sourceReviews?.[0];
+if (review) {
+  // userAction is the user's choice from review.actions in your chat.
+  const resolution = await client.answerSourceReview({
+    reviewId: review.id,
+    externalUserId: "user_1",
+    version: review.version,
+    action: userAction,
+  });
+}
+```
+
+`keep_current` and `dismiss` close the pending interpretation without changing
+stored memory or raising authority. `restate` leaves it pending and returns
+`resolved: false`, `nextStep: "add_memory"`: obtain the user's actual new statement
+and submit it through normal `add()` ingestion. It is not completed storage.
+Reviews are bounded to three recent items, expire seven days after the server's
+last observation, and are absent for historical retrieval. This fallback does
+not fix semantic misclassification or suppress all pending-property context.
+
+## Other operations
+
 11. Call `delete()` to archive or hard-delete a memory.
 12. Call `export()` to download the user export bundle.
 13. All failures throw typed SDK errors.
