@@ -6,8 +6,10 @@ Live verification used the checkout's Python client,
 not an installed published release.
 This is a review-delivery fallback, not a new semantic classifier or an extraction
 accuracy certificate. Existing two-memory clarification contracts are unchanged.
-The temporary merge containment described below is implemented in the checkout;
-its production deployment and live behavior have not yet been verified.
+The temporary merge containment described below was deployed as `4bd0fbc`: API health
+and one fresh stored memory's worker provenance match that commit. Its specific live
+containment branch remains unexercised; the project candidate in the one approved smoke
+was rejected by extraction evidence validation before the source classifier ran.
 
 ## Boundary
 
@@ -156,6 +158,23 @@ semantic accuracy. No holdout, prompt tuning or direct provider experiment ran.
 Actual billing is not returned by job status: primary extraction reported 9,572
 input and 269 output tokens; source decisions reported 2,819 total tokens with
 no input/output split. Embedding charges and exact total cost are not measured.
+
+### Merge-containment deployment smoke (2026-10-02)
+
+One approved check used a fresh synthetic user and the unchanged general/project-only
+C++ statements. Both jobs completed without retries. Setup created one general memory;
+the project job reported one model-returned candidate, one `evidence_validation` rejection,
+zero created memories, zero pending candidates, and zero source-classifier calls. No
+source review was returned. The original memory ID, content, lineage, authority and history
+remained unchanged; foreign-user retrieval returned no memory, review, or clarification.
+
+This verifies API/one worker deployment and observed preservation, not execution of
+`source_merge_containment` or successful scoped ingestion. The public rejection count
+does not reveal the exact invalid candidate field, so do not attribute it to a specific
+quote/content/role error. No retry, prompt edit, gate relaxation, review answer or holdout
+run followed. Raw evidence is ignored at
+`artifacts/internal-benchmarks/source-merge-containment-live-20261002-01.json`.
+Recorded model tokens: 11,180; exact billing and embeddings cost are not returned.
 
 ### SDK release verification (2026-10-02)
 
