@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "split": "development",
+  "version": "scoped-review-development-v1",
+  "description": "Regression from the manually observed signed-in assistant journey on 2026-10-02. Visible development data, not a holdout or a release benchmark. Seed the pre-existing general preference explicitly on a fresh synthetic user. No assistant history is provided to retrieval.",
+  "scenarios": [
+    {
+      "id": "en_scoped_review_restatement",
+      "language": "en",
+      "family": "scoped_review_restatement",
+      "safety_critical": true,
+      "initial_messages": [
+        {"role": "user", "content": "My default language for every programming example is C++."},
+        {"role": "user", "content": "For the synthetic Release Check project only, my default language for programming examples is C++"}
+      ],
+      "warm_query": "Which language should you use for Release Check examples, and what is my default outside that project?",
+      "update_messages": [
+        {"role": "user", "content": "For the Release Check project, I'm torn between keeping C++ and switching to Python. I haven't settled on either yet."}
+      ],
+      "verification_query": "Which language should you use for Release Check examples, and what is my default outside that project?",
+      "expected": {
+        "clarification_required": false,
+        "governance_attention_required": true,
+        "require_initial_memory": true,
+        "must_include_all": ["release check", "c++"],
+        "must_exclude_all": ["python"],
+        "authority_label": "client_assertion",
+        "authority_level": 20,
+        "verify_foreign_user_isolation": true
+      },
+      "restatement": {
+        "messages": [
+          {"role": "user", "content": "I've decided: for the synthetic Release Check project only, Python replaces my earlier C++ default. My preferences outside this project are unchanged."}
+        ],
+        "initial_project": {"contains_all": ["release check", "c++"]},
+        "general": {"contains_all": ["c++"], "contains_none": ["release check"]},
+        "replacement": {"contains_all": ["release check", "python"]}
+      }
+    }
+  ]
+}

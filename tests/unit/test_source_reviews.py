@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -234,3 +235,94 @@ async def test_review_answer_requires_write_permission():
         policy_request(method="POST", path="/v1/memories/source-reviews/id/answer", permissions=("read",)), call_next,
     )
     assert response.status_code == 403
+
+
+def test_scoped_restatement_updates_only_selected_project_memory():
+    """Real resolver with controlled model output; not a semantic accuracy test."""
+    from unittest.mock import MagicMock
+
+    from api.db.models import MemoryCategory
+    from api.services.conflict_resolver import ConflictResolver, SourceMemoryContext
+
+    project, general = make_existing_memory(), make_existing_memory()
+    general.user_id, general.proxy_user_id = project.user_id, project.proxy_user_id
+    project.category = general.category = MemoryCategory.preference
+    project.content = "For the synthetic Release Check project only, use C++."
+    general.content = "My default language for every programming example is C++."
+    general_before = (general.content, general.is_archived, copy.deepcopy(general.metadata_json))
+    proxy = ProxyUser(id=project.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(project, proxy)
+    session.add(general)
+    uncertain, uncertain_messages = source_candidate(
+        "For the Release Check project, I'm torn between keeping C++ and switching to Python. I haven't settled on either yet.",
+    )
+    uncertain.category = "preference"
+    uncertain.validated_evidence["claim_state"] = "uncertain_change"
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(project.id), state="tentative", relation="ambiguous",
+    )), total_tokens=20)
+    first_resolver = ConflictResolver(session=session, qdrant_service=MagicMock(),
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=uncertain_messages)
+    assert first_resolver.check_and_store([uncertain], user_id=str(project.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((project, general), complete=True)) == []
+    assert not project.is_archived and not general.is_archived
+    pending = candidate_for(project, evidence=first_resolver.last_pending_candidates[0].validated_evidence)
+    assert view_review(pending, project, now=datetime.now(UTC)) is not None
+    text = "I've decided: for the synthetic Release Check project only, Python replaces my earlier C++ default. My preferences outside this project are unchanged."
+    incoming, messages = source_candidate(text)
+    incoming.category = "preference"
+    model = MagicMock()
+    model.complete_sync.return_value = SimpleNamespace(content=json.dumps(source_response(
+        str(project.id), relation="supersedes",
+    )), total_tokens=20)
+    resolver = ConflictResolver(session=session, qdrant_service=MagicMock(),
+        embedder=lambda _: [0.1] * 3, llm_service=model, source_messages=messages)
+    stored = resolver.check_and_store([incoming], user_id=str(project.user_id),
+        tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id),
+        source_context=SourceMemoryContext((project, general), complete=True))
+    assert len(stored) == 1 and project.is_archived
+    replacement = session.memories[stored[0].id]
+    assert not replacement.is_archived and replacement.previous_version_id == project.id
+    assert replacement.content == text
+    assert (general.content, general.is_archived, general.metadata_json) == general_before
+    assert view_review(pending, project, now=datetime.now(UTC)) is None
+    assert "source_review_resolution" not in pending.metadata_json
+    prompt = json.loads(model.complete_sync.call_args.kwargs["user_message"])
+    assert {row["id"] for row in prompt["existing_candidates"]} == {str(project.id), str(general.id)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rowcount", [0, 1])
+async def test_archived_target_expires_review_with_cas_not_user_resolution(rowcount):
+    from sqlalchemy.sql.dml import Update
+
+    target = make_existing_memory()
+    candidate = candidate_for(target)
+    target.is_archived = True
+
+    class Rows:
+        def __init__(self, rows): self.rows = rows
+        def scalars(self): return self
+        def all(self): return self.rows
+
+    class Session:
+        def __init__(self): self.statements, self.commits = [], 0
+        async def execute(self, statement):
+            self.statements.append(statement)
+            if isinstance(statement, Update):
+                return SimpleNamespace(rowcount=rowcount)
+            return Rows([candidate] if "pending_extraction_candidates" in str(statement) else [target])
+        async def commit(self): self.commits += 1
+
+    session = Session()
+    assert await list_source_reviews(session, tenant_id=str(candidate.tenant_id),
+        proxy_user_id=str(candidate.proxy_user_id)) == []
+    assert session.commits == rowcount
+    update = session.statements[-1]
+    values = update.compile().params
+    assert values["status"] == "expired"
+    for field in ("tenant_id", "proxy_user_id", "status", "content", "last_seen_at", "metadata"):
+        assert field in str(update.whereclause)
+    assert "source_review_resolution" not in candidate.metadata_json

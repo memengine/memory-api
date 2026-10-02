@@ -66,6 +66,53 @@ foreign-user leak, forged evidence acceptance, tool/document promotion, duplicat
 or superseded-memory leak. Failures are development evidence and may be diagnosed; they are not
 public benchmark claims and must not be repaired with case-specific phrases or regexes.
 
+### Scoped review and normal-chat restatement regression
+
+`datasets/governed_memory/development/scoped_review_v1.json` preserves the visible signed-in
+assistant journey observed on 2026-10-02. It is development data, not a holdout or a model-quality
+baseline. The manual screenshots showed project-only C++ retained during uncertainty, an in-chat
+source review, a pending **State it again** acknowledgement, and later retrieval of project-only
+Python alongside the unchanged general C++ default. They did not prove database lineage or the
+pending row's final status.
+
+The existing replay runner now supports this optional restatement stage. A fresh synthetic user
+receives both the general and project defaults explicitly; retrieval gets no assistant history.
+The evaluator requires distinct memory IDs, verified job-created IDs, a review or canonical
+clarification during uncertainty, and no active undecided replacement. If a source review is
+returned, the runner answers only `restate`, checks that the same review/version is redelivered,
+and verifies that neither stored memory changed before submitting the actual user correction
+through ordinary ingestion. A canonical clarification is recorded as a different valid attention
+path, not falsely reported as exercising the review click.
+
+After processing, the evaluator reads public memory/history endpoints and requires an archived
+project predecessor, an active replacement linked by `previous_version_id`, recorded history
+transitions, unchanged general identity/content/authority, and correct source provenance. It also
+requires the old project memory to be absent from retrieval. A disappeared review plus a stale
+`restate` HTTP 409 proves only that the old action is unavailable; the public API does not expose
+whether the pending row expired or was otherwise closed. The local service test separately
+checks that an archived target produces a conditional `expired` update, not a user-resolution
+record, and cannot overwrite a concurrently refreshed candidate.
+
+Inspect the plan without credentials or network calls:
+
+```powershell
+python scripts/governed_memory_phase0_replay.py --fixture benchmarks/internal/datasets/governed_memory/development/scoped_review_v1.json
+```
+
+Local contracts (controlled model/HTTP/session responses, not a live database or provider eval):
+
+```powershell
+python -m pytest tests/unit/test_scoped_review_journey.py tests/unit/test_source_reviews.py tests/unit/test_governed_memory_phase0_replay.py tests/unit/test_governed_memory_development_journeys.py -q
+```
+
+A live run still needs separate approval and `--execute`. Do not use the signed-in person's
+identity, frozen holdouts, or screenshots as automated ground truth. Keep raw artifacts under the
+ignored `artifacts/internal-benchmarks` tree. Failed journey evaluations now return a nonzero
+exit status. Source-review answer, add acknowledgement, retrieval, and background processing
+timings remain separate; no extraction wait was added to the customer assistant. The runner
+does not invoke an answer-generation model, measure browser first-token latency, or claim p99
+performance or exact provider cost.
+
 ## Sealed holdout release protocol
 
 The holdout pack is not a CI fixture and must never be restored from Git. The command below is a
