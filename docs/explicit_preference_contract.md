@@ -88,11 +88,21 @@ authority. There is no new table, index migration, or duplicate memory store.
 Legacy conflict nomination excludes declared preferences. Generic content edits
 or unarchiving of a declared preference are rejected; use version-bound replacement.
 Importance edits and deletion/archive retain the existing authorized operations.
-Soft archive is a tombstone in v1: it immediately removes that winner from
-context, but fresh assertions against the archived identity remain pending;
-generic unarchive is not supported. Hard deletion uses the existing claim
-reconciliation path. Automatic renewal of soft-archived identities is a separate
-lifecycle gate, not an implicit authority reset.
+Soft archive is a tombstone: ordinary assertions against it remain pending;
+generic unarchive is not supported. Archive/deletion lock ledger then memory,
+the same order as replacement, and archive the current ledger/revision without
+clearing its target reference or authority. Archiving an old superseded revision
+does not change its successor. Archived preferences never enter scoped context;
+an applicable global preference can resume as fallback.
+
+An intentional `replacement` can renew an archived winner with its exact ID and
+post-archive version, unchanged ownership/applicability and authority checks.
+Renewal creates a new memory linked to the archived predecessor, even for an
+identical value; it never silently unarchives the old row. Existing authorized
+get/list/update responses also expose response-only `provenance.preference_version`,
+including archived targets. Hard deletion reconciles claims without resurrecting
+superseded revisions. An archived target that is no longer the ledger's winner
+cannot be renewed. No automatic authority reset or linguistic inference occurs.
 
 ## Context-aware reads
 
@@ -151,8 +161,13 @@ these tests are controlled; they do not measure language understanding.
 Still separate work: application/SDK integration contract, scoped historical
 reads, agent-bound identities, automatic property/applicability/commitment
 admission, independent semantic evaluation, and load/latency measurement.
-Before production enablement, review-list query plans/indexing and pending-row
-retention bounds must also be verified at expected volume: the owner/status
-index and a response limit alone do not bound JSON-filter scanning cost. No
+Local review lookup checks now cover 1K/10K/100K synthetic rows, one and sixteen
+property keys, legacy and empty-result reads, including forced generic prepared
+plans for scoped lookup. Fixed policy predicates/JSON paths remain SQL constants;
+caller identity and property values remain bound parameters. A targeted partial expression index
+reduced buffer work at 100K rows; an additional partial age index supports bounded
+background expiration/retention. These checks are isolated SQL plans, not loaded
+production p99, provider latency, or throughput measurements. See the review
+contract for deadlines, storage caps and explicit capacity-rejection outcomes. No
 customer agent prompt or new UI was changed to make these tests pass. SDK, MCP,
 assistant and universal-path changes are intentionally outside this slice.

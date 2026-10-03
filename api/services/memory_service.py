@@ -484,6 +484,9 @@ class MemoryService:
         next_embedding: EmbeddingResult | None = None
         if requires_vector_sync and not next_archived:
             next_embedding = await self._embed_content(next_content)
+        if is_archived is True:
+            from api.services.preference_claim_service import lock_preference_lifecycle
+            memory = await lock_preference_lifecycle(self.session, memory, archive=True)
         if content is not None:
             memory.content = content
             if tenant_id is not None:
@@ -564,6 +567,8 @@ class MemoryService:
             tenant_id=tenant_id,
             external_user_id=external_user_id,
         )
+        from api.services.preference_claim_service import lock_preference_lifecycle
+        memory = await lock_preference_lifecycle(self.session, memory, archive=not hard_delete)
         if hard_delete:
             await VersionService(self.session).asafe_record_version(
                 memory,

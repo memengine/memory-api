@@ -99,6 +99,7 @@ def _log_add_benchmark_phases(**phases_ms: float) -> None:
 
 
 def _memory_to_data(memory) -> MemoryData:
+    from api.services.preference_claim_service import preference_provenance
     return MemoryData(
         id=str(memory.id),
         content=memory.content,
@@ -114,7 +115,7 @@ def _memory_to_data(memory) -> MemoryData:
         previous_version_id=str(memory.previous_version_id) if memory.previous_version_id else None,
         source_conversation_id=str(memory.source_conversation_id) if memory.source_conversation_id else None,
         source_event_id=str(getattr(memory, "source_event_id", None)) if getattr(memory, "source_event_id", None) else None,
-        provenance=(getattr(memory, "metadata_json", None) or {}).get("provenance"),
+        provenance=preference_provenance(memory),
         metadata=memory.metadata_json or {},
     )
 
@@ -563,10 +564,18 @@ async def answer_source_review(
         raise APIError(status_code=404, code="REV_404", error="source_review_not_found")
     target = None
     if intent.get("target_memory_id"):
-        target = (await session.execute(select(Memory).where(
-            Memory.id == uuid.UUID(intent["target_memory_id"]),
-            Memory.proxy_user_id == proxy.id,
-        ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+        from sqlalchemy.exc import OperationalError
+        try:
+            # Workers lock target then candidate. Do not wait in the reverse
+            # order while answering a review; fail with a retryable conflict.
+            target = (await session.execute(select(Memory).where(
+                Memory.id == uuid.UUID(intent["target_memory_id"]),
+                Memory.proxy_user_id == proxy.id,
+            ).with_for_update(nowait=True).execution_options(populate_existing=True))).scalar_one_or_none()
+        except OperationalError as exc:
+            if (getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)) == "55P03":
+                raise APIError(status_code=409, code="REV_409", error="source_review_target_busy_retry") from exc
+            raise
     view = view_review(candidate, target, now=utc_now())
     if view is None or view.version != payload.version:
         raise APIError(status_code=409, code="REV_409", error="source_review_stale_or_closed")

@@ -553,7 +553,7 @@ def _normalize_candidate_text(value: str) -> str:
     return " ".join(value.strip().lower().rstrip(".?!").split())
 
 
-def _candidate_fingerprint(candidate: PendingExtractedMemory) -> str:
+def _candidate_fingerprint(candidate: PendingExtractedMemory, *, review_generation: str | None = None) -> str:
     from api.services.preference_claim_service import PREFERENCE_MARKER
     if PREFERENCE_MARKER in candidate.validated_evidence:
         fields = {
@@ -561,6 +561,8 @@ def _candidate_fingerprint(candidate: PendingExtractedMemory) -> str:
             "declaration": candidate.validated_evidence[PREFERENCE_MARKER],
             "source_review": candidate.validated_evidence.get("source_review"),
         }
+        if review_generation is not None:
+            fields["review_generation"] = review_generation
         return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     fields = {
         "category": str(candidate.category).lower(),
@@ -568,6 +570,8 @@ def _candidate_fingerprint(candidate: PendingExtractedMemory) -> str:
     }
     if (review := candidate.validated_evidence.get("source_review")) is not None:
         fields["source_review"] = review
+        if review_generation is not None:
+            fields["review_generation"] = review_generation
     canonical = repr(fields)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -645,8 +649,18 @@ def _find_matching_pending_candidate(
     proxy_user_id: uuid.UUID,
     candidate: PendingExtractedMemory,
     fingerprint: str,
+    review_generation: uuid.UUID | None = None,
+    review_created_at: datetime | None = None,
 ) -> tuple[PendingExtractionCandidate | None, bool]:
     from api.services.preference_claim_service import PREFERENCE_MARKER
+    from api.services.source_review_service import is_source_review, reserve_review_capacity
+    if is_source_review(candidate):
+        row = reserve_review_capacity(
+            session, tenant_id=tenant_id, proxy_user_id=proxy_user_id, fingerprint=fingerprint,
+            legacy_fingerprint=_candidate_fingerprint(candidate), generation=review_generation,
+            generation_created_at=review_created_at,
+        )
+        return row, False
     if PREFERENCE_MARKER in candidate.validated_evidence:
         from sqlalchemy.dialects.postgresql import insert
         # Exact declaration identity only: no fuzzy full-category scan and no
@@ -727,6 +741,7 @@ def _persist_pending_extraction_candidates(
     proxy_user_id: str,
     extraction_job_id: str | None,
     source_event_id: str | None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> int:
     if not candidates:
         return 0
@@ -737,16 +752,46 @@ def _persist_pending_extraction_candidates(
     event_uuid = uuid.UUID(str(source_event_id)) if source_event_id else None
     now = datetime.now(UTC)
     buffered = 0
+    review_created_at = now
+    from api.services.source_review_service import REVIEW_TTL, ReviewCapacityExceeded, is_source_review
+    if job_uuid and any(is_source_review(c) for c in candidates):
+        job = session.get(ExtractionJob, job_uuid)
+        if job is None or job.tenant_id != tenant_uuid or job.proxy_user_id != proxy_user_uuid:
+            raise ValueError("source_review_generation_unavailable")
+        review_created_at = job.created_at
+        if review_created_at.tzinfo is None:
+            review_created_at = review_created_at.replace(tzinfo=UTC)
 
     for candidate in candidates:
-        fingerprint = _candidate_fingerprint(candidate)
-        existing, conflict_candidate = _find_matching_pending_candidate(
-            session,
-            tenant_id=tenant_uuid,
-            proxy_user_id=proxy_user_uuid,
-            candidate=candidate,
-            fingerprint=fingerprint,
-        )
+        review = is_source_review(candidate)
+        if review and review_created_at + REVIEW_TTL <= now:
+            if diagnostics is not None:
+                diagnostics["source_reviews_closed_replays"] = diagnostics.get("source_reviews_closed_replays", 0) + 1
+            continue
+        fingerprint = _candidate_fingerprint(candidate, review_generation=str(job_uuid) if review and job_uuid else None)
+        try:
+            existing, conflict_candidate = _find_matching_pending_candidate(
+                session, tenant_id=tenant_uuid, proxy_user_id=proxy_user_uuid,
+                candidate=candidate, fingerprint=fingerprint,
+                review_generation=job_uuid if review else None,
+                review_created_at=review_created_at if review else None,
+            )
+        except ReviewCapacityExceeded:
+            if diagnostics is None:
+                raise
+            diagnostics["source_reviews_capacity_rejected"] = diagnostics.get("source_reviews_capacity_rejected", 0) + 1
+            LOGGER.warning("source_review_capacity_exceeded", extra={"tenant_id": tenant_id, "proxy_user_id": proxy_user_id})
+            continue
+        if review and existing is not None:
+            created_at = existing.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            if existing.status != "pending" or created_at + REVIEW_TTL <= now or review_created_at < created_at:
+                if existing.status == "pending" and created_at + REVIEW_TTL <= now:
+                    existing.status, existing.updated_at = "expired", now
+                if diagnostics is not None:
+                    diagnostics["source_reviews_closed_replays"] = diagnostics.get("source_reviews_closed_replays", 0) + 1
+                continue
 
         if existing is None:
             if conflict_candidate:
@@ -768,6 +813,7 @@ def _persist_pending_extraction_candidates(
                 reinforcement_count=1,
                 metadata_json={"conflict_candidate": True} if conflict_candidate else {},
                 last_seen_at=now,
+                created_at=review_created_at if review else now,
             )
         else:
             existing.extraction_job_id = job_uuid or existing.extraction_job_id
@@ -784,6 +830,8 @@ def _persist_pending_extraction_candidates(
                 existing.status = "pending"
 
         session.add(existing)
+        if review:
+            existing.metadata_json = {**dict(existing.metadata_json or {}), "review_base_fingerprint": _candidate_fingerprint(candidate)}
         if candidate.validated_evidence:
             existing.metadata_json = {
                 **dict(existing.metadata_json or {}),
@@ -1491,6 +1539,7 @@ def run_extraction_pipeline(
             proxy_user_id=proxy_user_id,
             extraction_job_id=str(job_payload.get("job_id") or "") or None,
             source_event_id=str(source_event.id) if source_event is not None else None,
+            diagnostics=extraction_meta.setdefault("extraction_metadata", {}),
         )
         extraction_meta["pending_candidates_buffered"] = pending_candidates_buffered
         extraction_meta["uncertain_changes_routed"] = len(uncertain_changes)
@@ -1585,6 +1634,7 @@ def run_extraction_pipeline(
                 proxy_user_id=proxy_user_id,
                 extraction_job_id=str(job_payload.get("job_id") or "") or None,
                 source_event_id=str(source_event.id) if source_event is not None else None,
+                diagnostics=extraction_meta.setdefault("extraction_metadata", {}),
             )
         source_tokens = int(getattr(resolver, "last_source_decision_tokens_used", 0) or 0)
         extraction_meta["tokens_used"] = int(extraction_meta.get("tokens_used", 0) or 0) + source_tokens

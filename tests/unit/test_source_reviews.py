@@ -131,7 +131,7 @@ async def test_stale_review_cannot_be_answered(change):
     elif change == "owner":
         target.proxy_user_id = uuid.uuid4()
     elif change == "expiry":
-        candidate.last_seen_at = datetime.now(UTC) - timedelta(days=8)
+        candidate.created_at = datetime.now(UTC) - timedelta(days=8)
     elif change == "future":
         target.effective_from = datetime.now(UTC) + timedelta(days=1)
     elif change == "closed":
@@ -326,3 +326,47 @@ async def test_archived_target_expires_review_with_cas_not_user_resolution(rowco
     for field in ("tenant_id", "proxy_user_id", "status", "content", "last_seen_at", "metadata"):
         assert field in str(update.whereclause)
     assert "source_review_resolution" not in candidate.metadata_json
+
+
+def test_reinforcement_cannot_extend_review_deadline():
+    candidate = candidate_for()
+    original = view_review(candidate, None, now=datetime.now(UTC))
+    candidate.last_seen_at += timedelta(days=30)
+    assert view_review(candidate, None, now=datetime.now(UTC)).expires_at == original.expires_at
+    assert view_review(candidate, None, now=candidate.created_at + timedelta(days=7)) is None
+
+
+@pytest.mark.asyncio
+async def test_busy_target_answer_is_conflict_not_a_deadlock():
+    from sqlalchemy.exc import OperationalError
+    target = make_existing_memory()
+    candidate = candidate_for(target)
+    class Session(_Session):
+        async def execute(self, statement):
+            if "memories" in str(statement):
+                from sqlalchemy.dialects import postgresql
+                assert "NOWAIT" in str(statement.compile(dialect=postgresql.dialect()))
+                error = Exception("synthetic row lock unavailable")
+                error.pgcode = "55P03"
+                raise OperationalError("synthetic", {}, error)
+            return await super().execute(statement)
+    session = Session(candidate)
+    with pytest.raises(APIError) as raised:
+        await answer_source_review(_request(), str(candidate.id), MemorySourceReviewAnswerRequest(
+            external_user_id="u1", version=review_version(candidate), action="dismiss",
+        ), _ProxyUserService(candidate.proxy_user_id), session, str(candidate.tenant_id))
+    assert raised.value.status_code == 409
+    assert candidate.status == "pending" and session.commits == 0
+
+
+def test_review_maintenance_is_registered_and_bounded_settings():
+    from api.celery_app import create_celery_app
+    from api.settings import Settings
+    from api.tasks.source_review_tasks import SOURCE_REVIEW_MAINTENANCE_TASK
+    app = create_celery_app()
+    assert app.conf.beat_schedule["maintain-source-reviews"]["task"] == SOURCE_REVIEW_MAINTENANCE_TASK
+    assert "api.tasks.source_review_tasks" in app.conf.imports
+    settings = Settings(_env_file=None)
+    assert settings.explicit_preference_claims_enabled is False
+    assert settings.source_review_profile_row_limit == 256
+    assert settings.source_review_tenant_row_limit == 10000

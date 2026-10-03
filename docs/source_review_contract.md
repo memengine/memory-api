@@ -63,14 +63,17 @@ Current `POST /v1/memories/retrieve` responses add `source_reviews`, defaulting 
 Responses expose at most three recent candidates and hydrate targets in one
 additional bounded query. Reviews remain pending across reads; merely seeing a
 question does not consume it. Foreign, expired and changed targets are excluded.
-TTL is seven days after the server's last observation. No processing metadata,
+TTL is fixed at seven days from the first generation's server-side ingestion time;
+reinforcement cannot extend it indefinitely. No processing metadata,
 raw source transcript, model reasoning or new authority appears in this view.
 
 The response is a bounded recent view, not a complete review inbox. Stale rows
 are conditionally expired without overwriting concurrent worker refreshes, so
 subsequent reads advance past them. The service inspects at most three selected candidate rows per call;
 older reviews may need a subsequent read and are not paginated in this slice.
-Database scan cost and loaded p99 have not been measured. Do not
+Local SQL-plan checks cover 1K/10K/100K synthetic rows; a targeted partial expression
+index supports scoped and legacy lookup, including empty matches. Loaded production
+p99 and throughput have not been measured. Do not
 advertise guaranteed delivery of every pending review or a load-tested SLA.
 
 Existing retrieval context remains the last admitted memory state. This slice
@@ -106,6 +109,43 @@ and expiry. Unknown/foreign reviews return 404; stale or closed reviews return
 The existing job lifecycle reports what ingestion actually did. If it remains
 pending, do not report successful resolution. A changed target invalidates the
 old review; source-review resolution is not yet linked atomically to a new job.
+
+## Review lifecycle hardening (local, not deployed)
+
+Open identical interpretations reinforce one generation, preserving its original
+seven-day deadline. Server-issued extraction job identity and ingestion time
+bind retries to their generation. Dismissed/expired generations remain terminal;
+jobs ingested before closure cannot reopen them or join a newer generation.
+New evidence ingested after closure can create a new generation, not reactivate
+an old memory. Exact pre-hardening fingerprints are recognized for their original
+job, so a retry does not reopen an already closed legacy review.
+
+The existing review-answer route locks the candidate and obtains its target lock
+with `NOWAIT`; a busy target yields `409 source_review_target_busy_retry`, avoiding
+a lock-order deadlock with a worker. No review answer increases authority.
+
+Storage admission is serialized by a short tenant-scoped PostgreSQL advisory
+transaction lock, with no provider work inside that lock. Retained source-review
+rows (open and closed) are capped by `SOURCE_REVIEW_PROFILE_ROW_LIMIT` (default
+256) and `SOURCE_REVIEW_TENANT_ROW_LIMIT` (default 10,000). Counts stop at the
+configured cap rather than counting an unlimited backlog. Existing over-cap data
+is not silently deleted or grandfathered into new admission. At capacity the job
+reports `extraction_metadata.source_reviews_capacity_rejected`; that candidate
+is not retained or activated. Other admissible work in the job can still succeed.
+Duplicate/replayed closed work reports `source_reviews_closed_replays`.
+
+Celery's background maintenance runs every five minutes, handling at most 1,000
+expirations and 1,000 deletions per run (maximum caller batch size 5,000), with
+row locks and `SKIP LOCKED`. Reads/answers enforce the deadline even if maintenance
+is delayed. Dismissed/expired rows are purged after their original seven-day
+window plus `SOURCE_REVIEW_CLOSED_RETENTION_DAYS` (default 30), including their
+candidate text and evidence. This does not delete active memories or their audit
+history, and it does not change raw extraction-job payload retention.
+Old jobs beyond the review deadline cannot recreate purged reviews.
+
+Limits are operational safety defaults, not measured product capacity or a
+promise to deliver every review. Closure timestamps conservatively fence
+already queued evidence; it may require a genuinely new ingestion after closure.
 
 ## SDK contract and release boundary
 

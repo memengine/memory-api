@@ -1513,7 +1513,7 @@ class ConflictResolver:
                 explanation="Application declaration applied within an exact, owned applicability identity.",
                 details={"policy": PREFERENCE_MARKER},
             )
-            if target is not None:
+            if target is not None and not target.is_archived:
                 self._archive_memory(target, "Explicit same-applicability preference replacement")
             row = self._store_new_memory(
                 extracted_memory=memory, user_id=user_id, tenant_id=tenant_id,

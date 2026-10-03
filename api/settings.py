@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     memory_passport_enabled: bool = Field(default=False, alias="MEMORY_PASSPORT_ENABLED")
     phase3a_confirmation_enabled: bool = Field(default=False, alias="PHASE3A_CONFIRMATION_ENABLED")
     explicit_preference_claims_enabled: bool = Field(default=False, alias="EXPLICIT_PREFERENCE_CLAIMS_ENABLED")
+    source_review_profile_row_limit: int = Field(default=256, ge=1, le=10000, alias="SOURCE_REVIEW_PROFILE_ROW_LIMIT")
+    source_review_tenant_row_limit: int = Field(default=10000, ge=1, le=1000000, alias="SOURCE_REVIEW_TENANT_ROW_LIMIT")
+    source_review_closed_retention_days: int = Field(default=30, ge=1, le=365, alias="SOURCE_REVIEW_CLOSED_RETENTION_DAYS")
     phase3a_confirmation_shadow_enabled: bool = Field(
         default=False,
         alias="PHASE3A_CONFIRMATION_SHADOW_ENABLED",

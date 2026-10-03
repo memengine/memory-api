@@ -1349,12 +1349,14 @@ class RetrieverService:
                     claim, memory = pair
                     # An inconsistent scoped winner blocks fallback, rather than
                     # silently declaring a broader value current.
-                    if memory is None or str(memory.proxy_user_id) != proxy_user_id or claim.status != "active":
+                    if memory is None or str(memory.proxy_user_id) != proxy_user_id or claim.status not in {"active", "archived"}:
                         break
                     declaration = preference_declaration((memory.metadata_json or {}).get("provenance"))
                     if declaration is None or declaration.property_key != key or declaration.applicability != scope or declaration.value != claim.active_value:
                         break
-                    if not self._memory_is_current(memory):
+                    if claim.status == "archived" and not memory.is_archived:
+                        break
+                    if memory.is_archived or not self._memory_is_current(memory):
                         continue
                     if agent_id is not None and str(memory.agent_id) != str(agent_id):
                         continue
@@ -1377,10 +1379,8 @@ class RetrieverService:
         return (preferences + other)[:limit]
 
     def _memory_to_result(self, memory: Memory, *, semantic_score: float) -> MemoryResult:
-        provenance = (memory.metadata_json or {}).get("provenance")
-        if preference_declaration(provenance) is not None:
-            from api.services.source_review_service import target_version
-            provenance = {**provenance, "preference_version": target_version(memory)}
+        from api.services.preference_claim_service import preference_provenance
+        provenance = preference_provenance(memory)
         recency_score = self._recency_score(memory.last_accessed_at)
         final_score = (
             (self.SEMANTIC_WEIGHT * semantic_score)

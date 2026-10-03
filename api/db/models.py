@@ -3000,6 +3000,16 @@ class PendingExtractionCandidate(Base):
             "status",
         ),
         Index("ix_pending_extraction_candidates_job", "extraction_job_id"),
+        Index(
+            "ix_source_review_owner", "tenant_id", "proxy_user_id", "status",
+            text("(metadata['extraction_evidence'] ->> 'preference_fingerprint')"),
+            text("created_at DESC"), "id",
+            postgresql_where=text("candidate_reason = 'source_decision_pending' AND (metadata['extraction_evidence']['source_review'] ->> 'kind') = 'restate_source'"),
+        ),
+        Index(
+            "ix_source_review_age", "status", "created_at", "id",
+            postgresql_where=text("candidate_reason = 'source_decision_pending' AND (metadata['extraction_evidence']['source_review'] ->> 'kind') = 'restate_source'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

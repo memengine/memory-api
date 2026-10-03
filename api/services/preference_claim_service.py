@@ -12,10 +12,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
-from api.db.models import Memory, MemoryCategory, MemoryClaim
+from api.db.models import Memory, MemoryCategory, MemoryClaim, MemoryClaimRevision
 from api.schemas.memory_schemas import ExtractedMemory
 from api.schemas.preferences import PreferenceApplicability, PreferenceClaimRequest
-from api.services.claim_ledger_service import build_domain_claim_identity
+from api.services.claim_ledger_service import (
+    authority_priority,
+    build_domain_claim_identity,
+)
 from api.services.extraction_service import ExtractionService
 from api.services.source_review_service import target_version
 
@@ -93,22 +96,62 @@ def transition_reason(declaration: PreferenceClaimRequest, ledger: MemoryClaim, 
         return "preference_requires_review"
     if ledger.active_memory_id is None:
         return "preference_target_stale" if declaration.commitment == "replacement" else "NEW"
-    if target is None or target.is_archived or str(target.id) != str(ledger.active_memory_id):
+    if target is None or str(target.id) != str(ledger.active_memory_id):
         return "preference_target_stale"
     stored = preference_declaration((target.metadata_json or {}).get("provenance"))
     if stored is None or preference_identity(stored).fingerprint != preference_identity(declaration).fingerprint:
         return "preference_identity_mismatch"
-    if ledger.status != "active" or ledger.active_value != stored.value:
+    if ledger.status not in {"active", "archived"} or ledger.active_value != stored.value:
+        return "preference_ledger_inconsistent"
+    if ledger.status == "archived" and not target.is_archived:
         return "preference_ledger_inconsistent"
     if declaration.commitment == "replacement":
         if declaration.replaces_memory_id != str(target.id) or declaration.replaces_version != target_version(target):
             return "preference_target_stale"
         # The caller cannot upgrade its application assertion by citing a writer
         # event, or overwrite a future higher-authority preference.
-        if int(ledger.authority_priority) > 20:
+        if int(ledger.authority_priority) > 20 or authority_priority((target.metadata_json or {}).get("provenance"), "preference") > 20:
             return "preference_authority_insufficient"
-        return "UPDATE" if stored.value != declaration.value else "DEDUP"
+        return "UPDATE" if target.is_archived or stored.value != declaration.value else "DEDUP"
+    if target.is_archived:
+        return "preference_target_stale"
     return "DEDUP" if stored.value == declaration.value else "preference_conflict"
+
+
+def preference_provenance(memory: Memory) -> dict[str, Any] | None:
+    """Response-only version, including archived management targets."""
+    provenance = (memory.metadata_json or {}).get("provenance")
+    if preference_declaration(provenance) is not None:
+        return {**provenance, "preference_version": target_version(memory)}
+    return provenance
+
+
+async def lock_preference_lifecycle(session, memory: Memory, *, archive: bool):
+    """Ledger then memory: the same lock order as preference replacement.
+
+    Keep the archived winner reference as a version-bound tombstone. Archiving
+    a superseded revision must not alter the new winner.
+    """
+    declaration = preference_declaration((memory.metadata_json or {}).get("provenance"))
+    if declaration is None:
+        return memory
+    claim = (await session.execute(select(MemoryClaim).where(
+        MemoryClaim.proxy_user_id == memory.proxy_user_id,
+        MemoryClaim.claim_fingerprint == preference_identity(declaration).fingerprint,
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+    current = (await session.execute(select(Memory).where(
+        Memory.id == memory.id, Memory.proxy_user_id == memory.proxy_user_id,
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+    if current is None:
+        from api.errors import APIError
+        raise APIError(status_code=404, code="MEM_404", error="memory_not_found")
+    if archive and claim is not None and claim.active_memory_id == current.id:
+        claim.status = "archived"
+        if claim.winning_revision_id is not None:
+            revision = await session.get(MemoryClaimRevision, claim.winning_revision_id)
+            if revision is not None:
+                revision.status = "archived"
+    return current
 
 
 def legacy_memory_predicate():

@@ -11,6 +11,7 @@ from api.tasks.deprecation_tasks import DEPRECATION_ALERT_BEAT_SCHEDULE
 from api.tasks.edtech_tasks import EDTECH_FORGETTING_BEAT_SCHEDULE
 from api.tasks.quota_tasks import QUOTA_TASK_BEAT_SCHEDULE
 from api.tasks.provenance_tasks import PROVENANCE_TASK_BEAT_SCHEDULE
+from api.tasks.source_review_tasks import SOURCE_REVIEW_BEAT_SCHEDULE
 from api.tasks.reconciliation_tasks import RECONCILIATION_TASK_BEAT_SCHEDULE
 from api.tasks.reembedding_tasks import REEMBED_TASK_NAME
 from api.tasks.scoring_tasks import LIFECYCLE_TASK_BEAT_SCHEDULE
@@ -40,6 +41,7 @@ CELERY_IMPORTS = (
     "api.tasks.lifecycle_tasks",
     "api.tasks.vector_sync_tasks",
     "api.tasks.provenance_tasks",
+    "api.tasks.source_review_tasks",
 )
 
 
@@ -62,6 +64,7 @@ def create_celery_app() -> Celery:
             **LIFECYCLE_TASK_BEAT_SCHEDULE,
             **EDTECH_FORGETTING_BEAT_SCHEDULE,
             **PROVENANCE_TASK_BEAT_SCHEDULE,
+            **SOURCE_REVIEW_BEAT_SCHEDULE,
             **TEMPORAL_VALIDITY_BEAT_SCHEDULE,
             "daily-forgetting": {
                 "task": DAILY_FORGETTING_TASK_NAME,
