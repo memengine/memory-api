@@ -7,8 +7,9 @@ AI-generated drafts, not two independent human reviews or ground truth.
 The implementation is `benchmarks/internal/preference_exploratory.py`. Its fixed
 protocol and instructions are under `benchmarks/internal/protocols/`, named
 `preference-exploratory-v1.json` and
-`preference-exploratory-v1.instructions.txt`. No provider client or execute
-command exists. It does not request or transmit credentials or make model calls.
+`preference-exploratory-v1.instructions.txt`. That preflight module remains
+read-only: it does not request credentials or make model calls. The separate
+one-shot executor is described below; preparing it does not authorize execution.
 
 ## What the dry run does
 
@@ -80,8 +81,71 @@ location. A future executor must enforce one attempt per eligible case, no SDK
 retry, no model fallback, one in-flight call, a 30-second timeout, and stop on
 transport failure, refusal, truncation or invalid output. Uncertain billing must
 not trigger a blind retry. Freeze results before reviewing them; no prompt tuning
-or repeated runs is authorized by a single-run approval. This preflight does not
-implement that executor or a ledger enforcing the spending cap.
+or repeated runs is authorized by a single-run approval. The read-only preflight
+does not itself implement an executor or a spending ledger.
+
+## Separate one-shot executor
+
+`benchmarks/internal/preference_exploratory_run.py` implements the development
+executor. Its default command is offline and prints an execution plan:
+
+```powershell
+.venv\Scripts\python.exe -X utf8 -m benchmarks.internal.preference_exploratory_run
+```
+
+It requires the exact base preflight digest
+`83345867ef8452189b04d3bf9c979dbd51382bbe82aff0a82ffae7e5817f2150`.
+All 339 requests are rebuilt and checked against that plan before dispatch.
+The only request-body amendment is `service_tier: default`. The official
+[Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+states that an omitted tier inherits project configuration, whereas `default`
+uses standard pricing. Thus the original request digests are **not** the paid
+request digests. The executor binds amended bodies, its own source hash and
+budget policy in a new `execution_sha256`. Explicit approval of that new digest
+is required before execution; the old digest cannot authorize the CLI.
+
+After that approval, use the exact digest in this command:
+
+```powershell
+.venv\Scripts\python.exe -X utf8 -m benchmarks.internal.preference_exploratory_run --execute --approved-execution <approved-execution-sha256>
+```
+
+The only credential source is the backend's existing server-side settings
+(`OPENAI_API_KEY`, including the project's `.env`). Preparation does not load
+credentials. Execution uses the fixed HTTPS OpenAI endpoint, direct HTTP with
+zero retries, no redirects/proxy overrides, one call at a time, and a 30-second
+HTTP timeout. No model fallback, subset selection, input path, label path or
+resume option exists. HTTP timeouts bound network phases, not a production
+end-to-end latency SLA.
+
+The fixed $2 cap covers this run's token charges at the published standard text
+rates, not unrelated account activity or an invoice guarantee. Before each call,
+reserve $0.43 using the published 1,047,576-token context ceiling plus 1,024
+completion tokens, rounded up to cents. This is deliberately much larger than
+the expected small request cost. If known charges plus that reservation would
+exceed $2, stop without another call. Successful usage must report standard tier,
+nonnegative integer token counts within the reserved bounds and consistent totals.
+The reconciled cost is an **uncached upper bound**; cache discounts are ignored.
+Unknown/missing usage or tier retains the reservation and stops. Reconciled
+charges for a refusal or invalid output are retained, not erased.
+
+Before dispatch, an exclusive run directory is created at
+`artifacts/preference-exploratory/run-<execution-sha256>/`, and a reservation is
+written, flushed and synced to `journal.jsonl`. That directory is a permanent
+single-use lock, including after interruption. Do not remove it to resume or
+retry. The first paid case doubles as schema smoke and is never repeated.
+The same frozen validator checks every reply using the fixed offline fixture
+as both shown and current snapshot. Any rejection stops the run and preserves
+its reason; a policy rejection is not necessarily a semantic-model error.
+This is not a live SQL ownership/concurrency test.
+
+The manifest, journal and summary are ignored local artifacts. The journal stores
+synthetic responses and decisions, never credentials or HTTP headers. Completion
+or stopping seals the journal hash in the summary. A crash may leave only the
+manifest and pending reservation; it still consumes the authorization and must
+not cause an automatic retry. AI drafts and holdouts are never loaded by this
+executor. Tests with mocked responses demonstrate control flow and spending
+safeguards, not schema acceptance by OpenAI or semantic accuracy.
 
 ## What an eventual report may claim
 
