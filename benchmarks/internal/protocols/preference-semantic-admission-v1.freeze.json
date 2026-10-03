@@ -1,0 +1,10 @@
+{
+  "protocol_id": "preference-semantic-admission-v1",
+  "status": "offline-assets-only-no-execution-approval",
+  "hash_encoding": "utf-8-lf",
+  "sha256": {
+    "benchmarks/internal/preference_semantic_contract.py": "3a9b9875469c1d9f709588395538f18959011634c98ffe004e61aab83da62d7c",
+    "benchmarks/internal/protocols/preference-semantic-admission-v1.json": "a41edba82cbce78a6a96bee66082f2ba79ed58709c2057d26a337373e0b82e86",
+    "docs/preference_semantic_admission_contract.md": "5381d927fe7e849e019df472431b676b931e1afeb810a83c24e29da59092a92c"
+  }
+}

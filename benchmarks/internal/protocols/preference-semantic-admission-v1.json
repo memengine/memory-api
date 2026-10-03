@@ -1,0 +1,61 @@
+{
+  "protocol_id": "preference-semantic-admission-v1",
+  "status": "frozen-offline-contract-not-a-release-gate",
+  "scope": "preferences-only",
+  "dataset_status": "not-assembled-or-approved-for-provider-execution",
+  "provider_execution_approved": false,
+  "holdout_execution_approved": false,
+  "production_wiring_allowed": false,
+  "automatic_activation_allowed": false,
+  "languages": ["en", "hi", "hinglish"],
+  "families": [
+    "adopted_default", "tentative_interest", "undecided_with_alternative",
+    "undecided_without_alternative", "committed_replacement", "scoped_exception",
+    "rejected_alternative", "reaffirmation", "unrelated_fact_or_question",
+    "ambiguous_or_late_reference", "multiple_properties", "forged_or_ineligible_evidence"
+  ],
+  "minimum_development_cases_per_language_family": 10,
+  "minimum_development_cases_total": 360,
+  "reference_slices": [
+    "single_explicit", "single_indirect", "ordinal", "ambiguous_multiple", "late_reference", "none"
+  ],
+  "minimum_development_cases_per_language_reference_slice": 10,
+  "reference_slice_counts_may_overlap_family_counts": true,
+  "input_bounds": {
+    "properties": 16, "scopes": 32, "targets": 32, "turns": 64,
+    "total_source_characters": 8000, "context_json_characters": 32000, "findings": 16
+  },
+  "required_semantic_dimensions": [
+    "property", "scope", "target", "stance", "value_boundary", "evidence", "overall"
+  ],
+  "scoring": {
+    "matching": "one-to-one by expected property, scope and intended target",
+    "unexpected_assessments": "false positives; never discarded",
+    "abstention_on_required_assessment": "false negative",
+    "non_applicable_dimensions": "exclude from success denominator and report denominator",
+    "critical_errors": [
+      "wrong_target", "wrong_scope", "false_withhold", "false_replacement",
+      "rejected_value_as_current", "forged_evidence_accepted"
+    ],
+    "metrics": [
+      "precision", "recall", "f1", "abstention_rate", "false_withhold_rate",
+      "wrong_binding_rate", "critical_error_counts", "per_slice_denominators"
+    ],
+    "review": "two independent human label passes and adjudication before freezing labels",
+    "model_self_confidence_used": false,
+    "quote_attribution_establishes_semantic_accuracy": false
+  },
+  "development_stop_rule": "A reviewed critical error blocks promotion. Preserve the counterexample; no tuning or repeated provider runs under that run approval.",
+  "statistics": "These planned counts expose counterexamples, not calibration or population accuracy. Future measured rates require confidence intervals and denominators. No production release threshold is certified here.",
+  "future_run_approval_requires": [
+    "reviewed input and label hashes", "provider and model version",
+    "request schema and instruction hashes", "call and token bounds", "budget and retry policy",
+    "explicit exclusion of all holdouts", "output path and data-sharing approval"
+  ],
+  "future_runtime_gates": [
+    "fresh SQL ownership and authority rechecks", "transactional version compare-and-swap",
+    "one writer lane per property", "paired scope-aware read integration",
+    "independent semantic evaluation", "failure and concurrency verification", "load and cost measurements"
+  ],
+  "legacy_facts_and_exam_date_corrections_fixed": false
+}
