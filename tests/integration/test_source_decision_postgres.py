@@ -40,7 +40,7 @@ from api.db.models import (
     VectorSyncStatus,
 )
 from api.errors import APIError
-from api.routers.memories import answer_memory_clarification, answer_source_review
+from api.routers.memories import answer_memory_clarification, answer_source_review, get_memory_job_status
 from api.schemas.requests import MemoryClarificationAnswerRequest, MemorySourceReviewAnswerRequest
 from api.services.source_review_service import list_source_reviews, review_intent, view_review
 from api.services.conflict_resolver import ConflictResolver
@@ -250,6 +250,56 @@ def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=
         qdrant_service=Search(),
     )
     return result, model, job_id
+
+
+def test_evidence_rejection_diagnostics_survive_sql_completion_and_job_response(sql_scope, monkeypatch):
+    original = "My default example language is C++."
+    setup, _model, _job = _run(sql_scope, monkeypatch, original, _decision())
+    original_id = uuid.UUID(setup["stored_memories"][0]["id"])
+    source = "For the Release Check project only, my default example language is C++."
+    result, model, job_id = _run(
+        sql_scope, monkeypatch, source, _decision(original_id, relation="mergeable"),
+        extracted_content="User prefers C++ for Release Check examples.",
+    )
+    validation = result["extraction_metadata"]["candidate_validation"]
+    assert validation["rejection_counts"] == {"evidence_validation": 1}
+    assert validation["evidence_rejection_counts"] == {"quote_not_found": 1}
+    assert result["memories_created"] == result["pending_candidates_buffered"] == 0
+    assert model.source_prompts == []
+    assert result["extraction_metadata"]["source_decision"]["complete_calls"] == 0
+
+    monkeypatch.setattr(extraction_tasks, "build_extraction_session_factory", lambda: sql_scope.factory)
+    extraction_tasks._set_db_job_completed(job_id=str(job_id), payload=result)
+    with sql_scope.factory() as session:
+        job = session.get(ExtractionJob, job_id)
+        assert job.result["extraction_metadata"]["candidate_validation"] == validation
+        memories = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(memories) == 1 and memories[0].id == original_id
+        assert memories[0].content == original and not memories[0].is_archived
+        assert not session.scalars(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.extraction_job_id == job_id,
+        )).all()
+
+    async def exercise():
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                service = MemoryService.__new__(MemoryService)
+                service.session = session
+                request = SimpleNamespace(state=SimpleNamespace(
+                    tenant_id=str(sql_scope.tenant_id), user_id=None, request_id="diagnostics-test",
+                ), headers={})
+                response = await get_memory_job_status(request, job_id, service)
+                assert response.data.extraction_metadata["candidate_validation"] == validation
+                assert response.data.created_memory_ids == [] and response.data.status == "completed"
+                request.state.tenant_id = str(uuid.uuid4())
+                with pytest.raises(APIError) as foreign:
+                    await get_memory_job_status(request, job_id, service)
+                assert foreign.value.status_code == 404
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(

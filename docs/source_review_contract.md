@@ -176,6 +176,41 @@ run followed. Raw evidence is ignored at
 `artifacts/internal-benchmarks/source-merge-containment-live-20261002-01.json`.
 Recorded model tokens: 11,180; exact billing and embeddings cost are not returned.
 
+### Evidence rejection diagnostics (2026-10-03)
+
+Job status adds `extraction_metadata.candidate_validation.evidence_rejection_counts`.
+This subdivides the existing `rejection_counts.evidence_validation` bucket; the
+original counts and acceptance rules are unchanged. Each generic evidence rejection
+contributes one first-failing backend check, not every possible problem in a candidate.
+Proposal-policy failures already have their own existing reasons and are not counted
+again here. Successful direct-user fallback and accepted/pending claims add no entry.
+Counts aggregate across the existing primary, empty-response repair and correction
+recovery passes. This change introduces no additional pass or model call.
+
+Reasons include `missing_evidence`, `invalid_evidence_turn`,
+`evidence_not_visible_to_model`, `no_user_evidence`, `unsupported_relation`,
+`missing_source_spans`, `invalid_source_spans`, `invalid_source_span_shape`,
+`invalid_source_span_turn`, `invalid_source_quote`, `quote_not_found`,
+`quote_not_unique`, `duplicate_source_span`, `candidate_source_mismatch`, and
+`unsupported_user_evidence`. Keys come from backend checks, never model wording.
+Diagnostics contain only reason codes and integer counts: no source text, quotes,
+candidate content, raw model output, or caller-provided authority. Existing evidence
+validation and span-only callers share the same validation implementation.
+
+Older jobs need not contain this field; absence means diagnostic detail was not
+recorded, not that evidence passed. The failed 2026-10-02 project job cannot be
+retrospectively diagnosed from these new counts. No database migration, SDK release,
+assistant change, or authority relaxation is needed. Local controlled tests verify
+the diagnostic path; deployed model behavior still needs a separately approved smoke.
+
+Local verification: 1,568 unit tests passed (25 existing warnings), 58 real PostgreSQL
+integration tests passed, and all 9 FAST suites passed without product failures or
+harness errors. A 480-case controlled comparison against the pre-change committed
+parser found identical outcomes and coarse counts. The SQL regression verifies job
+completion persistence, owned job-status serialization, foreign-tenant denial, zero
+source-classifier calls after rejection, and preservation of the current memory.
+These checks made no paid provider calls and did not rerun any holdout.
+
 ### SDK release verification (2026-10-02)
 
 The Python wheel and sdist passed `twine check`, uploaded to main PyPI, and their

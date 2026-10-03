@@ -351,6 +351,7 @@ class ExtractionService:
                         "accepted_as_pending": 0,
                         "rejected": 0,
                         "rejection_counts": {},
+                        "evidence_rejection_counts": {},
                         "model_marked_nothing_to_extract": False,
                     },
                     "governance_gate": {
@@ -516,6 +517,7 @@ class ExtractionService:
                 visible_memory_ids=visible_existing_memory_ids,
             )
         )
+        evidence_rejection_counts: dict[str, int] = {}
         kept, pending, filtered_count, nothing_to_extract, rejection_counts = (
             self._parse_and_validate_response(
                 normalized_response,
@@ -529,6 +531,7 @@ class ExtractionService:
                     "extractor_version": "source-evidence-v2",
                 },
                 proposal_context=proposal_context,
+                evidence_rejection_counts=evidence_rejection_counts,
             )
         )
         if structured_proposal is not None:
@@ -657,6 +660,7 @@ class ExtractionService:
                         "pass": "empty_response_repair",
                     },
                     proposal_context=None,
+                    evidence_rejection_counts=evidence_rejection_counts,
                 )
                 if not kept and not pending and not nothing_to_extract:
                     raise ExtractionError(
@@ -732,6 +736,7 @@ class ExtractionService:
                     # This pass can recover only the user's independent
                     # replacement claim; it cannot confirm any proposal.
                     proposal_context=None,
+                    evidence_rejection_counts=evidence_rejection_counts,
                 )
                 seen = {
                     (item.category, " ".join(item.content.casefold().split()))
@@ -809,6 +814,7 @@ class ExtractionService:
                     "accepted_as_pending": len(pending),
                     "rejected": filtered_count,
                     "rejection_counts": rejection_counts,
+                    "evidence_rejection_counts": evidence_rejection_counts,
                     "model_marked_nothing_to_extract": nothing_to_extract,
                 },
                 "proposal_confirmation": {
@@ -2145,6 +2151,7 @@ class ExtractionService:
         source_context: dict[str, Any] | None = None,
         evidence_context: dict[str, Any] | None = None,
         proposal_context: list[dict[str, Any]] | None = None,
+        evidence_rejection_counts: dict[str, int] | None = None,
     ) -> tuple[
         list[ExtractedMemory], list[PendingExtractedMemory], int, bool, dict[str, int]
     ]:
@@ -2247,7 +2254,7 @@ class ExtractionService:
                         quote = str((messages or [])[span["turn_index"]].get("content") or "")[span["start_char"]:span["end_char"]].strip()
                         if candidate.content.strip() in quote:
                             candidate.content = quote
-                validated_evidence = self._validated_user_evidence(
+                validated_evidence, evidence_rejection_reason = self._validate_user_evidence(
                     candidate,
                     messages or [],
                     raw_memory.get("evidence_turns")
@@ -2282,7 +2289,7 @@ class ExtractionService:
                             # claim while incorrectly retaining proposal_turn.
                             # Accept it only if the same candidate independently
                             # passes direct-user grounding against the cited turn.
-                            validated_evidence = self._validated_user_evidence(
+                            validated_evidence, evidence_rejection_reason = self._validate_user_evidence(
                                 candidate,
                                 messages or [],
                                 raw_memory.get("evidence_turns"),
@@ -2313,6 +2320,13 @@ class ExtractionService:
                         rejection_counts["evidence_validation"] = (
                             rejection_counts.get("evidence_validation", 0) + 1
                         )
+                        if evidence_rejection_counts is not None:
+                            # Only subdivide the legacy generic rejection bucket.
+                            # Proposal-policy reasons already have specific codes.
+                            reason = evidence_rejection_reason or "unsupported_user_evidence"
+                            evidence_rejection_counts[reason] = (
+                                evidence_rejection_counts.get(reason, 0) + 1
+                            )
                         continue
                 candidate.validated_evidence = validated_evidence
             if claim_state not in {"asserted", "correction", "uncertain_change"}:
@@ -2381,6 +2395,34 @@ class ExtractionService:
         structured_proposal_decision: bool = False,
         evidence_spans: Any = _UNSET_SOURCE_SPANS,
     ) -> dict[str, Any]:
+        """Compatibility wrapper; validation and diagnostics share one path."""
+        evidence, _reason = cls._validate_user_evidence(
+            candidate, messages, evidence_turns, evidence_relation, proposal_turn,
+            evidence_context=evidence_context,
+            visible_turn_indexes=visible_turn_indexes,
+            proposal_confirmation_enabled=proposal_confirmation_enabled,
+            active_proposals=active_proposals,
+            structured_proposal_decision=structured_proposal_decision,
+            evidence_spans=evidence_spans,
+        )
+        return evidence
+
+    @classmethod
+    def _validate_user_evidence(
+        cls,
+        candidate: PendingExtractedMemory | ExtractedMemory,
+        messages: list[dict[str, Any]],
+        evidence_turns: Any,
+        evidence_relation: Any = None,
+        proposal_turn: Any = None,
+        *,
+        evidence_context: dict[str, Any] | None = None,
+        visible_turn_indexes: set[int] | None = None,
+        proposal_confirmation_enabled: bool = False,
+        active_proposals: list[dict[str, Any]] | None = None,
+        structured_proposal_decision: bool = False,
+        evidence_spans: Any = _UNSET_SOURCE_SPANS,
+    ) -> tuple[dict[str, Any], str | None]:
         """Require conversational memories to be grounded in a user's own turn.
 
         The returned record is assembled only from the server-validated policy
@@ -2404,7 +2446,7 @@ class ExtractionService:
             structured_proposal_decision=structured_proposal_decision,
         )
         if not policy.accepted:
-            return {}
+            return {}, policy.reason
 
         indexed_messages = [
             (index, message)
@@ -2414,7 +2456,7 @@ class ExtractionService:
         evidence_was_provided = isinstance(evidence_turns, list)
         cited_indexes = cls._valid_evidence_indexes(evidence_turns, len(messages))
         if evidence_was_provided and not cited_indexes:
-            return {}
+            return {}, "invalid_evidence_turn"
         if cited_indexes:
             indexed_messages = [
                 item for item in indexed_messages if item[0] in cited_indexes
@@ -2434,18 +2476,18 @@ class ExtractionService:
             and dict(evidence_context or {}).get("extractor_version")
             == "source-evidence-v2"
         ):
-            return {}
+            return {}, "missing_source_spans"
         if (
             policy.proposal_turn_index is None
             and evidence_spans is not _UNSET_SOURCE_SPANS
         ):
-            verified_spans = cls._verify_source_spans(
+            verified_spans, span_rejection_reason = cls._validate_source_spans(
                 evidence_spans,
                 messages=messages,
                 eligible_indexes=eligible_user_indexes & cited_indexes,
             )
             if verified_spans is None:
-                return {}
+                return {}, span_rejection_reason
             # A quoted clause must support the candidate independently. Words
             # elsewhere in the user turn cannot rescue an unrelated citation.
             user_turns = [
@@ -2464,7 +2506,7 @@ class ExtractionService:
                 *source_clauses,
                 "\n".join(source_clauses),
             }:
-                return {}
+                return {}, "candidate_source_mismatch"
         candidate_tokens = cls._significant_tokens(candidate.content)
         if policy.proposal_turn_index is not None:
             proposal_content = str(
@@ -2484,7 +2526,7 @@ class ExtractionService:
                 for _index, content in user_turns
             )
         if not supported:
-            return {}
+            return {}, "unsupported_user_evidence"
 
         normalized_context = {
             key: value
@@ -2552,7 +2594,7 @@ class ExtractionService:
                 "reason": policy.reason,
             },
             "extraction": normalized_context,
-        }
+        }, None
 
     @classmethod
     def _verify_source_spans(
@@ -2562,6 +2604,20 @@ class ExtractionService:
         messages: list[dict[str, Any]],
         eligible_indexes: set[int],
     ) -> list[dict[str, Any]] | None:
+        """Compatibility wrapper for callers that only need verified spans."""
+        verified, _reason = cls._validate_source_spans(
+            spans, messages=messages, eligible_indexes=eligible_indexes,
+        )
+        return verified
+
+    @classmethod
+    def _validate_source_spans(
+        cls,
+        spans: Any,
+        *,
+        messages: list[dict[str, Any]],
+        eligible_indexes: set[int],
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
         """Verify exact source quotes and derive Unicode code-point offsets.
 
         Persist only offsets and a digest, so evidence retention remains tied
@@ -2569,36 +2625,41 @@ class ExtractionService:
         This verifies attribution; it does not prove semantic entailment.
         """
         if not isinstance(spans, list) or not 1 <= len(spans) <= 8:
-            return None
+            return None, "invalid_source_spans"
         verified: list[dict[str, Any]] = []
         seen: set[tuple[int, int, int]] = set()
         for span in spans:
             if not isinstance(span, dict) or set(span) != {"turn_index", "quote"}:
-                return None
+                return None, "invalid_source_span_shape"
             turn_index = span["turn_index"]
             quote = span["quote"]
             if (
                 not isinstance(turn_index, int)
                 or isinstance(turn_index, bool)
                 or turn_index not in eligible_indexes
-                or not isinstance(quote, str)
+            ):
+                return None, "invalid_source_span_turn"
+            if (
+                not isinstance(quote, str)
                 or not quote.strip()
                 or len(quote) > 1000
             ):
-                return None
+                return None, "invalid_source_quote"
             content = str(messages[turn_index].get("content") or "")
             start = content.find(quote)
-            if start < 0 or content.find(quote, start + 1) >= 0:
-                return None
+            if start < 0:
+                return None, "quote_not_found"
+            if content.find(quote, start + 1) >= 0:
+                return None, "quote_not_unique"
             end = start + len(quote)
             key = (turn_index, start, end)
             if key in seen:
-                return None
+                return None, "duplicate_source_span"
             seen.add(key)
             verified.append(cls._source_span_record(
                 turn_index=turn_index, message=messages[turn_index], quote=quote, start=start,
             ))
-        return sorted(verified, key=lambda span: (span["turn_index"], span["start_char"]))
+        return sorted(verified, key=lambda span: (span["turn_index"], span["start_char"])), None
 
     @staticmethod
     def _source_span_record(
