@@ -20,9 +20,9 @@ from api.db.models import Memory, MemoryClaim, ProxyUser, QuotaMode
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
-from api.schemas.preferences import PreferenceApplicability, PreferenceReadContext
+from api.schemas.preferences import PreferenceApplicability, PreferenceReadContext, PreferenceReadDecision
 from api.services.embedding_service import EmbeddingResult, EmbeddingService
-from api.services.preference_claim_service import legacy_memory_predicate, preference_declaration, preference_fingerprint
+from api.services.preference_claim_service import held_choice, legacy_memory_predicate, preference_declaration, preference_fingerprint
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
 from api.tasks.retrieval_tasks import update_memory_accesses
@@ -104,6 +104,7 @@ class RetrieverService:
         self.proxy_user_service = proxy_user_service
         self.embed_breaker = CircuitBreakerRegistry.get_instance().gemini_embed_cb
         self.last_cache_hit = False
+        self.last_preference_decisions: list[PreferenceReadDecision] = []
         self.last_quota_mode = QuotaMode.full.value
         self.last_is_degraded = False
         self.region_id = region_id
@@ -137,6 +138,7 @@ class RetrieverService:
         quota_mode: str | QuotaMode | None = None,
         preference_context: PreferenceReadContext | None = None,
     ) -> list[MemoryResult]:
+        self.last_preference_decisions = []
         identity = external_user_id or user_id
         if not identity:
             raise ValueError("retrieve requires external_user_id or user_id.")
@@ -1329,6 +1331,7 @@ class RetrieverService:
             for scope in (PreferenceApplicability(kind="global"), context.applicability)
         }
         preferences = []
+        decisions = []
         if not categories or "preference" in categories:
             rows = (await self.session.execute(select(MemoryClaim, Memory).outerjoin(
                 Memory, MemoryClaim.active_memory_id == Memory.id,
@@ -1347,6 +1350,9 @@ class RetrieverService:
                     if pair is None or pair[0].active_memory_id is None:
                         continue
                     claim, memory = pair
+                    if memory is not None and held_choice(memory, claim):
+                        decisions.append(PreferenceReadDecision(property_key=key, applicability=scope))
+                        break  # Never use a broader default for this unresolved choice.
                     # An inconsistent scoped winner blocks fallback, rather than
                     # silently declaring a broader value current.
                     if memory is None or str(memory.proxy_user_id) != proxy_user_id or claim.status not in {"active", "archived"}:
@@ -1375,6 +1381,7 @@ class RetrieverService:
             limit=limit, time_filter_days=time_filter_days, quota_mode=quota_mode,
         ) if other_categories else []
         self.last_cache_hit = False  # Preference winners are always freshly read.
+        self.last_preference_decisions = decisions
         self._queue_access_update([result.id for result in preferences])
         return (preferences + other)[:limit]
 

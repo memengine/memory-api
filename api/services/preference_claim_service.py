@@ -6,7 +6,10 @@ chooses a replacement; an owned, version-bound exact identity does.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -23,6 +26,80 @@ from api.services.extraction_service import ExtractionService
 from api.services.source_review_service import target_version
 
 PREFERENCE_MARKER = "explicit_preference_v1"
+CHOICE_STATE_MARKER = "preference_choice_state"
+
+
+def choice_evidence_key(declaration: PreferenceClaimRequest) -> str:
+    return hashlib.sha256(json.dumps(
+        declaration.model_dump(mode="json", exclude_none=True), sort_keys=True,
+    ).encode()).hexdigest()
+
+
+def held_choice(memory: Memory, ledger: MemoryClaim) -> bool:
+    """A durable read barrier, independent of pending-review retention."""
+    marker = (memory.metadata_json or {}).get(CHOICE_STATE_MARKER)
+    declaration = preference_declaration((memory.metadata_json or {}).get("provenance"))
+    return bool(
+        isinstance(marker, dict) and marker.get("state") == "current_choice_unresolved"
+        and declaration is not None
+        and marker.get("fingerprint") == preference_identity(declaration).fingerprint == ledger.claim_fingerprint
+        and ledger.active_memory_id == memory.id and ledger.active_value == declaration.value
+        and str(memory.proxy_user_id) == str(ledger.proxy_user_id)
+    )
+
+
+def set_choice_state(memory: Memory, ledger: MemoryClaim, *, unresolved: bool, declaration=None):
+    # A new backend nonce changes target_version on both hold and reaffirmation.
+    # Old jobs/reviews cannot replay against a later decision on the same row.
+    previous = dict((memory.metadata_json or {}).get(CHOICE_STATE_MARKER) or {})
+    memory.metadata_json = {**dict(memory.metadata_json or {}), CHOICE_STATE_MARKER: {
+        "state": "current_choice_unresolved" if unresolved else "current",
+        "fingerprint": ledger.claim_fingerprint, "generation": str(uuid.uuid4()),
+        "evidence_key": choice_evidence_key(declaration) if unresolved else previous.get("evidence_key"),
+    }}
+    ledger.status = "disputed" if unresolved else "active"
+    ledger.updated_at = datetime.now(UTC)
+
+
+def current_target(memory: Memory) -> bool:
+    now = datetime.now(UTC)
+    def utc(value):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return not memory.is_archived and not any(
+        getattr(memory, name, None) is not None and utc(getattr(memory, name)) <= now
+        for name in ("expires_at", "effective_until")
+    ) and not (getattr(memory, "effective_from", None) is not None and utc(memory.effective_from) > now)
+
+
+async def preference_review_claim(session, candidate):
+    """Acquire ledger before target, NOWAIT while the review row is held."""
+    declaration = preference_declaration({"extraction_evidence":
+        (candidate.metadata_json or {}).get("extraction_evidence") or {}})
+    if declaration is None or declaration.choice_state != "current_choice_unresolved":
+        return None
+    claim = (await session.execute(select(MemoryClaim).where(
+        MemoryClaim.tenant_id == candidate.tenant_id,
+        MemoryClaim.proxy_user_id == candidate.proxy_user_id,
+        MemoryClaim.claim_fingerprint == preference_identity(declaration).fingerprint,
+    ).with_for_update(nowait=True).execution_options(populate_existing=True))).scalar_one_or_none()
+    if claim is None:
+        from api.errors import APIError
+        raise APIError(status_code=409, code="REV_409", error="source_review_stale_or_closed")
+    return claim
+
+
+def reaffirm_review_choice(candidate, memory: Memory, ledger: MemoryClaim) -> bool:
+    declaration = preference_declaration({"extraction_evidence":
+        (candidate.metadata_json or {}).get("extraction_evidence") or {}})
+    marker = (memory.metadata_json or {}).get(CHOICE_STATE_MARKER) or {}
+    if not held_choice(memory, ledger) or ledger.status != "disputed" or not current_target(memory):
+        return False
+    if int(ledger.authority_priority) > 20 or authority_priority((memory.metadata_json or {}).get("provenance"), "preference") > 20:
+        return False
+    if declaration is None or marker.get("evidence_key") != choice_evidence_key(declaration):
+        return False
+    set_choice_state(memory, ledger, unresolved=False)
+    return True
 
 
 def preference_declaration(provenance: dict[str, Any] | None) -> PreferenceClaimRequest | None:
@@ -92,27 +169,41 @@ def reserve_claim(session, *, tenant_id: str, proxy_user_id: str, declaration: P
 
 
 def transition_reason(declaration: PreferenceClaimRequest, ledger: MemoryClaim, target: Memory | None) -> str:
-    if declaration.applicability.kind == "unresolved" or declaration.commitment == "uncertain":
+    holds_current = declaration.choice_state == "current_choice_unresolved"
+    if declaration.applicability.kind == "unresolved" or (declaration.commitment == "uncertain" and not holds_current):
         return "preference_requires_review"
     if ledger.active_memory_id is None:
-        return "preference_target_stale" if declaration.commitment == "replacement" else "NEW"
+        return "preference_target_stale" if declaration.commitment == "replacement" or holds_current else "NEW"
     if target is None or str(target.id) != str(ledger.active_memory_id):
         return "preference_target_stale"
     stored = preference_declaration((target.metadata_json or {}).get("provenance"))
     if stored is None or preference_identity(stored).fingerprint != preference_identity(declaration).fingerprint:
         return "preference_identity_mismatch"
-    if ledger.status not in {"active", "archived"} or ledger.active_value != stored.value:
+    holding = held_choice(target, ledger)
+    if ledger.status not in {"active", "archived"} and not (ledger.status == "disputed" and holding):
+        return "preference_ledger_inconsistent"
+    if ledger.active_value != stored.value:
         return "preference_ledger_inconsistent"
     if ledger.status == "archived" and not target.is_archived:
         return "preference_ledger_inconsistent"
-    if declaration.commitment == "replacement":
+    if declaration.commitment == "replacement" or holds_current:
         if declaration.replaces_memory_id != str(target.id) or declaration.replaces_version != target_version(target):
             return "preference_target_stale"
         # The caller cannot upgrade its application assertion by citing a writer
         # event, or overwrite a future higher-authority preference.
         if int(ledger.authority_priority) > 20 or authority_priority((target.metadata_json or {}).get("provenance"), "preference") > 20:
             return "preference_authority_insufficient"
+        if holds_current:
+            if not current_target(target):
+                return "preference_target_stale"
+            return "WITHHOLD"
+        if holding and current_target(target) and stored.value == declaration.value:
+            return "REAFFIRM"
+        if holding and not current_target(target):
+            return "UPDATE"
         return "UPDATE" if target.is_archived or stored.value != declaration.value else "DEDUP"
+    if holding:
+        return "preference_requires_review"
     if target.is_archived:
         return "preference_target_stale"
     return "DEDUP" if stored.value == declaration.value else "preference_conflict"

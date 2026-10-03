@@ -1639,6 +1639,12 @@ def run_extraction_pipeline(
         source_tokens = int(getattr(resolver, "last_source_decision_tokens_used", 0) or 0)
         extraction_meta["tokens_used"] = int(extraction_meta.get("tokens_used", 0) or 0) + source_tokens
         metadata = dict(extraction_meta.get("extraction_metadata") or {})
+        if explicit_preferences:
+            metadata["preference_choices"] = {
+                "withheld": int(getattr(resolver, "last_preference_choices_withheld", 0) or 0),
+                "reaffirmed": int(getattr(resolver, "last_preference_choices_reaffirmed", 0) or 0),
+                "rejected": dict(getattr(resolver, "last_preference_choices_rejected", {}) or {}),
+            }
         metadata["source_decision"] = {
             "pending_count": len(source_pending), "tokens_used": source_tokens,
             "complete_calls": int(getattr(resolver, "last_source_decision_calls", 0) or 0),

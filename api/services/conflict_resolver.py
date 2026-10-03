@@ -678,6 +678,9 @@ class ConflictResolver:
         self.last_conflict_types_found: list[str] = []
         self.source_messages = source_messages or []
         self.last_pending_candidates: list[PendingExtractedMemory] = []
+        self.last_preference_choices_withheld = 0
+        self.last_preference_choices_reaffirmed = 0
+        self.last_preference_choices_rejected: dict[str, int] = {}
         self.last_source_decision_tokens_used = 0
         self.last_source_decision_calls = 0
         self.last_source_decision_wall_latency_ms = 0
@@ -863,6 +866,9 @@ class ConflictResolver:
         self.last_detection_strategies_used = []
         self.last_conflict_types_found = []
         self.last_pending_candidates = []
+        self.last_preference_choices_withheld = 0
+        self.last_preference_choices_reaffirmed = 0
+        self.last_preference_choices_rejected = {}
         self.last_source_decision_tokens_used = 0
         self.last_source_decision_calls = 0
         self.last_source_decision_wall_latency_ms = 0
@@ -1461,7 +1467,7 @@ class ConflictResolver:
         source_conversation_id, agent_id, auto_commit,
     ):
         from api.services.preference_claim_service import (
-            PREFERENCE_MARKER, preference_identity, reserve_claim, transition_reason,
+            PREFERENCE_MARKER, preference_identity, reserve_claim, set_choice_state, transition_reason,
         )
         from api.schemas.preferences import PreferenceClaimRequest
         if not tenant_id or not proxy_user_id:
@@ -1482,7 +1488,10 @@ class ConflictResolver:
                 raise ValueError("duplicate explicit preference identity")
             identities.add(fingerprint)
             # Provider work precedes ALL row locks, not just each item's lock.
-            embedding = self._coerce_embedding_result(self.embedder(memory.content))
+            embedding = (
+                None if declaration.commitment == "uncertain"
+                else self._coerce_embedding_result(self.embedder(memory.content))
+            )
             prepared.append((fingerprint, memory, declaration, embedding))
         stored = []
         for _, memory, declaration, embedding in sorted(prepared, key=lambda item: item[0]):
@@ -1496,8 +1505,26 @@ class ConflictResolver:
                     Memory.user_id == uuid.UUID(user_id),
                 ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none() if ledger.active_memory_id else None
                 reason = transition_reason(declaration, ledger, target)
+            if declaration.choice_state == "current_choice_unresolved" and reason not in {"WITHHOLD", "preference_requires_review"}:
+                self.last_preference_choices_rejected[reason] = self.last_preference_choices_rejected.get(reason, 0) + 1
+                continue  # Invalid bindings are processing outcomes, not new review text.
             if reason == "DEDUP":
                 continue
+            if reason in {"WITHHOLD", "REAFFIRM"}:
+                old_state = "unresolved" if ledger.status == "disputed" else "current"
+                set_choice_state(target, ledger, unresolved=reason == "WITHHOLD", declaration=declaration)
+                self._create_audit_log(
+                    user_id=user_id, proxy_user_id=proxy_user_id, action=AuditAction.updated,
+                    old_value={"preference_choice": old_state},
+                    new_value={"preference_choice": "unresolved" if reason == "WITHHOLD" else "current",
+                               "policy": PREFERENCE_MARKER,
+                               "source_conversation_id": str(source_conversation_id)}, memory_id=target.id,
+                )
+                if reason == "REAFFIRM":
+                    self.last_preference_choices_reaffirmed += 1
+                    continue
+                self.last_preference_choices_withheld += 1
+                reason = "preference_requires_review"
             if reason not in {"NEW", "UPDATE"}:
                 explanation = "The application-declared preference could not become current safely."
                 self._buffer_source_candidate(memory, ConflictDecision(

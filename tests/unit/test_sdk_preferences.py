@@ -157,7 +157,14 @@ async def test_unsupported_combinations_fail_without_network(sdk):
 def test_standalone_schema_matches_backend(name):
     sdk_model = {"PreferenceApplicability": PreferenceApplicability,
         "PreferenceClaimRequest": PreferenceClaimRequest, "PreferenceReadContext": PreferenceReadContext}[name]
-    assert sdk_model.model_json_schema() == getattr(backend, name).model_json_schema()
+    server_schema = getattr(backend, name).model_json_schema()
+    if name == "PreferenceClaimRequest":
+        # A backend-only optional extension; published/local SDK inputs stay valid.
+        field = server_schema["properties"].pop("choice_state")
+        assert field["default"] == "candidate_only"
+        assert field["enum"] == ["candidate_only", "current_choice_unresolved"]
+        assert "choice_state" not in server_schema["required"]
+    assert sdk_model.model_json_schema() == server_schema
 
 
 @pytest.mark.parametrize("change", [

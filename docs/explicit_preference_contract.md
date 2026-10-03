@@ -61,7 +61,9 @@ ledger identities remain separate; no historical backfill labels them global.
 - An identical value in that identity is a no-op; no extra memory/revision.
 - Different known applicability creates a separate memory, never a merge.
 - Different value without an explicit replacement stays pending.
-- `uncertain` commitment or `unresolved` applicability stays pending.
+- `uncertain` commitment defaults to `choice_state: "candidate_only"`: it stays
+  pending without withholding an existing default. `unresolved` applicability
+  also stays pending, with no guessed scope.
 - `replacement` additionally requires `replaces_memory_id` and
   `replaces_version`. The target must be the current, owned winner of the exact
   identity, its version must match, and its authority must not exceed 20.
@@ -76,7 +78,7 @@ authority metadata and validity using the existing source-review version helper.
 The path reuses the resolver's memory/version/audit/vector-outbox writes and the
 existing claim ledger. PostgreSQL's existing unique owner/fingerprint index plus
 `INSERT ... ON CONFLICT DO NOTHING` and row locks serialize first-writer races.
-Batch lock order is sorted by fingerprint. All embeddings happen before any
+Batch lock order is sorted by fingerprint. All required embeddings happen before any
 claim locks; no extraction/conflict LLM or vector nomination runs in this path.
 Pending candidates also use exact declaration/snapshot fingerprints with an
 indexed insert-and-lock path: no fuzzy full-category scan, cross-context
@@ -94,7 +96,8 @@ generic unarchive is not supported. Archive/deletion lock ledger then memory,
 the same order as replacement, and archive the current ledger/revision without
 clearing its target reference or authority. Archiving an old superseded revision
 does not change its successor. Archived preferences never enter scoped context;
-an applicable global preference can resume as fallback.
+an applicable global preference can resume as fallback unless a durable
+unresolved-choice barrier exists for that scope (see below).
 
 An intentional `replacement` can renew an archived winner with its exact ID and
 post-archive version, unchanged ownership/applicability and authority checks.
@@ -149,6 +152,84 @@ the exact requested scope, not the global read fallback, so a project chat does
 not silently ask the user to change a global preference. Unresolved
 applicability is persisted pending but not auto-delivered into a guessed context.
 Review buttons do not activate declarations; restating does not infer their scope.
+A matching unresolved-choice review can explicitly reaffirm the already stored
+value under the conditions below; it never activates its candidate text.
+
+## Durable unresolved current choice — backend-only extension
+
+Tentative interest in another value is not an unresolved decision about the
+current default. The backend accepts an explicit declaration of the latter:
+
+```json
+{
+  "property_key": "examples.language",
+  "value": "Python",
+  "applicability": {"kind": "context", "namespace": "project", "key": "release-check"},
+  "turn_index": 0,
+  "quote": "For Release Check, I am undecided between my current C++ default and Python.",
+  "commitment": "uncertain",
+  "choice_state": "current_choice_unresolved",
+  "replaces_memory_id": "00000000-0000-0000-0000-000000000001",
+  "replaces_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+The example ID/version are placeholders: use the actual owned winner and its
+current `provenance.preference_version`. This operation requires an existing
+declared winner, known exact applicability, eligible quoted evidence, and both
+ledger and stored-memory authority at most 20. Missing, foreign, stale,
+wrong-scope, archived, expired, or future targets cannot be withheld. Rejections
+create neither an active memory nor a review containing the rejected text.
+They appear as bounded reason counts in job metadata:
+`extraction_metadata.preference_choices.{withheld,reaffirmed,rejected}`.
+
+Withholding keeps the old content, authority, winner and revision as history;
+it does not archive the memory. The existing ledger becomes `disputed`, and a
+backend-owned marker on the winner records the durable choice state and a new
+generation. That generation changes the target version. Marker, ledger, audit
+and any retained review share the existing transaction. A persistence failure
+rolls them back; deliberate review capacity rejection does not roll back the
+choice state. No extra table, duplicate storage, or migration is required.
+
+Scoped reads omit that property's withheld value and do not substitute a broader
+global default. Other properties and scopes remain independently usable. The
+response adds at most 16 `preference_decisions`, each containing only
+`property_key`, `applicability`, and `state: "current_choice_unresolved"`, and
+sets the existing `clarification_question`. No withheld value is added to usable
+`data` or prompt context. Management/history and a retained review can still
+show it explicitly as stored history. Decisions persist even when a review is
+dismissed, expires, is purged, or cannot be retained due to capacity limits.
+Soft archiving a withheld winner also does not silently restore global fallback.
+Explicit authorized hard deletion still uses existing deletion reconciliation;
+this is not a permanent barrier surviving deletion of its owning memory.
+
+An explicit version-bound `replacement` with the same value can reaffirm a
+still-valid withheld winner without creating another memory or raising authority.
+A different value creates the ordinary replacement. Renewal of an archived or
+expired held winner creates a fresh memory, never reactivates the invalid row.
+Alternatively, `keep_current` on the matching, still-valid review reaffirms only
+the existing value. Ownership/block status, target/review versions, currentness,
+authority, and the hold's evidence binding are rechecked under locks. `restate`,
+`dismiss`, ordinary duplicate assertions, unrelated tentative reviews, stale
+reviews and old queued jobs cannot clear or replay the choice state. Each new
+hold or reaffirmation rotates the version binding. Concurrent answers encountering
+a locked target/ledger receive the existing retryable `409` review conflict.
+
+This extension is currently **backend-only**. The local SDK declaration types
+still expose the earlier contract, not `choice_state`; structured
+`preference_decisions` are not yet typed SDK outputs. Existing SDK parsing of
+`clarification_question` and raw job metadata remains compatible. Do not claim
+that SDK users can already opt into the new declaration field through its typed
+helpers, or that any customer agent must display or obey a question. Direct API
+integration and later SDK/semantic-admission work are separate release gates.
+Quotation is still attribution, not semantic proof: no classifier was added to
+decide whether free-form language truly means an unresolved current choice.
+
+There is no read-time provider call or additional SQL lookup for the choice
+decision: it uses the already bounded ledger/winner result. Uncertain declarations
+do not need embeddings. Writes remain queued; an answer arriving before a queued
+declaration commits can still observe the preceding state. This slice introduces
+neither a read-after-write guarantee nor measured production p99/load results.
 
 ## Verification and remaining gates
 

@@ -21,6 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from api.db.models import AuditAction, AuditLog
+
 from api.dependencies import get_authenticated_user_id
 from api.dependencies import get_authenticated_tenant_id
 from api.dependencies import get_context_builder
@@ -474,6 +476,12 @@ async def retrieve_memories(
         proxy_user_id=str(proxy_user.id),
     ) if payload.preference_context is None else None
     clarification_question = clarification.question if clarification is not None else None
+    preference_decisions = (
+        list(getattr(retriever_service, "last_preference_decisions", []) or [])
+        if payload.preference_context is not None else []
+    )
+    if preference_decisions:
+        clarification_question = "A current preference choice is unresolved. Please state which value should be current and where it applies."
     clarification_ms = (time.perf_counter() - clarification_started) * 1000
     source_reviews = await list_source_reviews(
         session, tenant_id=tenant_id, proxy_user_id=str(proxy_user.id),
@@ -527,6 +535,7 @@ async def retrieve_memories(
         clarification_question=clarification_question,
         clarification=clarification,
         source_reviews=source_reviews,
+        preference_decisions=preference_decisions,
         quota_mode=getattr(retriever_service, "last_quota_mode", None),
         is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
         is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",
@@ -552,27 +561,32 @@ async def answer_source_review(
     proxy = await proxy_user_service.find_existing(
         tenant_id=tenant_id, external_user_id=payload.external_user_id,
     )
-    if proxy is None:
+    if proxy is None or getattr(proxy, "is_blocked", False) is True:
         raise APIError(status_code=404, code="REV_404", error="source_review_not_found")
     candidate = (await session.execute(select(PendingExtractionCandidate).where(
         PendingExtractionCandidate.id == parsed_id,
         PendingExtractionCandidate.tenant_id == uuid.UUID(tenant_id),
         PendingExtractionCandidate.proxy_user_id == proxy.id,
-    ).with_for_update())).scalar_one_or_none()
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     intent = intent_for(candidate) if candidate is not None else None
     if intent is None:
         raise APIError(status_code=404, code="REV_404", error="source_review_not_found")
     target = None
+    choice_claim = None
     if intent.get("target_memory_id"):
-        from sqlalchemy.exc import OperationalError
+        from sqlalchemy.exc import DBAPIError
         try:
+            from api.services.preference_claim_service import preference_review_claim
+            choice_claim = await preference_review_claim(session, candidate)
+            if choice_claim is not None and not get_settings().explicit_preference_claims_enabled:
+                raise APIError(status_code=409, code="PREF_409", error="explicit_preferences_unavailable")
             # Workers lock target then candidate. Do not wait in the reverse
             # order while answering a review; fail with a retryable conflict.
             target = (await session.execute(select(Memory).where(
                 Memory.id == uuid.UUID(intent["target_memory_id"]),
                 Memory.proxy_user_id == proxy.id,
             ).with_for_update(nowait=True).execution_options(populate_existing=True))).scalar_one_or_none()
-        except OperationalError as exc:
+        except DBAPIError as exc:
             if (getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)) == "55P03":
                 raise APIError(status_code=409, code="REV_409", error="source_review_target_busy_retry") from exc
             raise
@@ -583,6 +597,16 @@ async def answer_source_review(
         raise APIError(status_code=422, code="REV_422", error="source_review_action_unavailable")
     resolved = payload.action != "restate"
     if resolved:
+        if payload.action == "keep_current" and choice_claim is not None:
+            from api.services.preference_claim_service import reaffirm_review_choice
+            if not reaffirm_review_choice(candidate, target, choice_claim):
+                raise APIError(status_code=409, code="REV_409", error="source_review_stale_or_closed")
+            session.add(AuditLog(
+                id=uuid.uuid4(), user_id=target.user_id, proxy_user_id=proxy.id,
+                action=AuditAction.updated, memory_id=target.id,
+                old_value={"preference_choice": "unresolved"},
+                new_value={"preference_choice": "current", "review_id": review_id},
+            ))
         # Dismiss a pending interpretation, not a stored memory. Keep-current
         # does not increase authority or reactivate any previously archived row.
         candidate.status = "dismissed"
