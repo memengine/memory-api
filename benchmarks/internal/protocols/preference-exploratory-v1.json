@@ -1,0 +1,54 @@
+{
+  "protocol_id": "preference-exploratory-v1",
+  "status": "dry-run-preparation-only",
+  "purpose": "Observe model behaviour on synthetic development inputs, not establish semantic accuracy.",
+  "does_not_amend": "preference-semantic-admission-v1",
+  "inputs_sha256_utf8_lf": "c5abc8a568c38ac9f42f006ec09c5cc853061f24eca4fc1246c5d4b83460920f",
+  "provider_execution_approved": false,
+  "holdout_execution_approved": false,
+  "production_wiring_allowed": false,
+  "human_release_gate_met": false,
+  "candidate": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini-2025-04-14",
+    "endpoint": "https://api.openai.com/v1/chat/completions",
+    "temperature": 0,
+    "max_completion_tokens": 1024,
+    "input_usd_per_million_tokens": "0.40",
+    "output_usd_per_million_tokens": "1.60",
+    "pricing_source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+    "pricing_verified_on": "2026-10-04"
+  },
+  "case_count": 360,
+  "candidate_call_count": 339,
+  "candidate_no_call_count": 21,
+  "future_execution_limits": {
+    "attempts_per_eligible_case": 1,
+    "sdk_retries": 0,
+    "concurrency": 1,
+    "request_timeout_seconds": 30,
+    "fallback_models": false,
+    "automatic_reruns": false,
+    "stop_on_transport_or_output_failure": true
+  },
+  "observations": [
+    "provider refusal and output truncation",
+    "schema and source-attribution failures",
+    "offline snapshot and authority-policy rejection reasons",
+    "latency, usage and actual provider cost",
+    "disagreements with AI drafts, never labelled as accuracy"
+  ],
+  "forbidden_claims": [
+    "semantic accuracy or calibrated confidence",
+    "independent human review",
+    "production readiness or permission to activate memory"
+  ],
+  "future_run_approval_requires": [
+    "exact preflight digest, candidate model and unchanged instructions",
+    "explicit USD spending cap and verified token-accounting strategy",
+    "single-run authorization and synthetic-source data-sharing approval",
+    "provider schema smoke-test and failure stop policy",
+    "bounded output location and no holdout access",
+    "no production, SDK, MCP, assistant or memory writes"
+  ]
+}

@@ -110,6 +110,11 @@ and future evaluation partitions. Review broader template similarities too.
 
 ## Remaining gates
 
+AI-generated annotation drafts may support a separately scoped
+[exploratory preflight](preference_exploratory_preflight.md), not this protocol's
+human-reviewed evaluation. That preflight cannot authorize provider calls or
+satisfy the human-review release gate.
+
 The read-only `benchmarks.internal.preference_review` validator now checks
 schema, input/case identity, source attribution and declared completion. It can
 check that a completed a/b pair declares different reviewers. It does not
