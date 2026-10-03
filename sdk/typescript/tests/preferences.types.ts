@@ -1,5 +1,5 @@
 // Compile-only consumer contract checks. Never invokes a service.
-import type { PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext } from "../src/index";
+import type { PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, RetrieveResult } from "../src/index";
 
 const global: PreferenceApplicability = { kind: "global" };
 const project: PreferenceApplicability = { kind: "context", namespace: "project", key: "release-check" };
@@ -11,6 +11,23 @@ const replacement: PreferenceClaimRequest = {
   ...uncertain, commitment: "replacement", replacesMemoryId: "server-id", replacesVersion: "server-version",
 };
 const read: PreferenceReadContext = { applicability: global, propertyKeys: ["examples.language"] };
+const held: PreferenceClaimRequest = {
+  ...uncertain, applicability: global, commitment: "uncertain", choiceState: "current_choice_unresolved",
+  replacesMemoryId: "server-id", replacesVersion: "server-version",
+};
+const decision: PreferenceReadDecision = { propertyKey: "examples.language", applicability: project,
+  state: "current_choice_unresolved" };
+function readDecisions(result: RetrieveResult): PreferenceReadDecision[] {
+  return result.preferenceDecisions ?? [];
+}
+// @ts-expect-error Withholding requires the exact target version.
+const heldWithoutVersion: PreferenceClaimRequest = { ...uncertain, choiceState: "current_choice_unresolved", replacesMemoryId: "m" };
+// @ts-expect-error An asserted value cannot declare an unresolved current choice.
+const assertedHold: PreferenceClaimRequest = { ...held, commitment: "asserted" };
+// @ts-expect-error Withholding cannot guess unresolved applicability.
+const unknownHold: PreferenceClaimRequest = { ...held, applicability: { kind: "unresolved" } };
+// @ts-expect-error Candidate-only uncertainty cannot target the current winner.
+const candidateWithTarget: PreferenceClaimRequest = { ...held, choiceState: "candidate_only" };
 // @ts-expect-error Context cannot omit its stable key.
 const missingKey: PreferenceApplicability = { kind: "context", namespace: "project" };
 // @ts-expect-error Global cannot silently carry project scope.
@@ -19,4 +36,5 @@ const scopedGlobal: PreferenceApplicability = { kind: "global", namespace: "proj
 const missingVersion: PreferenceClaimRequest = { propertyKey: "x", value: "Python", applicability: global, turnIndex: 0, quote: "Python", commitment: "replacement", replacesMemoryId: "m" };
 // @ts-expect-error Reads cannot guess unresolved applicability.
 const unresolved: PreferenceReadContext = { applicability: { kind: "unresolved" }, propertyKeys: ["x"] };
-void [replacement, read, missingKey, scopedGlobal, missingVersion, unresolved];
+void [replacement, read, held, decision, readDecisions, heldWithoutVersion, assertedHold, unknownHold,
+  candidateWithTarget, missingKey, scopedGlobal, missingVersion, unresolved];

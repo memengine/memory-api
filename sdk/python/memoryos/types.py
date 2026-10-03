@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
-from memoryos.preferences import PreferenceClaimRequest
+from memoryos.preferences import PreferenceClaimRequest, PreferenceReadDecision
 
 MemoryCategory = Literal[
     "preference",
@@ -279,6 +279,7 @@ class RetrieveResult(BaseModel):
     clarification_question: str | None = None
     clarification: MemoryClarification | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
+    preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
 
     @property
     def has_context(self) -> bool:
@@ -499,6 +500,7 @@ class RetrieveEnvelope(EnvelopeBase):
     clarification_question: str | None = None
     clarification: MemoryClarification | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
+    preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
 
 
 class RetrievalFeedbackEnvelope(EnvelopeBase):

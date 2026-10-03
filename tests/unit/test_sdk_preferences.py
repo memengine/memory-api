@@ -21,6 +21,7 @@ from memoryos import (
     MemoryOSError,
     PreferenceClaimRequest,
     PreferenceReadContext,
+    PreferenceReadDecision,
 )
 from memoryos.preferences import PreferenceApplicability
 from memoryos.types import AddRequest, MemoryJobStatus, MemoryRecord, MemoryResult
@@ -121,6 +122,75 @@ async def test_old_calls_omit_optional_fields_and_do_not_poll(sdk):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("typed", [False, True])
+async def test_unresolved_choice_forwards_exact_snapshot_without_polling(sdk, typed):
+    client, captured = sdk
+    declaration = {**CLAIM, "commitment": "uncertain", "choice_state": "current_choice_unresolved"}
+    value = PreferenceClaimRequest(**declaration) if typed else declaration
+    result = await invoke(client, "add", [{"role": "user", "content": declaration["quote"]}],
+        "u", preference_claims=[value])
+    assert result.was_queued and len(captured) == 1
+    assert captured[0][1]["preference_claims"] == [declaration]
+
+
+@pytest.mark.asyncio
+async def test_candidate_only_keeps_the_old_wire_shape(sdk):
+    client, captured = sdk
+    await invoke(client, "add", [{"role": "user", "content": CLAIM["quote"]}], "u",
+        preference_claims=[{**CLAIM, "choice_state": "candidate_only"}])
+    assert captured[0][1]["preference_claims"] == [CLAIM]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [
+    {"replaces_memory_id": None}, {"replaces_version": None},
+    {"commitment": "asserted"}, {"commitment": "replacement"},
+    {"applicability": {"kind": "unresolved"}}, {"choice_state": "model_decides"},
+])
+async def test_invalid_unresolved_choices_fail_before_network(sdk, change):
+    client, captured = sdk
+    with pytest.raises(ValueError):
+        await invoke(client, "add", [{"role": "user", "content": CLAIM["quote"]}], "u",
+            preference_claims=[{**CLAIM, "commitment": "uncertain",
+                "choice_state": "current_choice_unresolved", **change}])
+    assert captured == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_decision", [False, True])
+@pytest.mark.parametrize("with_other_context", [False, True])
+async def test_choice_decisions_survive_empty_or_partial_context(asynchronous, with_decision, with_other_context):
+    calls = []
+    decision = {"property_key": "examples.language", "applicability": SCOPE,
+        "state": "current_choice_unresolved"}
+    question = "Which language should remain current?" if with_decision else None
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={
+            "data": ([{"id": "exam", "content": "Exam is October 18.", "category": "fact",
+                "importance_score": 5, "relevance_score": 1, "context_snippet": "Exam"}]
+                if with_other_context else []),
+            "cached": False, "system_prompt_addition": "Exam is October 18." if with_other_context else "",
+            "clarification_question": question,
+            **({"preference_decisions": [decision]} if with_decision else {}),
+            "request_id": "r", "timestamp": "2026-10-03T00:00:00Z",
+        })
+    client = AsyncMemory("test") if asynchronous else Memory("test")
+    await invoke(client._client, "aclose") if asynchronous else client._client.close()
+    cls = httpx.AsyncClient if asynchronous else httpx.Client
+    client._client = cls(base_url=client.base_url, transport=httpx.MockTransport(handler))
+    try:
+        result = await invoke(client, "get", "language?", "u", preference_context=CONTEXT)
+        assert [d.model_dump(exclude_none=True) for d in result.preference_decisions] == ([decision] if with_decision else [])
+        assert result.clarification_question == question
+        assert result.has_context is with_other_context
+        assert "Python" not in result.system_prompt_addition and "C++" not in result.system_prompt_addition
+        assert len(calls) == 1 and json.loads(calls[0].content)["preference_context"] == CONTEXT
+    finally:
+        await invoke(client, "close")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("commitment,applicability", [
     ("asserted", {"kind": "global"}),
     ("uncertain", SCOPE),
@@ -153,18 +223,12 @@ async def test_unsupported_combinations_fail_without_network(sdk):
     assert not captured
 
 
-@pytest.mark.parametrize("name", ["PreferenceApplicability", "PreferenceClaimRequest", "PreferenceReadContext"])
+@pytest.mark.parametrize("name", ["PreferenceApplicability", "PreferenceClaimRequest", "PreferenceReadContext", "PreferenceReadDecision"])
 def test_standalone_schema_matches_backend(name):
     sdk_model = {"PreferenceApplicability": PreferenceApplicability,
-        "PreferenceClaimRequest": PreferenceClaimRequest, "PreferenceReadContext": PreferenceReadContext}[name]
-    server_schema = getattr(backend, name).model_json_schema()
-    if name == "PreferenceClaimRequest":
-        # A backend-only optional extension; published/local SDK inputs stay valid.
-        field = server_schema["properties"].pop("choice_state")
-        assert field["default"] == "candidate_only"
-        assert field["enum"] == ["candidate_only", "current_choice_unresolved"]
-        assert "choice_state" not in server_schema["required"]
-    assert sdk_model.model_json_schema() == server_schema
+        "PreferenceClaimRequest": PreferenceClaimRequest, "PreferenceReadContext": PreferenceReadContext,
+        "PreferenceReadDecision": PreferenceReadDecision}[name]
+    assert sdk_model.model_json_schema() == getattr(backend, name).model_json_schema()
 
 
 @pytest.mark.parametrize("change", [
@@ -217,7 +281,8 @@ def test_management_and_retrieval_preserve_archived_replacement_version():
 
 
 @pytest.mark.asyncio
-async def test_disabled_backend_is_not_silently_retried_as_legacy(asynchronous):
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_disabled_backend_is_not_silently_retried_as_legacy(asynchronous, operation):
     calls = []
 
     def handler(request):
@@ -231,7 +296,12 @@ async def test_disabled_backend_is_not_silently_retried_as_legacy(asynchronous):
     client._client = cls(base_url=client.base_url, transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(MemoryOSError) as error:
-            await invoke(client, "get", "language", "u", preference_context=CONTEXT)
+            if operation == "read":
+                await invoke(client, "get", "language", "u", preference_context=CONTEXT)
+            else:
+                await invoke(client, "add", [{"role": "user", "content": CLAIM["quote"]}], "u",
+                    preference_claims=[{**CLAIM, "commitment": "uncertain",
+                        "choice_state": "current_choice_unresolved"}])
         assert error.value.status_code == 409
         assert error.value.code == "PREF_409"
         assert len(calls) == 1

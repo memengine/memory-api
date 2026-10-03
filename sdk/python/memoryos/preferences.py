@@ -43,6 +43,8 @@ class PreferenceClaimRequest(BaseModel):
     turn_index: int = Field(strict=True, ge=0, le=63)
     quote: str = Field(min_length=1, max_length=2000)
     commitment: Literal["asserted", "uncertain", "replacement"] = "asserted"
+    # Tentative interest alone must not suspend an existing default.
+    choice_state: Literal["candidate_only", "current_choice_unresolved"] = "candidate_only"
     replaces_memory_id: Annotated[str, StringConstraints(pattern=r"^[a-f0-9-]{36}$")] | None = None
     replaces_version: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")] | None = None
 
@@ -57,12 +59,24 @@ class PreferenceClaimRequest(BaseModel):
             raise ValueError("value must occur verbatim in the evidence quote")
         if self.quote != self.quote.strip():
             raise ValueError("quote must not have surrounding whitespace")
-        if self.commitment == "replacement":
+        references = self.replaces_memory_id is not None or self.replaces_version is not None
+        if self.choice_state == "current_choice_unresolved" and self.commitment != "uncertain":
+            raise ValueError("current_choice_unresolved requires uncertain commitment")
+        if self.choice_state == "current_choice_unresolved" and self.applicability.kind == "unresolved":
+            raise ValueError("withholding requires known applicability")
+        if self.commitment == "replacement" or self.choice_state == "current_choice_unresolved":
             if self.replaces_memory_id is None or self.replaces_version is None:
-                raise ValueError("replacement requires target memory id and version")
-        elif self.replaces_memory_id is not None or self.replaces_version is not None:
-            raise ValueError("only replacement accepts a target")
+                raise ValueError("replacement or unresolved current choice requires target memory id and version")
+        elif references:
+            raise ValueError("only replacement or unresolved current choice accepts a target")
         return self
+
+
+class PreferenceReadDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    property_key: PropertyKey
+    applicability: PreferenceApplicability
+    state: Literal["current_choice_unresolved"] = "current_choice_unresolved"
 
 
 class PreferenceReadContext(BaseModel):

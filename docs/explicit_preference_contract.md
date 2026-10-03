@@ -155,7 +155,7 @@ Review buttons do not activate declarations; restating does not infer their scop
 A matching unresolved-choice review can explicitly reaffirm the already stored
 value under the conditions below; it never activates its candidate text.
 
-## Durable unresolved current choice — backend-only extension
+## Durable unresolved current choice — local, unreleased extension
 
 Tentative interest in another value is not an unresolved decision about the
 current default. The backend accepts an explicit declaration of the latter:
@@ -215,13 +215,17 @@ reviews and old queued jobs cannot clear or replay the choice state. Each new
 hold or reaffirmation rotates the version binding. Concurrent answers encountering
 a locked target/ledger receive the existing retryable `409` review conflict.
 
-This extension is currently **backend-only**. The local SDK declaration types
-still expose the earlier contract, not `choice_state`; structured
-`preference_decisions` are not yet typed SDK outputs. Existing SDK parsing of
-`clarification_question` and raw job metadata remains compatible. Do not claim
-that SDK users can already opt into the new declaration field through its typed
-helpers, or that any customer agent must display or obey a question. Direct API
-integration and later SDK/semantic-admission work are separate release gates.
+The local, unreleased Python/TypeScript SDKs now expose this contract:
+`choice_state` / `choiceState` on declarations, and typed
+`preference_decisions` / `preferenceDecisions` on tenant retrieval results.
+Existing SDK parsing of `clarification_question` and raw job metadata remains
+compatible. Older server responses without decisions yield an empty list; old
+calls retain their previous wire shape. The SDKs do not silently retry failed
+declarations without choice fields. Decisions are independent of whether usable
+context exists: check them even when `has_context` / `hasContext` is false.
+Do not claim that published packages already contain these local changes or
+that a customer agent must display or obey a question. SDK publication, customer
+integration validation and semantic admission are separate release gates.
 Quotation is still attribution, not semantic proof: no classifier was added to
 decide whether free-form language truly means an unresolved current choice.
 

@@ -220,6 +220,7 @@ class AsyncMemory:
             clarification_question=parsed.clarification_question,
             clarification=parsed.clarification,
             source_reviews=parsed.source_reviews,
+            preference_decisions=parsed.preference_decisions,
         )
 
     async def get_job_status(self, job_id: str) -> MemoryJobStatus:

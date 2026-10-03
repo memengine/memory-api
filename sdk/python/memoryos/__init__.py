@@ -1,7 +1,12 @@
 from memoryos.async_client import AsyncMemory
 from memoryos.client import Memory
 from memoryos.errors import AuthError, MemoryOSError, NotFoundError, RateLimitError
-from memoryos.preferences import PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext
+from memoryos.preferences import (
+    PreferenceApplicability,
+    PreferenceClaimRequest,
+    PreferenceReadContext,
+    PreferenceReadDecision,
+)
 from memoryos.types import EvidenceReference, MemorySource, ProposedMemory
 from memoryos.universal import UniversalMemory
 
@@ -13,10 +18,11 @@ __all__ = [
     "MemoryOSError",
     "MemorySource",
     "NotFoundError",
-    "ProposedMemory",
     "PreferenceApplicability",
     "PreferenceClaimRequest",
     "PreferenceReadContext",
+    "PreferenceReadDecision",
+    "ProposedMemory",
     "RateLimitError",
     "UniversalMemory",
 ]

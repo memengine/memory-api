@@ -71,13 +71,22 @@ export type PreferenceApplicability = KnownPreferenceApplicability
 export type PreferenceClaimRequest = {
   propertyKey: string;
   value: string;
-  applicability: PreferenceApplicability;
   turnIndex: number;
   quote: string;
 } & (
-  | { commitment?: "asserted" | "uncertain"; replacesMemoryId?: never; replacesVersion?: never }
-  | { commitment: "replacement"; replacesMemoryId: string; replacesVersion: string }
+  | { applicability: PreferenceApplicability; commitment?: "asserted" | "uncertain";
+      choiceState?: "candidate_only"; replacesMemoryId?: never; replacesVersion?: never }
+  | { applicability: PreferenceApplicability; commitment: "replacement";
+      choiceState?: "candidate_only"; replacesMemoryId: string; replacesVersion: string }
+  | { applicability: KnownPreferenceApplicability; commitment: "uncertain";
+      choiceState: "current_choice_unresolved"; replacesMemoryId: string; replacesVersion: string }
 );
+
+export interface PreferenceReadDecision {
+  propertyKey: string;
+  applicability: PreferenceApplicability;
+  state: "current_choice_unresolved";
+}
 
 export interface PreferenceReadContext {
   applicability: KnownPreferenceApplicability;
@@ -168,6 +177,7 @@ export interface RetrieveResult {
   clarificationQuestion: string | null;
   clarification: MemoryClarification | null;
   sourceReviews?: MemorySourceReview[];
+  preferenceDecisions?: PreferenceReadDecision[];
   readonly hasContext: boolean;
 }
 
@@ -425,6 +435,10 @@ interface RetrieveEnvelope {
   memories_from_hot_tier?: number;
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
   clarification_question?: string | null;
+  preference_decisions?: Array<{
+    property_key: string; applicability: PreferenceApplicability;
+    state: "current_choice_unresolved";
+  }>;
   source_reviews?: Array<{
     id: string; version: string; kind: "restate_source"; question: string;
     target_memory_id?: string | null; current_memory_content?: string | null;
@@ -898,6 +912,7 @@ export class MemoryOS {
             turn_index: claim.turnIndex,
             quote: claim.quote,
             ...(claim.commitment !== undefined ? { commitment: claim.commitment } : {}),
+            ...(claim.choiceState !== undefined ? { choice_state: claim.choiceState } : {}),
             ...(claim.replacesMemoryId !== undefined ? { replaces_memory_id: claim.replacesMemoryId } : {}),
             ...(claim.replacesVersion !== undefined ? { replaces_version: claim.replacesVersion } : {}),
           })),
@@ -1026,6 +1041,9 @@ export class MemoryOS {
       isDegraded: quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
       clarificationQuestion: payload.clarification_question ?? null,
+      preferenceDecisions: (payload.preference_decisions ?? []).map((decision) => ({
+        propertyKey: decision.property_key, applicability: decision.applicability, state: decision.state,
+      })),
       sourceReviews: (payload.source_reviews ?? []).map((review) => ({
         id: review.id, version: review.version, kind: review.kind, question: review.question,
         targetMemoryId: review.target_memory_id ?? null,

@@ -107,6 +107,68 @@ test("application declarations keep uncertainty and unknown scope without guessi
   assert.equal(bodies.length, 3);
 });
 
+test("unresolved choice forwards its exact snapshot without polling", async () => {
+  const bodies = [];
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (_, init) => {
+    bodies.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ status: "queued", job_id: "j" }));
+  });
+  await client.add({ externalUserId: "u", messages: [{ role: "user", content: "Undecided about Python." }],
+    preferenceClaims: [{ propertyKey: "examples.language", value: "Python", applicability: { kind: "global" },
+      turnIndex: 0, quote: "Undecided about Python.", commitment: "uncertain",
+      choiceState: "current_choice_unresolved", replacesMemoryId: "00000000-0000-4000-8000-000000000001",
+      replacesVersion: "a".repeat(64) }] });
+  assert.equal(bodies.length, 1);
+  assert.deepEqual(bodies[0].preference_claims, [{ property_key: "examples.language", value: "Python",
+    applicability: { kind: "global" }, turn_index: 0, quote: "Undecided about Python.", commitment: "uncertain",
+    choice_state: "current_choice_unresolved", replaces_memory_id: "00000000-0000-4000-8000-000000000001",
+    replaces_version: "a".repeat(64) }]);
+});
+
+test("choice decisions survive empty and partial context, older servers default to none", async () => {
+  const decision = { property_key: "examples.language", applicability: { kind: "global" }, state: "current_choice_unresolved" };
+  for (const withDecision of [false, true]) for (const withOtherContext of [false, true]) {
+    let calls = 0;
+    const question = withDecision ? "Which language should remain current?" : null;
+    const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async () => {
+      calls++;
+      return new Response(JSON.stringify({
+        data: withOtherContext ? [{ id: "exam", content: "Exam is October 18.", category: "fact",
+          importance_score: 5, relevance_score: 1, context_snippet: "Exam" }] : [],
+        cached: false, system_prompt_addition: withOtherContext ? "Exam is October 18." : "",
+        clarification_question: question, ...(withDecision ? { preference_decisions: [decision] } : {}),
+      }));
+    });
+    const read = await client.get({ externalUserId: "u", query: "language?",
+      preferenceContext: { applicability: { kind: "global" }, propertyKeys: ["examples.language"] } });
+    assert.deepEqual(read.preferenceDecisions, withDecision ? [{ propertyKey: decision.property_key,
+      applicability: decision.applicability, state: decision.state }] : []);
+    assert.equal(read.clarificationQuestion, question);
+    assert.equal(read.hasContext, withOtherContext);
+    assert.equal(read.systemPromptAddition.includes("Python"), false);
+    assert.equal(calls, 1);
+  }
+});
+
+test("untyped invalid declarations reach backend validation without silent repair", async () => {
+  let body;
+  let calls = 0;
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (_, init) => {
+    calls++;
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ detail: "Controlled invalid declaration" }), { status: 422 });
+  });
+  // JavaScript can bypass TypeScript shapes; the backend remains authoritative.
+  const invalid = { propertyKey: "examples.language", value: "Python", applicability: { kind: "unresolved" },
+    turnIndex: 0, quote: "Python", commitment: "asserted", choiceState: "current_choice_unresolved" };
+  await assert.rejects(() => client.add({ externalUserId: "u", messages: [{ role: "user", content: "Python" }],
+    preferenceClaims: [invalid] }), (error) => error instanceof MemoryOSError && error.statusCode === 422);
+  assert.equal(body.preference_claims[0].choice_state, "current_choice_unresolved");
+  assert.equal(body.preference_claims[0].commitment, "asserted");
+  assert.deepEqual(body.preference_claims[0].applicability, { kind: "unresolved" });
+  assert.equal(calls, 1);
+});
+
 test("capacity accessor keeps raw metadata and handles older job responses", async () => {
   for (const value of [undefined, null, true, -1, 2.5, "2", {}, 2]) {
     const metadata = value === undefined ? {} : { source_reviews_capacity_rejected: value };
@@ -128,6 +190,12 @@ test("disabled backend is surfaced, never retried as an unscoped read", async ()
     preferenceContext: { applicability: { kind: "global" }, propertyKeys: ["x"] } }),
     (error) => error instanceof MemoryOSError && error.statusCode === 409 && error.code === "PREF_409");
   assert.equal(calls, 1);
+  await assert.rejects(() => client.add({ externalUserId: "u", messages: [{ role: "user", content: "Python" }],
+    preferenceClaims: [{ propertyKey: "x", value: "Python", quote: "Python", turnIndex: 0,
+      applicability: { kind: "global" }, commitment: "uncertain", choiceState: "current_choice_unresolved",
+      replacesMemoryId: "00000000-0000-4000-8000-000000000001", replacesVersion: "a".repeat(64) }] }),
+    (error) => error instanceof MemoryOSError && error.statusCode === 409 && error.code === "PREF_409");
+  assert.equal(calls, 2);
 });
 
 test("source reviews preserve lifecycle and do not submit extracted claims", async () => {

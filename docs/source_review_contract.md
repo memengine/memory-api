@@ -103,7 +103,7 @@ and expiry. Unknown/foreign reviews return 404; stale or closed reviews return
   extension, a matching valid review can additionally restore the existing
   preference's usability and rotate its version binding. It does not promote
   authority, activate candidate text, reactivate an archived/expired row or
-  create a memory. See [the explicit preference contract](explicit_preference_contract.md#durable-unresolved-current-choice--backend-only-extension).
+  create a memory. See [the explicit preference contract](explicit_preference_contract.md#durable-unresolved-current-choice--local-unreleased-extension).
 - `dismiss`: dismiss the interpretation without changing any memory.
 - `restate`: return `resolved: false`, `next_step: "add_memory"`. The review stays
   pending. Ask the user in the customer's existing chat, then submit their actual
@@ -114,7 +114,9 @@ Review storage and a durable preference-choice barrier are separate. Dismissing,
 restating, expiring, purging or rejecting storage of a review cannot restore a
 withheld default. Reads continue to report an unresolved choice without requiring
 an available review card. This backend policy is disabled by default and does
-not provide automatic natural-language admission or typed SDK exposure yet.
+not provide automatic natural-language admission. Typed tenant SDK exposure now
+exists in the local, unreleased source checkout only; publication and customer
+integration validation remain separate gates.
 
 The existing job lifecycle reports what ingestion actually did. If it remains
 pending, do not report successful resolution. A changed target invalidates the

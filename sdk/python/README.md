@@ -78,12 +78,65 @@ Do not combine them with `source` or `agent_id`, or explicit reads with `as_of`.
 
 For intentional replacement, use `commitment="replacement"` plus
 `replaces_memory_id` and the exact `provenance["preference_version"]` returned
-by the backend. Uncertainty stays pending; review actions do not activate it.
+by the backend. Tentative uncertainty stays pending without withholding an
+existing default; review actions never activate candidate text.
 Existing job status preserves raw `extraction_metadata` and provides
 `source_reviews_capacity_rejected`; completion alone does not mean storage.
 Immediate reads may precede job completion. There is no automatic polling,
 new model call, authority decision, or read-after-write guarantee in the SDK.
 See [the full contract](../../docs/explicit_preference_contract.md).
+
+### An explicitly unresolved current choice
+
+The local, unreleased SDK also accepts `choice_state="current_choice_unresolved"`
+with `commitment="uncertain"`, known applicability, and the existing winner's exact
+ID/version. This is an application declaration, not interpretation of the user's
+wording. Use it only when your integration has established that the current choice
+is unresolved, not for merely tentative interest in another value.
+
+```python
+# current_id/current_version are backend-issued values from an owned management
+# or prior retrieval result, not guesses or assistant-generated references.
+quote = "For Release Check, I am undecided between my current C++ default and Python."
+write = mem.add(
+    messages=[{"role": "user", "content": quote}], external_user_id="user_123",
+    preference_claims=[PreferenceClaimRequest(
+        property_key="examples.language", value="Python", applicability=scope,
+        turn_index=0, quote=quote, commitment="uncertain",
+        choice_state="current_choice_unresolved",
+        replaces_memory_id=current_id, replaces_version=current_version,
+    )],
+)
+```
+
+The backend checks the exact identity, evidence, ownership, currentness, authority
+and version. A queued write does not prove the choice was withheld: inspect raw
+job `extraction_metadata["preference_choices"]` when processing confirmation is
+needed. Do not add an automatic wait to the answer-generation path.
+
+Tenant `get()` returns exported `PreferenceReadDecision` objects in
+`context.preference_decisions` and preserves `context.clarification_question`.
+Old servers without the field return an empty decision list. Check decisions
+independently of `context.has_context` or `context.items`: an unresolved choice
+can be the only returned information, or coexist with usable unrelated facts.
+
+```python
+context = mem.get(
+    query="Which language should examples use?", external_user_id="user_123",
+    preference_context={"applicability": scope, "property_keys": ["examples.language"]},
+)
+for decision in context.preference_decisions:
+    # Supply this structured outcome to your existing chat workflow. The SDK
+    # does not render UI, alter your agent prompt, choose a value, or resolve it.
+    print(decision.property_key, decision.applicability, decision.state)
+```
+
+Dismissal/expiry of a review does not restore the withheld default. A matching
+`keep_current` review can reaffirm the existing valid value; an exact version-bound
+replacement can resolve the choice. No authority is raised and no candidate text
+is activated by review. The backend remains disabled by default; older servers
+that reject a new declaration surface that error, not a retry with fields removed.
+This capability is not yet published and does not add automatic semantic admission.
 
 ## Multi-service mode: support, billing, CRM, and product services
 

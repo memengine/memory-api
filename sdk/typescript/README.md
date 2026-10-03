@@ -73,11 +73,66 @@ the backend validates evidence, limits, permissions and authority.
 
 For intentional replacement, use `commitment: "replacement"`, `replacesMemoryId`
 and the exact string at `provenance.preference_version` returned by the backend.
-Uncertainty stays pending; review actions do not activate it. Existing job status
+Tentative uncertainty stays pending without withholding an existing default;
+review actions never activate candidate text. Existing job status
 preserves raw `extractionMetadata` and provides `sourceReviewsCapacityRejected`;
 completion alone does not mean storage. Immediate reads may precede job completion.
 There is no automatic polling, new model call, authority decision, or read-after-write
 guarantee in the SDK. See [the full contract](../../docs/explicit_preference_contract.md).
+
+### An explicitly unresolved current choice
+
+The local, unreleased types also accept `choiceState: "current_choice_unresolved"`
+with `commitment: "uncertain"`, known applicability, and both existing-winner
+references. This is an application declaration, not automatic interpretation of
+the user's wording. Merely tentative interest is not a reason to withhold a default.
+
+```ts
+// currentId/currentVersion come from an owned backend management or prior
+// retrieval result; never fabricate them from assistant text.
+const undecidedQuote = "For Release Check, I am undecided between my current C++ default and Python.";
+const held = await mem.add({
+  externalUserId: "user_123", messages: [{ role: "user", content: undecidedQuote }],
+  preferenceClaims: [{
+    propertyKey: "examples.language", value: "Python", applicability,
+    turnIndex: 0, quote: undecidedQuote, commitment: "uncertain",
+    choiceState: "current_choice_unresolved",
+    replacesMemoryId: currentId, replacesVersion: currentVersion,
+  }],
+});
+```
+
+The backend validates evidence, exact identity, ownership, currentness, authority
+and version. JavaScript can bypass TypeScript shapes; the SDK does not silently
+repair invalid declarations or strip fields after server rejection. A queued
+write is not confirmed withholding: raw job `extractionMetadata.preference_choices`
+records processing outcomes. Poll only when your workflow explicitly needs that
+confirmation, not automatically while generating an answer.
+
+Tenant `get()` returns exported `PreferenceReadDecision` entries in
+`context.preferenceDecisions` (an empty array from old servers without the field)
+and preserves `context.clarificationQuestion`. The result type's field is optional
+for compatibility with existing consumers constructing result objects. Check it
+independently of `context.hasContext` and `context.items`: unresolved choice can
+be the only information, or accompany usable unrelated facts.
+
+```ts
+const reviewed = await mem.get({
+  externalUserId: "user_123", query: "Which language should examples use?",
+  preferenceContext: { applicability, propertyKeys: ["examples.language"] },
+});
+for (const decision of reviewed.preferenceDecisions ?? []) {
+  // Pass this structured outcome to your existing chat workflow. The SDK
+  // does not render UI, change an agent prompt, choose a value or resolve it.
+  console.log(decision.propertyKey, decision.applicability, decision.state);
+}
+```
+
+Review dismissal/expiry cannot restore a withheld default. A matching
+`keep_current` review can reaffirm an existing valid value; an exact version-bound
+replacement can resolve the choice. Neither raises authority or activates
+candidate text. This capability remains unpublished and disabled by default,
+and does not add automatic semantic admission.
 
 ## Multi-service mode: support, billing, CRM, and product services
 
