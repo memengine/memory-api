@@ -67,7 +67,11 @@ the input hash. AI-authored labels, an AI session or the dataset author checking
 their own intentions do not satisfy the frozen human-review requirement.
 
 Each `annotations` entry starts as null: it means **unreviewed**, not “no
-preference.” Fill it with a review record containing:
+preference.” The versioned authoritative schema, complete JSON examples,
+required/optional fields, enum values and validation commands are in
+[Human preference review schema v1](preference_human_review_schema.md).
+Use that format rather than inventing fields. Store result copies under
+`artifacts/preference-review/`. Fill each entry with a review record containing:
 
 - Semantic findings: property, applicability/scope, intended existing target if
   any, stance, separately quoted value if present, eligible evidence turn and
@@ -106,10 +110,13 @@ and future evaluation partitions. Review broader template similarities too.
 
 ## Remaining gates
 
-Neither the loader nor the worksheet templates implement human-review
-certification, scoring or a release gate. Manual `status` fields are not proof of
-review; approved reviewed artifacts and adjudication records must be verified in
-a separately scoped next step. No semantic accuracy is measured here.
+The read-only `benchmarks.internal.preference_review` validator now checks
+schema, input/case identity, source attribution and declared completion. It can
+check that a completed a/b pair declares different reviewers. It does not
+authenticate human identity, establish independence, verify semantic correctness,
+adjudicate, score or implement a release gate. Manual `status` fields are not
+proof of review; approved reviewed artifacts and adjudication records must be
+verified in a separately scoped next step. No semantic accuracy is measured here.
 
 The next provider run still requires reviewed input/label hashes, provider/model,
 request-schema/instruction hashes, token/call bounds, budget/retry policy and

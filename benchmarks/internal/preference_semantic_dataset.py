@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from benchmarks.internal.preference_review_schema import REVIEW_SCHEMA_VERSION
 from benchmarks.internal.preference_semantic_contract import (
     ClosedModel,
     ContractContext,
@@ -144,7 +145,7 @@ def blank_worksheet(pack: dict, *, review_pass: Literal["a", "b"], inputs_hash: 
         raise ValueError("only the two human review passes are defined")
     # Differing deterministic order; neither pass carries author tags or answers.
     cases = sorted(pack["cases"], key=lambda raw: hashlib.sha256((review_pass + raw["case_id"]).encode()).hexdigest())
-    return {"pack_id": pack["pack_id"], "inputs_sha256_utf8_lf": inputs_hash, "review_pass": review_pass,
+    return {"schema_version": REVIEW_SCHEMA_VERSION, "pack_id": pack["pack_id"], "inputs_sha256_utf8_lf": inputs_hash, "review_pass": review_pass,
         "reviewer_identity": None, "reviewer_is_human": None, "status": "pending",
         "annotations": {raw["case_id"]: None for raw in cases}}
 

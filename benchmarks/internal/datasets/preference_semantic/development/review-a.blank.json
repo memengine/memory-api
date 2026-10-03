@@ -1,4 +1,5 @@
 {
+  "schema_version": "preference-human-review-v1",
   "pack_id": "preference-semantic-development-v1",
   "inputs_sha256_utf8_lf": "c5abc8a568c38ac9f42f006ec09c5cc853061f24eca4fc1246c5d4b83460920f",
   "review_pass": "a",
