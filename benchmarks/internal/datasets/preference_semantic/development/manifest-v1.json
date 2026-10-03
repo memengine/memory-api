@@ -1,0 +1,102 @@
+{
+  "pack_id": "preference-semantic-development-v1",
+  "protocol_id": "preference-semantic-admission-v1",
+  "status": "draft-input-seal-not-reviewed-label-freeze",
+  "hash_encoding": "utf-8-lf",
+  "inputs_sha256_utf8_lf": "c5abc8a568c38ac9f42f006ec09c5cc853061f24eca4fc1246c5d4b83460920f",
+  "protocol_sha256_utf8_lf": "a41edba82cbce78a6a96bee66082f2ba79ed58709c2057d26a337373e0b82e86",
+  "inspection": {
+    "case_count": 360,
+    "related_scenario_count": 120,
+    "languages": {
+      "en": 120,
+      "hi": 120,
+      "hinglish": 120
+    },
+    "language_family_counts": {
+      "en": {
+        "adopted_default": 10,
+        "tentative_interest": 10,
+        "undecided_with_alternative": 10,
+        "undecided_without_alternative": 10,
+        "committed_replacement": 10,
+        "scoped_exception": 10,
+        "rejected_alternative": 10,
+        "reaffirmation": 10,
+        "unrelated_fact_or_question": 10,
+        "ambiguous_or_late_reference": 10,
+        "multiple_properties": 10,
+        "forged_or_ineligible_evidence": 10
+      },
+      "hi": {
+        "adopted_default": 10,
+        "tentative_interest": 10,
+        "undecided_with_alternative": 10,
+        "undecided_without_alternative": 10,
+        "committed_replacement": 10,
+        "scoped_exception": 10,
+        "rejected_alternative": 10,
+        "reaffirmation": 10,
+        "unrelated_fact_or_question": 10,
+        "ambiguous_or_late_reference": 10,
+        "multiple_properties": 10,
+        "forged_or_ineligible_evidence": 10
+      },
+      "hinglish": {
+        "adopted_default": 10,
+        "tentative_interest": 10,
+        "undecided_with_alternative": 10,
+        "undecided_without_alternative": 10,
+        "committed_replacement": 10,
+        "scoped_exception": 10,
+        "rejected_alternative": 10,
+        "reaffirmation": 10,
+        "unrelated_fact_or_question": 10,
+        "ambiguous_or_late_reference": 10,
+        "multiple_properties": 10,
+        "forged_or_ineligible_evidence": 10
+      }
+    },
+    "language_reference_counts": {
+      "en": {
+        "single_explicit": 60,
+        "single_indirect": 10,
+        "ordinal": 10,
+        "ambiguous_multiple": 10,
+        "late_reference": 10,
+        "none": 20
+      },
+      "hi": {
+        "single_explicit": 60,
+        "single_indirect": 10,
+        "ordinal": 10,
+        "ambiguous_multiple": 10,
+        "late_reference": 10,
+        "none": 20
+      },
+      "hinglish": {
+        "single_explicit": 60,
+        "single_indirect": 10,
+        "ordinal": 10,
+        "ambiguous_multiple": 10,
+        "late_reference": 10,
+        "none": 20
+      }
+    },
+    "prefilter_no_call_cases": 21,
+    "human_review_complete": false,
+    "provider_execution_approved": false,
+    "semantic_accuracy_measured": false,
+    "author_tag_coverage_only": true,
+    "language_quality_reviewed": false
+  },
+  "reviewer_passes": {
+    "a": "review-a.blank.json",
+    "b": "review-b.blank.json"
+  },
+  "label_status": "no-labels-authored-no-human-review-or-adjudication",
+  "protocol_assets_unchanged": true,
+  "provider_execution_approved": false,
+  "holdout_execution_approved": false,
+  "production_wiring_allowed": false
+}
