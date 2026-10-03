@@ -135,5 +135,6 @@ jobs:
           cd sdk/typescript
           npm ci
           npm run typecheck
+          npm run test:contract
 
 

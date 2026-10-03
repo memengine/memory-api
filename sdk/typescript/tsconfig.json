@@ -10,5 +10,5 @@
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "examples"]
+  "include": ["src", "examples", "tests/*.types.ts"]
 }

@@ -9,6 +9,7 @@ from urllib.parse import quote
 import httpx
 
 from memoryos.errors import MemoryOSError, map_sdk_error
+from memoryos.preferences import PreferenceClaimRequest, PreferenceReadContext
 from memoryos.types import (
     AddEnvelope,
     AddRequest,
@@ -120,6 +121,8 @@ class Memory:
         idempotency_key: str | None = None,
         source: MemorySource | dict[str, Any] | None = None,
         conversation_id: str | None = None,
+        *,
+        preference_claims: list[PreferenceClaimRequest | dict[str, Any]] | None = None,
     ) -> AddResult:
         payload = AddRequest(
             external_user_id=external_user_id,
@@ -127,6 +130,10 @@ class Memory:
             messages=[item if isinstance(item, ConversationMessage) else ConversationMessage.model_validate(item) for item in messages],
             metadata=metadata or {},
             conversation_id=conversation_id,
+            preference_claims=(
+                [PreferenceClaimRequest.model_validate(claim) for claim in preference_claims]
+                if preference_claims is not None else None
+            ),
             source=(
                 source
                 if isinstance(source, MemorySource)
@@ -167,6 +174,8 @@ class Memory:
         format: str = "bullets",
         context_max_tokens: int = 500,
         as_of: datetime | None = None,
+        *,
+        preference_context: PreferenceReadContext | dict[str, Any] | None = None,
     ) -> RetrieveResult:
         body: dict[str, Any] = {
             "query": query,
@@ -180,6 +189,11 @@ class Memory:
             body["agent_id"] = agent_id
         if time_filter_days is not None:
             body["time_filter_days"] = time_filter_days
+        if preference_context is not None:
+            if as_of is not None or agent_id is not None:
+                raise ValueError("explicit preference context does not support as_of or agent-bound reads in v1")
+            context = PreferenceReadContext.model_validate(preference_context)
+            body["preference_context"] = context.model_dump(mode="json", exclude_none=True)
         if as_of is not None:
             if as_of.tzinfo is None:
                 raise ValueError("as_of must include a timezone")

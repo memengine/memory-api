@@ -1,7 +1,134 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MemoryOS, UniversalMemoryOS } from "../dist/index.js";
+import { MemoryOS, MemoryOSError, UniversalMemoryOS } from "../dist/index.js";
+
+test("typed preferences use existing endpoints without implicit polling", async () => {
+  const requests = [];
+  const applicability = { kind: "context", namespace: "project", key: "release-check" };
+  const provenance = { preference_version: "b".repeat(64), unknown_future_field: { keep: true } };
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (url, init) => {
+    requests.push({ url, init, body: init.body ? JSON.parse(init.body) : null });
+    if (url.endsWith("/add")) return new Response(JSON.stringify({ status: "queued", job_id: "j" }));
+    if (url.endsWith("/retrieve")) return new Response(JSON.stringify({
+      data: [{ id: "m", content: "Python", category: "preference", importance_score: 5,
+        relevance_score: 1, context_snippet: "Python", provenance }],
+      cached: false, system_prompt_addition: "Python",
+    }));
+    if (url.endsWith("/jobs/j")) return new Response(JSON.stringify({ data: {
+      job_id: "j", status: "completed", created_memory_ids: [],
+      extraction_metadata: { source_reviews_capacity_rejected: 2, future_field: "preserved" },
+    } }));
+    return new Response(JSON.stringify({ data: [{ id: "m", content: "Python", category: "preference",
+      importance_score: 5, is_archived: true, provenance }],
+      pagination: { next_cursor: null, limit: 50, total: 1 } }));
+  });
+  const write = await client.add({
+    externalUserId: "user-1", conversationId: "chat-1", idempotencyKey: "evt-1",
+    messages: [{ role: "user", content: "For Release Check, use Python for examples." }],
+    preferenceClaims: [{ propertyKey: "examples.language", value: "Python", applicability,
+      turnIndex: 0, quote: "For Release Check, use Python for examples.", commitment: "replacement",
+      replacesMemoryId: "00000000-0000-4000-8000-000000000001", replacesVersion: "a".repeat(64) }],
+  });
+  assert.equal(write.wasQueued, true);
+  assert.equal(requests[0].init.headers["Idempotency-Key"], "evt-1");
+  assert.deepEqual(requests[0].body, {
+    external_user_id: "user-1", conversation_id: "chat-1", metadata: {},
+    messages: [{ role: "user", content: "For Release Check, use Python for examples." }],
+    preference_claims: [{ property_key: "examples.language", value: "Python", applicability,
+      turn_index: 0, quote: "For Release Check, use Python for examples.", commitment: "replacement",
+      replaces_memory_id: "00000000-0000-4000-8000-000000000001", replaces_version: "a".repeat(64) }],
+  });
+  const read = await client.get({ externalUserId: "user-1", query: "language",
+    preferenceContext: { applicability, propertyKeys: ["examples.language"] } });
+  assert.deepEqual(requests[1].body.preference_context, { applicability, property_keys: ["examples.language"] });
+  assert.deepEqual(read.items[0].provenance, provenance);
+  const job = await client.getJobStatus("j");
+  assert.equal(job.succeeded, true);
+  assert.deepEqual(job.createdMemoryIds, []);
+  assert.equal(job.sourceReviewsCapacityRejected, 2);
+  assert.equal(job.extractionMetadata.future_field, "preserved");
+  const page = await client.list("user-1");
+  assert.equal(page.items[0].isArchived, true);
+  assert.deepEqual(page.items[0].provenance, provenance);
+  assert.equal(requests.length, 4);
+});
+
+test("new object add and old positional calls omit undeclared preference fields", async () => {
+  const bodies = [];
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return new Response(JSON.stringify(url.endsWith("/add") ? { status: "queued", job_id: "j" }
+      : { data: [], cached: false, system_prompt_addition: "" }));
+  });
+  await client.add({ externalUserId: "u", messages: [{ role: "user", content: "hello" }] });
+  await client.add([{ role: "user", content: "hello" }], "u");
+  await client.get("language", "u");
+  await client.get({ externalUserId: "u", query: "language" });
+  assert.deepEqual(bodies[0], bodies[1]);
+  assert.deepEqual(bodies[2], bodies[3]);
+  assert.ok(bodies.every((body) => !("preference_claims" in body) && !("preference_context" in body)));
+});
+
+test("unsupported preference combinations fail before the network", async () => {
+  let calls = 0;
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async () => { calls++; });
+  const preferenceClaims = [{ propertyKey: "x", value: "Python", applicability: { kind: "global" },
+    turnIndex: 0, quote: "Python" }];
+  const preferenceContext = { applicability: { kind: "global" }, propertyKeys: ["x"] };
+  for (const options of [{ agentId: "a" }, { source: { service: "billing" } }]) {
+    await assert.rejects(() => client.add({ externalUserId: "u", messages: [], preferenceClaims, ...options }), /source events or agent-bound/);
+  }
+  for (const options of [{ agentId: "a" }, { asOf: "2026-10-03T00:00:00Z" }]) {
+    await assert.rejects(() => client.get({ externalUserId: "u", query: "x", preferenceContext, ...options }), /asOf or agent-bound/);
+  }
+  assert.equal(calls, 0);
+});
+
+test("application declarations keep uncertainty and unknown scope without guessing", async () => {
+  const bodies = [];
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (_, init) => {
+    bodies.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ status: "queued", job_id: "j" }));
+  });
+  for (const [commitment, applicability] of [
+    [undefined, { kind: "global" }],
+    ["uncertain", { kind: "context", namespace: "project", key: "release-check" }],
+    ["asserted", { kind: "unresolved" }],
+  ]) {
+    await client.add({ externalUserId: "u", messages: [{ role: "user", content: "Python" }],
+      preferenceClaims: [{ propertyKey: "examples.language", value: "Python", turnIndex: 0,
+        quote: "Python", applicability, ...(commitment === undefined ? {} : { commitment }) }] });
+    const sent = bodies.at(-1).preference_claims[0];
+    assert.equal(sent.commitment, commitment);
+    assert.deepEqual(sent.applicability, applicability);
+    assert.equal("replaces_memory_id" in sent, false);
+  }
+  assert.equal(bodies.length, 3);
+});
+
+test("capacity accessor keeps raw metadata and handles older job responses", async () => {
+  for (const value of [undefined, null, true, -1, 2.5, "2", {}, 2]) {
+    const metadata = value === undefined ? {} : { source_reviews_capacity_rejected: value };
+    const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async () =>
+      new Response(JSON.stringify({ data: { job_id: "j", status: "completed", extraction_metadata: metadata } })));
+    const job = await client.getJobStatus("j");
+    assert.equal(job.sourceReviewsCapacityRejected, value === 2 ? 2 : 0);
+    assert.deepEqual(job.extractionMetadata, metadata);
+  }
+});
+
+test("disabled backend is surfaced, never retried as an unscoped read", async () => {
+  let calls = 0;
+  const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async () => {
+    calls++;
+    return new Response(JSON.stringify({ error: "explicit_preferences_unavailable", code: "PREF_409" }), { status: 409 });
+  });
+  await assert.rejects(() => client.get({ externalUserId: "u", query: "x",
+    preferenceContext: { applicability: { kind: "global" }, propertyKeys: ["x"] } }),
+    (error) => error instanceof MemoryOSError && error.statusCode === 409 && error.code === "PREF_409");
+  assert.equal(calls, 1);
+});
 
 test("source reviews preserve lifecycle and do not submit extracted claims", async () => {
   let body;

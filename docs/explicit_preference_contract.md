@@ -2,8 +2,9 @@
 
 This is the first bounded implementation of typed preference applicability.
 It is **not** automatic scope extraction, a general semantic conflict detector,
-or a fix already available in the assistant/SDK. No production enablement or
-SDK release is included. `EXPLICIT_PREFERENCE_CLAIMS_ENABLED` defaults to false;
+or automatic assistant behavior. Local, unreleased Python/TypeScript SDKs now
+expose the optional fields; no production enablement or SDK release is included.
+`EXPLICIT_PREFERENCE_CLAIMS_ENABLED` defaults to false;
 requests using this contract then receive `409 explicit_preferences_unavailable`.
 Keep it disabled in production until the integration/release gates are approved.
 
@@ -158,7 +159,7 @@ replacement races, legacy candidate/cache exclusion, scoped review delivery,
 and transaction rollback on a ledger failure. Provider responses/embeddings in
 these tests are controlled; they do not measure language understanding.
 
-Still separate work: application/SDK integration contract, scoped historical
+Still separate work: SDK release and customer integration validation, scoped historical
 reads, agent-bound identities, automatic property/applicability/commitment
 admission, independent semantic evaluation, and load/latency measurement.
 Local review lookup checks now cover 1K/10K/100K synthetic rows, one and sixteen
@@ -169,5 +170,52 @@ reduced buffer work at 100K rows; an additional partial age index supports bound
 background expiration/retention. These checks are isolated SQL plans, not loaded
 production p99, provider latency, or throughput measurements. See the review
 contract for deadlines, storage caps and explicit capacity-rejection outcomes. No
-customer agent prompt or new UI was changed to make these tests pass. SDK, MCP,
-assistant and universal-path changes are intentionally outside this slice.
+customer agent prompt or new UI was changed to make these tests pass. MCP,
+assistant and universal-path changes remain outside this slice.
+
+## Local SDK contract (unreleased)
+
+Python `Memory` and `AsyncMemory` accept keyword-only `preference_claims` on
+`add()` and `preference_context` on `get()`. Both accept their exported typed
+models or dictionaries. TypeScript adds an `add(AddRequest)` object overload
+with `preferenceClaims`, while retaining the existing positional signature.
+Its existing `get(GetParams)` object form accepts `preferenceContext`. These
+are additive opt-in fields: omitted fields are not sent and old calls keep
+their previous wire shape. Python models are standalone, not imports of the
+backend package; schema parity tests protect against drift.
+
+The SDKs reject source/agent-bound declarations and agent-bound/historical
+explicit reads before sending. The backend remains authoritative for evidence,
+ownership, permissions, currentness, authority and all admission decisions.
+TypeScript types describe valid shapes but are not a runtime trust boundary;
+the backend validates lengths, keys, quotes and replacement references. No SDK
+infers property keys, applicability, commitment, or trust from natural language.
+When the server flag is off, clients surface `409` with code `PREF_409` and error
+`explicit_preferences_unavailable`; neither retries without the preference field.
+
+`add()` submits one queued job and does not automatically wait for it. If a caller
+needs confirmation of asynchronous processing, it can separately use existing
+`get_job_status()` / `getJobStatus()` or explicitly poll. A completed job means
+processing completed, not that every declaration became current or every review
+was retained. Check created IDs, pending counts and extraction metadata.
+`job.source_reviews_capacity_rejected` (Python) /
+`job.sourceReviewsCapacityRejected` (TypeScript) reads the existing diagnostic,
+defaulting to zero for absent or invalid counts; raw metadata stays intact.
+Uncertain declarations can remain pending with no created memory ID. Review
+capacity rejection is not storage or authority escalation. Neither outcome
+accessor provides a new per-declaration disposition API.
+
+Retrieval and management responses preserve `provenance.preference_version`
+and unknown provenance fields, including an archived version when returned by
+the authorized management API. Copy the exact backend ID/version into replacement
+declarations; do not fabricate a version or take it from assistant text. Versions
+can become stale concurrently; a failed replacement is not silently retried with
+new authority. Legacy reads exclude declared preferences; continue using the
+explicit context when retrieving declarations.
+
+Keep extraction/polling off the answer-generation critical path unless the
+customer explicitly needs processing confirmation. This contract introduces no
+read-after-write guarantee: an immediate read can precede job completion.
+Transport and schema tests cover compatibility, not live chat behavior, language
+understanding, measured production p99 or loaded capacity. No publication,
+package-version bump, feature enablement, assistant rules, or new UI is included.

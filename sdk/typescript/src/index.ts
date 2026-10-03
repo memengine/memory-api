@@ -60,6 +60,30 @@ export interface MemorySourceOptions {
   evidence?: EvidenceReference[];
 }
 
+/** Stable application-owned scope; never inferred from source-event metadata. */
+export type KnownPreferenceApplicability =
+  | { kind: "global"; namespace?: never; key?: never }
+  | { kind: "context"; namespace: string; key: string };
+
+export type PreferenceApplicability = KnownPreferenceApplicability
+  | { kind: "unresolved"; namespace?: never; key?: never };
+
+export type PreferenceClaimRequest = {
+  propertyKey: string;
+  value: string;
+  applicability: PreferenceApplicability;
+  turnIndex: number;
+  quote: string;
+} & (
+  | { commitment?: "asserted" | "uncertain"; replacesMemoryId?: never; replacesVersion?: never }
+  | { commitment: "replacement"; replacesMemoryId: string; replacesVersion: string }
+);
+
+export interface PreferenceReadContext {
+  applicability: KnownPreferenceApplicability;
+  propertyKeys: string[];
+}
+
 export interface AddRequest {
   externalUserId: string;
   agentId?: string;
@@ -67,6 +91,8 @@ export interface AddRequest {
   metadata?: Record<string, unknown>;
   source?: MemorySource;
   conversationId?: string;
+  idempotencyKey?: string;
+  preferenceClaims?: PreferenceClaimRequest[];
 }
 
 export interface AddResult {
@@ -106,6 +132,7 @@ export interface MemoryJobStatus {
   completedAt: string | null;
   deadLetteredAt: string | null;
   extractionMetadata: Record<string, unknown>;
+  readonly sourceReviewsCapacityRejected: number;
   readonly succeeded: boolean;
 }
 
@@ -246,6 +273,7 @@ export interface GetParams {
   format?: "bullets" | "json" | "xml";
   contextMaxTokens?: number;
   asOf?: string;
+  preferenceContext?: PreferenceReadContext;
 }
 
 export interface UserProfile {
@@ -823,6 +851,7 @@ export class MemoryOS {
     this.fetchImpl = fetchImpl;
   }
 
+  async add(params: AddRequest): Promise<AddResult>;
   async add(
     messages: ConversationMessage[],
     externalUserId: string,
@@ -831,23 +860,48 @@ export class MemoryOS {
     source?: MemorySource,
     idempotencyKey?: string,
     conversationId?: string,
+  ): Promise<AddResult>;
+  async add(
+    messagesOrParams: ConversationMessage[] | AddRequest,
+    externalUserId?: string,
+    agentId?: string,
+    metadata?: Record<string, unknown>,
+    source?: MemorySource,
+    idempotencyKey?: string,
+    conversationId?: string,
   ): Promise<AddResult> {
-    const payload: AddRequest = {
-      externalUserId,
-      messages,
+    const payload: AddRequest = Array.isArray(messagesOrParams) ? {
+      externalUserId: externalUserId ?? "",
+      messages: messagesOrParams,
       ...(agentId ? { agentId } : {}),
       ...(metadata ? { metadata } : {}),
       ...(source ? { source } : {}),
       ...(conversationId ? { conversationId } : {}),
-    };
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    } : messagesOrParams;
+    if (payload.preferenceClaims !== undefined && (payload.source !== undefined || payload.agentId !== undefined)) {
+      throw new Error("explicit preferences do not accept source events or agent-bound writes in v1");
+    }
     const response = await this.requestResponse("POST", "/v1/memories/add", {
-      ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
+      ...(payload.idempotencyKey ? { headers: { "Idempotency-Key": payload.idempotencyKey } } : {}),
       body: JSON.stringify({
         external_user_id: payload.externalUserId,
         ...(payload.agentId ? { agent_id: payload.agentId } : {}),
         messages: toApiConversationMessages(payload.messages),
         metadata: payload.metadata ?? {},
         ...(payload.conversationId ? { conversation_id: payload.conversationId } : {}),
+        ...(payload.preferenceClaims !== undefined ? {
+          preference_claims: payload.preferenceClaims.map((claim) => ({
+            property_key: claim.propertyKey,
+            value: claim.value,
+            applicability: claim.applicability,
+            turn_index: claim.turnIndex,
+            quote: claim.quote,
+            ...(claim.commitment !== undefined ? { commitment: claim.commitment } : {}),
+            ...(claim.replacesMemoryId !== undefined ? { replaces_memory_id: claim.replacesMemoryId } : {}),
+            ...(claim.replacesVersion !== undefined ? { replaces_version: claim.replacesVersion } : {}),
+          })),
+        } : {}),
         ...(payload.source
           ? {
               source: {
@@ -920,6 +974,7 @@ export class MemoryOS {
             format,
             contextMaxTokens,
             asOf: undefined,
+            preferenceContext: undefined,
           }
         : queryOrParams;
 
@@ -936,6 +991,15 @@ export class MemoryOS {
     }
     if (params.timeFilterDays !== undefined) {
       body.time_filter_days = params.timeFilterDays;
+    }
+    if (params.preferenceContext !== undefined) {
+      if (params.asOf !== undefined || params.agentId !== undefined) {
+        throw new Error("explicit preference context does not support asOf or agent-bound reads in v1");
+      }
+      body.preference_context = {
+        applicability: params.preferenceContext.applicability,
+        property_keys: params.preferenceContext.propertyKeys,
+      };
     }
     if (params.asOf !== undefined) {
       const parsedAsOf = new Date(params.asOf);
@@ -1037,6 +1101,10 @@ export class MemoryOS {
       completedAt: data.completed_at ?? null,
       deadLetteredAt: data.dead_lettered_at ?? null,
       extractionMetadata: data.extraction_metadata ?? {},
+      get sourceReviewsCapacityRejected() {
+        const count = data.extraction_metadata?.source_reviews_capacity_rejected;
+        return typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : 0;
+      },
       get succeeded() {
         return data.status === "completed";
       },

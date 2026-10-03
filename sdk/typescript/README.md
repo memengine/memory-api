@@ -38,6 +38,47 @@ const systemPrompt = context.hasContext
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
 
+## Opt-in scoped preferences (local, unreleased)
+
+This source checkout exposes an application-declared contract, **not automatic
+natural-language scope/uncertainty recognition**. Published `0.1.1` does not
+include these fields. The backend feature remains disabled by default; disabled
+requests fail with `409 / PREF_409` rather than falling back to unscoped writes.
+
+```ts
+const applicability = { kind: "context", namespace: "project", key: "release-check" } as const;
+const quote = "For Release Check, use Python for examples.";
+const write = await mem.add({
+  externalUserId: "user_123",
+  messages: [{ role: "user", content: quote }],
+  preferenceClaims: [{
+    propertyKey: "examples.language", value: "Python", applicability,
+    turnIndex: 0, quote,
+  }],
+});
+// Queued, not confirmed storage. Check status separately, not during streaming.
+const context = await mem.get({
+  externalUserId: "user_123", query: "Which language should examples use?",
+  preferenceContext: { applicability, propertyKeys: ["examples.language"] },
+});
+```
+
+Existing positional `add()` and `get()` calls remain supported. Omitted preference
+fields stay omitted. When declarations are supplied, the job processes only those
+declarations, not other facts in the transcript. Property/scope keys must be stable
+and application-owned; never guess unknown scope as global. Declarations stay
+`client_asserted`, authority capped at 20. Do not combine them with `source` or
+`agentId`, or explicit reads with `asOf`. Types are not runtime security checks;
+the backend validates evidence, limits, permissions and authority.
+
+For intentional replacement, use `commitment: "replacement"`, `replacesMemoryId`
+and the exact string at `provenance.preference_version` returned by the backend.
+Uncertainty stays pending; review actions do not activate it. Existing job status
+preserves raw `extractionMetadata` and provides `sourceReviewsCapacityRejected`;
+completion alone does not mean storage. Immediate reads may precede job completion.
+There is no automatic polling, new model call, authority decision, or read-after-write
+guarantee in the SDK. See [the full contract](../../docs/explicit_preference_contract.md).
+
 ## Multi-service mode: support, billing, CRM, and product services
 
 > **For whom:** teams where multiple services can write facts about the same user.

@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
+from memoryos.preferences import PreferenceClaimRequest
+
 MemoryCategory = Literal[
     "preference",
     "fact",
@@ -138,6 +140,13 @@ class AddRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     source: MemorySource | None = None
     conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
+    preference_claims: list[PreferenceClaimRequest] | None = Field(default=None, min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_preference_options(self):
+        if self.preference_claims is not None and (self.source is not None or self.agent_id is not None):
+            raise ValueError("explicit preferences do not accept source events or agent-bound writes in v1")
+        return self
 
 
 class AddResult(BaseModel):
@@ -187,6 +196,12 @@ class MemoryJobStatus(BaseModel):
     @property
     def succeeded(self) -> bool:
         return self.status == "completed"
+
+    @property
+    def source_reviews_capacity_rejected(self) -> int:
+        """Reviews not retained due to capacity; completion does not imply storage."""
+        value = self.extraction_metadata.get("source_reviews_capacity_rejected", 0)
+        return value if type(value) is int and value >= 0 else 0
 
 
 class MemoryResult(BaseModel):
