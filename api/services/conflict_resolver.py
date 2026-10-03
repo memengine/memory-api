@@ -877,6 +877,16 @@ class ConflictResolver:
             "vector_calls": 0, "vector_unavailable": 0, "max_candidates": 0,
         }
 
+        from api.services.preference_claim_service import PREFERENCE_MARKER
+        if any(PREFERENCE_MARKER in (m.validated_evidence or {}) for m in new_memories):
+            if not all(PREFERENCE_MARKER in (m.validated_evidence or {}) for m in new_memories):
+                raise ValueError("explicit and inferred preferences cannot share a resolver batch")
+            return self._store_declared_preferences(
+                new_memories, user_id=user_id, tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id, source_conversation_id=source_conversation_id,
+                agent_id=agent_id, auto_commit=auto_commit,
+            )
+
         for new_memory in new_memories:
             source_verified = (new_memory.validated_evidence or {}).get(
                 "grounding_mode"
@@ -1410,13 +1420,20 @@ class ConflictResolver:
             return None
 
         if hasattr(self.session, "get"):
-            return self.session.get(Memory, memory_id)
+            memory = self.session.get(Memory, memory_id)
+            from api.services.preference_claim_service import preference_declaration
+            if memory is not None and preference_declaration((memory.metadata_json or {}).get("provenance")):
+                return None
+            return memory
         return None
 
     def _owned_active_target(
         self, memory: Memory, *, user_id: str,
         tenant_id: str | None, proxy_user_id: str | None,
     ) -> bool:
+        from api.services.preference_claim_service import preference_declaration
+        if preference_declaration((memory.metadata_json or {}).get("provenance")):
+            return False
         if memory.is_archived or str(memory.user_id) != str(user_id):
             return False
         now = datetime.now(UTC)
@@ -1438,6 +1455,82 @@ class ConflictResolver:
                 return False
             return proxy is not None and str(proxy.tenant_id) == str(tenant_id)
         return memory.proxy_user_id is None
+
+    def _store_declared_preferences(
+        self, memories, *, user_id, tenant_id, proxy_user_id,
+        source_conversation_id, agent_id, auto_commit,
+    ):
+        from api.services.preference_claim_service import (
+            PREFERENCE_MARKER, preference_identity, reserve_claim, transition_reason,
+        )
+        from api.schemas.preferences import PreferenceClaimRequest
+        if not tenant_id or not proxy_user_id:
+            raise ValueError("explicit preferences require an authenticated tenant/profile")
+        proxy = self.session.get(ProxyUser, uuid.UUID(proxy_user_id))
+        if proxy is None or proxy.is_blocked or str(proxy.tenant_id) != str(tenant_id):
+            raise ValueError("explicit preference owner unavailable")
+        prepared = []
+        identities = set()
+        for memory in memories:
+            declaration = PreferenceClaimRequest.model_validate(memory.validated_evidence[PREFERENCE_MARKER])
+            if memory.category != "preference" or memory.content != declaration.quote:
+                raise ValueError("explicit preference representation mismatch")
+            if GovernedExtractionService.verified_source_turns(memory, self.source_messages) is None:
+                raise ValueError("explicit preference evidence invalid")
+            fingerprint = preference_identity(declaration).fingerprint
+            if fingerprint in identities:
+                raise ValueError("duplicate explicit preference identity")
+            identities.add(fingerprint)
+            # Provider work precedes ALL row locks, not just each item's lock.
+            embedding = self._coerce_embedding_result(self.embedder(memory.content))
+            prepared.append((fingerprint, memory, declaration, embedding))
+        stored = []
+        for _, memory, declaration, embedding in sorted(prepared, key=lambda item: item[0]):
+            if declaration.applicability.kind == "unresolved":
+                reason, target = "preference_requires_review", None
+            else:
+                ledger = reserve_claim(self.session, tenant_id=tenant_id, proxy_user_id=proxy_user_id, declaration=declaration)
+                target = self.session.execute(select(Memory).where(
+                    Memory.id == ledger.active_memory_id,
+                    Memory.proxy_user_id == uuid.UUID(proxy_user_id),
+                    Memory.user_id == uuid.UUID(user_id),
+                ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none() if ledger.active_memory_id else None
+                reason = transition_reason(declaration, ledger, target)
+            if reason == "DEDUP":
+                continue
+            if reason not in {"NEW", "UPDATE"}:
+                explanation = "The application-declared preference could not become current safely."
+                self._buffer_source_candidate(memory, ConflictDecision(
+                    action="CLARIFY", reasoning=explanation,
+                    decision_evidence=review_evidence(
+                        action="USER_REVIEW", reason_codes=[reason], explanation=explanation,
+                        details={"policy": PREFERENCE_MARKER},
+                    ), source_review=review_intent(target),
+                ))
+                continue
+            decision = automatic_evidence(
+                action="UPDATE" if reason == "UPDATE" else "KEEP_BOTH", reason_codes=["explicit_preference_identity_match"],
+                explanation="Application declaration applied within an exact, owned applicability identity.",
+                details={"policy": PREFERENCE_MARKER},
+            )
+            if target is not None:
+                self._archive_memory(target, "Explicit same-applicability preference replacement")
+            row = self._store_new_memory(
+                extracted_memory=memory, user_id=user_id, tenant_id=tenant_id,
+                proxy_user_id=proxy_user_id, embedding=embedding,
+                previous_version_id=str(target.id) if target else None, resolution=reason,
+                source_conversation_id=source_conversation_id, agent_id=agent_id,
+                decision_evidence=decision,
+            )
+            stored.append(row)
+            self._create_audit_log(
+                user_id=user_id, proxy_user_id=proxy_user_id, action=AuditAction.memory_created,
+                old_value={"memory_id": str(target.id)} if target else None,
+                new_value={"resolution": reason, "policy": PREFERENCE_MARKER}, memory_id=uuid.UUID(row.id),
+            )
+        if auto_commit:
+            self.session.commit()
+        return stored
 
     def _buffer_source_candidate(
         self, memory: ExtractedMemory, decision: ConflictDecision,
@@ -2805,6 +2898,13 @@ class ConflictResolver:
             validated_evidence["memory_id"] = str(memory_id)
             validated_evidence["source_conversation_id"] = str(source_conversation_id)
             provenance["extraction_evidence"] = validated_evidence
+            from api.services.preference_claim_service import PREFERENCE_MARKER
+            if PREFERENCE_MARKER in validated_evidence:
+                provenance.update({
+                    "attestation": "client_asserted", "authority_priority": 20,
+                    "authority_rules": {"default_priority": 20},
+                    "applicability_basis": "application_declared",
+                })
         return provenance or None
 
     def _record_claim_for_memory(
@@ -2820,7 +2920,7 @@ class ConflictResolver:
         if tenant_id is None or proxy_user_id is None:
             return
         try:
-            ClaimLedgerService(self.session).record_memory(
+            claim = ClaimLedgerService(self.session).record_memory(
                 memory,
                 tenant_id=tenant_id,
                 proxy_user_id=proxy_user_id,
@@ -2829,9 +2929,17 @@ class ConflictResolver:
                 decision_evidence=decision_evidence,
                 predecessor_memory_id=predecessor_memory_id,
             )
+            from api.services.preference_claim_service import preference_declaration
+            if preference_declaration(dict(memory.metadata_json or {}).get("provenance")) and (
+                claim is None or claim.active_memory_id != memory.id or claim.status != "active"
+            ):
+                raise ValueError("explicit preference ledger did not activate the stored memory")
         except Exception:
-            # The claim ledger is governance metadata. It must never block the
-            # primary memory write path.
+            # Preserve the legacy metadata behavior. Explicit preferences use
+            # the ledger as a write gate, so its failure must abort that write.
+            from api.services.preference_claim_service import preference_declaration
+            if preference_declaration(dict(memory.metadata_json or {}).get("provenance")):
+                raise
             return
 
     def _archive_memory(self, memory: Memory, change_reason: str | None = None) -> None:

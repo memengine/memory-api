@@ -16,11 +16,13 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.cache import CacheService
-from api.db.models import Memory, ProxyUser, QuotaMode
+from api.db.models import Memory, MemoryClaim, ProxyUser, QuotaMode
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
+from api.schemas.preferences import PreferenceApplicability, PreferenceReadContext
 from api.services.embedding_service import EmbeddingResult, EmbeddingService
+from api.services.preference_claim_service import legacy_memory_predicate, preference_declaration, preference_fingerprint
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
 from api.tasks.retrieval_tasks import update_memory_accesses
@@ -133,6 +135,7 @@ class RetrieverService:
         time_filter_days: int | None = None,
         as_of: datetime | None = None,
         quota_mode: str | QuotaMode | None = None,
+        preference_context: PreferenceReadContext | None = None,
     ) -> list[MemoryResult]:
         identity = external_user_id or user_id
         if not identity:
@@ -163,6 +166,17 @@ class RetrieverService:
         self.last_quota_mode = resolved_quota_mode.value
         if resolved_quota_mode in {QuotaMode.blocked, QuotaMode.passthrough}:
             return []
+
+        if preference_context is not None:
+            from api.settings import get_settings
+            if not get_settings().explicit_preference_claims_enabled or not tenant_id or proxy_user is None or as_of is not None:
+                raise ValueError("explicit preference context unavailable")
+            return await self._retrieve_declared_preferences(
+                context=PreferenceReadContext.model_validate(preference_context),
+                query=query, identity=identity, proxy_user_id=str(proxy_user.id), tenant_id=tenant_id,
+                limit=limit, categories=normalized_categories, agent_id=agent_id,
+                time_filter_days=time_filter_days, quota_mode=resolved_quota_mode,
+            )
 
         cached_results = await self._get_cached_results(user_id=cache_identity, cache_context=cache_context) if as_of is None else None
         if cached_results:
@@ -767,7 +781,7 @@ class RetrieverService:
         if not ids:
             return {}
         effective_at = as_of.astimezone(UTC)
-        query = select(Memory).where(Memory.id.in_(ids))
+        query = select(Memory).where(Memory.id.in_(ids), legacy_memory_predicate())
         if proxy_user_id is not None:
             query = query.where(Memory.proxy_user_id == self._as_uuid(proxy_user_id))
         elif user_id is not None:
@@ -814,6 +828,7 @@ class RetrieverService:
 
         query = query.where(
             and_(
+                legacy_memory_predicate(),
                 or_(
                     Memory.effective_from.is_(None),
                     Memory.effective_from <= effective_at,
@@ -867,7 +882,7 @@ class RetrieverService:
         else:
             query = select(Memory).where(Memory.user_id == self._as_uuid(user_id or ""))
 
-        query = query.where(Memory.is_archived.is_(False))
+        query = query.where(Memory.is_archived.is_(False), legacy_memory_predicate())
         if categories:
             query = query.where(Memory.category.in_([category for category in categories]))
         if agent_id is not None:
@@ -991,6 +1006,7 @@ class RetrieverService:
         query = select(Memory).where(
             Memory.proxy_user_id == self._as_uuid(proxy_user_id),
             Memory.is_archived.is_(False),
+            legacy_memory_predicate(),
         )
         if categories:
             query = query.where(Memory.category.in_([category for category in categories]))
@@ -1013,6 +1029,7 @@ class RetrieverService:
         query = select(Memory).where(
             Memory.user_id == self._as_uuid(user_id),
             Memory.is_archived.is_(False),
+            legacy_memory_predicate(),
         )
         if categories:
             query = query.where(Memory.category.in_([category for category in categories]))
@@ -1041,6 +1058,7 @@ class RetrieverService:
             Memory.id.in_(normalized_ids),
             Memory.proxy_user_id == self._as_uuid(proxy_user_id),
             Memory.is_archived.is_(False),
+            legacy_memory_predicate(),
         )
         if tenant_id is not None:
             query = query.join(ProxyUser, Memory.proxy_user_id == ProxyUser.id).where(
@@ -1074,6 +1092,7 @@ class RetrieverService:
             Memory.id.in_(normalized_ids),
             Memory.user_id == self._as_uuid(user_id),
             Memory.is_archived.is_(False),
+            legacy_memory_predicate(),
         )
         if categories:
             query = query.where(Memory.category.in_([category for category in categories]))
@@ -1298,7 +1317,70 @@ class RetrieverService:
             effective_until=str(item["effective_until"]) if item.get("effective_until") else None,
         )
 
+    async def _retrieve_declared_preferences(
+        self, *, context, query, identity, proxy_user_id, tenant_id, limit,
+        categories, agent_id, time_filter_days, quota_mode,
+    ) -> list[MemoryResult]:
+        # <=32 indexed identities, one SQL round-trip. A vector page is not a
+        # complete property set, so it cannot decide which scope wins.
+        fingerprints = {
+            preference_fingerprint(key, scope)
+            for key in context.property_keys
+            for scope in (PreferenceApplicability(kind="global"), context.applicability)
+        }
+        preferences = []
+        if not categories or "preference" in categories:
+            rows = (await self.session.execute(select(MemoryClaim, Memory).outerjoin(
+                Memory, MemoryClaim.active_memory_id == Memory.id,
+            ).join(ProxyUser, MemoryClaim.proxy_user_id == ProxyUser.id).where(
+                MemoryClaim.tenant_id == self._as_uuid(tenant_id),
+                MemoryClaim.proxy_user_id == self._as_uuid(proxy_user_id),
+                MemoryClaim.claim_fingerprint.in_(fingerprints),
+                ProxyUser.tenant_id == self._as_uuid(tenant_id), ProxyUser.is_blocked.is_(False),
+            ).execution_options(populate_existing=True))).all()
+            by_fingerprint = {claim.claim_fingerprint: (claim, memory) for claim, memory in rows}
+            created_after = self._created_after(time_filter_days)
+            for key in context.property_keys:
+                selected = None
+                for scope in (context.applicability, PreferenceApplicability(kind="global")):
+                    pair = by_fingerprint.get(preference_fingerprint(key, scope))
+                    if pair is None or pair[0].active_memory_id is None:
+                        continue
+                    claim, memory = pair
+                    # An inconsistent scoped winner blocks fallback, rather than
+                    # silently declaring a broader value current.
+                    if memory is None or str(memory.proxy_user_id) != proxy_user_id or claim.status != "active":
+                        break
+                    declaration = preference_declaration((memory.metadata_json or {}).get("provenance"))
+                    if declaration is None or declaration.property_key != key or declaration.applicability != scope or declaration.value != claim.active_value:
+                        break
+                    if not self._memory_is_current(memory):
+                        continue
+                    if agent_id is not None and str(memory.agent_id) != str(agent_id):
+                        continue
+                    if created_after is not None and memory.created_at < created_after:
+                        continue
+                    selected = memory
+                    break
+                if selected is not None:
+                    preferences.append(self._memory_to_result(selected, semantic_score=1.0))
+        # Other categories retain their existing ranking and cache behavior;
+        # unknown legacy preferences are not promoted to global in this mode.
+        other_categories = [c for c in (categories or ["fact", "goal", "procedure", "relationship", "expertise"]) if c != "preference"]
+        other = await self.retrieve(
+            query=query, external_user_id=identity, proxy_user_id=proxy_user_id,
+            tenant_id=tenant_id, categories=other_categories, agent_id=agent_id,
+            limit=limit, time_filter_days=time_filter_days, quota_mode=quota_mode,
+        ) if other_categories else []
+        self.last_cache_hit = False  # Preference winners are always freshly read.
+        self._queue_access_update([result.id for result in preferences])
+        return (preferences + other)[:limit]
+
     def _memory_to_result(self, memory: Memory, *, semantic_score: float) -> MemoryResult:
+        provenance = (memory.metadata_json or {}).get("provenance")
+        if preference_declaration(provenance) is not None:
+            from api.services.source_review_service import target_version
+            provenance = {**provenance, "preference_version": target_version(memory)}
         recency_score = self._recency_score(memory.last_accessed_at)
         final_score = (
             (self.SEMANTIC_WEIGHT * semantic_score)
@@ -1319,7 +1401,7 @@ class RetrieverService:
             last_accessed_at=memory.last_accessed_at.isoformat() if memory.last_accessed_at else None,
             created_at=memory.created_at.isoformat() if memory.created_at else None,
             source_event_id=str(memory.source_event_id) if memory.source_event_id else None,
-            provenance=(memory.metadata_json or {}).get("provenance"),
+            provenance=provenance,
             effective_from=memory.effective_from.isoformat() if memory.effective_from else None,
             effective_until=memory.effective_until.isoformat() if memory.effective_until else None,
         )

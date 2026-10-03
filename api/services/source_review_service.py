@@ -119,12 +119,24 @@ def view_review(
 
 async def list_source_reviews(
     session: Any, *, tenant_id: str, proxy_user_id: str,
+    preference_context=None,
 ) -> list[MemorySourceReview]:
+    from api.services.preference_claim_service import PREFERENCE_MARKER, preference_fingerprint
+    evidence = PendingExtractionCandidate.metadata_json["extraction_evidence"]
+    if preference_context is None:
+        applicability_filter = evidence[PREFERENCE_MARKER].astext.is_(None)
+    else:
+        fingerprints = {
+            preference_fingerprint(key, preference_context.applicability)
+            for key in preference_context.property_keys
+        }
+        applicability_filter = evidence["preference_fingerprint"].astext.in_(fingerprints)
     # Indexed owner/status lookup; cap both returned records and SQL hydration.
     rows = (await session.execute(select(PendingExtractionCandidate).where(
         PendingExtractionCandidate.tenant_id == uuid.UUID(tenant_id),
         PendingExtractionCandidate.proxy_user_id == uuid.UUID(proxy_user_id),
         PendingExtractionCandidate.status == "pending",
+        applicability_filter,
         PendingExtractionCandidate.candidate_reason == "source_decision_pending",
         PendingExtractionCandidate.metadata_json["extraction_evidence"]["source_review"]["kind"].astext == "restate_source",
         PendingExtractionCandidate.last_seen_at > datetime.now(UTC) - REVIEW_TTL,

@@ -554,6 +554,14 @@ def _normalize_candidate_text(value: str) -> str:
 
 
 def _candidate_fingerprint(candidate: PendingExtractedMemory) -> str:
+    from api.services.preference_claim_service import PREFERENCE_MARKER
+    if PREFERENCE_MARKER in candidate.validated_evidence:
+        fields = {
+            "policy": PREFERENCE_MARKER,
+            "declaration": candidate.validated_evidence[PREFERENCE_MARKER],
+            "source_review": candidate.validated_evidence.get("source_review"),
+        }
+        return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     fields = {
         "category": str(candidate.category).lower(),
         "content": _normalize_candidate_text(candidate.content),
@@ -607,6 +615,11 @@ def _candidate_polarity(value: str) -> str:
 
 
 def _can_reinforce_candidate(existing: Any, candidate: PendingExtractedMemory) -> bool:
+    from api.services.preference_claim_service import PREFERENCE_MARKER
+    incoming_declaration = (candidate.validated_evidence or {}).get(PREFERENCE_MARKER)
+    existing_declaration = ((getattr(existing, "metadata_json", None) or {}).get("extraction_evidence") or {}).get(PREFERENCE_MARKER)
+    if incoming_declaration != existing_declaration:
+        return False
     incoming_review = (candidate.validated_evidence or {}).get("source_review")
     existing_review = ((getattr(existing, "metadata_json", None) or {}).get("extraction_evidence") or {}).get("source_review")
     # Reviews for different targets/snapshots cannot reinforce or overwrite one
@@ -633,6 +646,26 @@ def _find_matching_pending_candidate(
     candidate: PendingExtractedMemory,
     fingerprint: str,
 ) -> tuple[PendingExtractionCandidate | None, bool]:
+    from api.services.preference_claim_service import PREFERENCE_MARKER
+    if PREFERENCE_MARKER in candidate.validated_evidence:
+        from sqlalchemy.dialects.postgresql import insert
+        # Exact declaration identity only: no fuzzy full-category scan and no
+        # concurrent duplicate insert. Pending rows never become active here.
+        session.execute(insert(PendingExtractionCandidate).values(
+            id=uuid.uuid4(), tenant_id=tenant_id, proxy_user_id=proxy_user_id,
+            candidate_fingerprint=fingerprint, content=candidate.content,
+            category=candidate.category, importance_score=candidate.importance_score,
+            confidence_score=candidate.confidence, reasoning=candidate.reasoning,
+            candidate_reason=candidate.candidate_reason, status="pending", reinforcement_count=0,
+            metadata_json={"extraction_evidence": dict(candidate.validated_evidence)},
+            last_seen_at=datetime.now(UTC),
+        ).on_conflict_do_nothing(constraint="uq_pending_extraction_candidates_fingerprint"))
+        row = session.execute(select(PendingExtractionCandidate).where(
+            PendingExtractionCandidate.tenant_id == tenant_id,
+            PendingExtractionCandidate.proxy_user_id == proxy_user_id,
+            PendingExtractionCandidate.candidate_fingerprint == fingerprint,
+        ).with_for_update().execution_options(populate_existing=True)).scalar_one()
+        return row, False
     exact = session.execute(
         select(PendingExtractionCandidate).where(
             PendingExtractionCandidate.tenant_id == tenant_id,
@@ -651,6 +684,7 @@ def _find_matching_pending_candidate(
             PendingExtractionCandidate.proxy_user_id == proxy_user_id,
             PendingExtractionCandidate.category == candidate.category,
             PendingExtractionCandidate.status == "pending",
+            PendingExtractionCandidate.metadata_json["extraction_evidence"][PREFERENCE_MARKER].astext.is_(None),
         )
     ).scalars().all()
     for existing in pending_for_category:
@@ -1306,6 +1340,13 @@ def run_extraction_pipeline(
 
     session_factory = session_factory or build_extraction_session_factory()
     settings = get_settings()
+    explicit_preferences = job_payload.get("preference_claims") is not None
+    if explicit_preferences and (
+        not settings.explicit_preference_claims_enabled
+        or dict(job_payload.get("source") or {}).get("explicit") is True
+        or agent_id is not None
+    ):
+        raise ValueError("explicit preferences unavailable for this job")
     configured_live_confirmation = bool(
         getattr(settings, "phase3a_confirmation_enabled", False)
     )
@@ -1349,7 +1390,10 @@ def run_extraction_pipeline(
         session.commit()
 
         stage = "load_context"
-        source_memory_context = _load_existing_memories_for_context(session, proxy_user_id)
+        source_memory_context = (
+            SourceMemoryContext(memories=[], complete=True, available=True, index_gaps_complete=True)
+            if explicit_preferences else _load_existing_memories_for_context(session, proxy_user_id)
+        )
         existing_memories = list(source_memory_context.memories)
         domain_schema_name = _tenant_domain_schema(session, tenant_id)
         source_event = (
@@ -1374,18 +1418,27 @@ def run_extraction_pipeline(
             else []
         )
         try:
-            extracted_memories, extraction_meta, should_apply_scorer = _extract_memories_for_pipeline(
-                extractor,
-                messages=messages,
-                proxy_user_id=proxy_user_id,
-                tenant_id=tenant_id,
-                job_id=str(job_payload.get("job_id") or ""),
-                existing_memories=existing_memories,
-                source_context=source_context,
-                proposal_context=(proposal_context if live_confirmation_enabled else []),
-            )
+            if explicit_preferences:
+                from api.services.preference_claim_service import declared_preferences
+                extracted_memories = declared_preferences(job_payload["preference_claims"], messages)
+                extraction_meta = {
+                    "tokens_used": 0, "provider_used": None,
+                    "extraction_metadata": {"path": "explicit_preference_v1", "semantic_attestation": False},
+                }
+                should_apply_scorer = False
+            else:
+                extracted_memories, extraction_meta, should_apply_scorer = _extract_memories_for_pipeline(
+                    extractor,
+                    messages=messages,
+                    proxy_user_id=proxy_user_id,
+                    tenant_id=tenant_id,
+                    job_id=str(job_payload.get("job_id") or ""),
+                    existing_memories=existing_memories,
+                    source_context=source_context,
+                    proposal_context=(proposal_context if live_confirmation_enabled else []),
+                )
         except Exception as exc:
-            if not domain_schema_name:
+            if explicit_preferences or not domain_schema_name:
                 raise
             LOGGER.warning(
                 "general_extraction_failed_domain_overlay_continuing",
@@ -1408,7 +1461,7 @@ def run_extraction_pipeline(
             }
             should_apply_scorer = False
 
-        if shadow_confirmation_enabled:
+        if shadow_confirmation_enabled and not explicit_preferences:
             shadow_observation = _run_phase3a_shadow_observation(
                 session,
                 job_payload=job_payload,
@@ -1590,7 +1643,7 @@ def run_extraction_pipeline(
             job_id=str(job_payload.get("job_id") or ""),
             agent_id=str(agent_id) if agent_id else None,
             client=client,
-        ) or {}
+        ) or {} if not explicit_preferences else {}
 
         stage = "invalidate_cache"
         _invalidate_proxy_user_cache(proxy_user_id)

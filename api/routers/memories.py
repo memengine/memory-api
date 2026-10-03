@@ -68,6 +68,7 @@ from api.schemas.responses import RetrievalFeedbackResponse
 from api.schemas.edtech_schemas import EdTechMemoryView
 from api.schemas.edtech_schemas import EdTechProfileResponse
 from api.errors import APIError
+from api.settings import get_settings
 from api.services.context_builder import ContextBuilder
 from api.services.conflict_resolution_service import apply_conflict_selection
 from api.services.domain_schemas.registry import get_domain_schema
@@ -236,6 +237,10 @@ async def add_memories(
     Responses: queued job metadata or a blocked response with gate metadata for B2B callers.
     """
     route_started = time.perf_counter()
+    if payload.preference_claims is not None and (
+        not get_settings().explicit_preference_claims_enabled or trusted_submission_kind is not None
+    ):
+        raise APIError(status_code=409, code="PREF_409", error="explicit_preferences_unavailable")
     if idempotency_key:
         cached_job = await memory_service.get_idempotent_memory_add(
             tenant_id=tenant_id,
@@ -264,7 +269,7 @@ async def add_memories(
         message.model_dump(mode="json") for message in payload.messages
     ]
     gate_messages = serialized_messages
-    if payload.source is not None:
+    if payload.source is not None or payload.preference_claims is not None:
         # Registered backend events use service + event_id + payload_hash as
         # their idempotency boundary. Conversational semantic deduplication
         # would otherwise discard legitimate updates with similar templates.
@@ -320,6 +325,7 @@ async def add_memories(
         evidence_mode=payload.evidence_mode,
         conversation_id=payload.conversation_id,
         trusted_submission_kind=trusted_submission_kind,
+        **({"preference_claims": [c.model_dump(mode="json", exclude_none=True) for c in payload.preference_claims]} if payload.preference_claims is not None else {}),
     )
     queue_ms = (time.perf_counter() - queue_started) * 1000
     if job.get("status") != "queued":
@@ -386,6 +392,8 @@ async def retrieve_memories(
     """
     route_started = time.perf_counter()
     proxy_started = time.perf_counter()
+    if payload.preference_context is not None and not get_settings().explicit_preference_claims_enabled:
+        raise APIError(status_code=409, code="PREF_409", error="explicit_preferences_unavailable")
     proxy_user = await proxy_user_service.resolve(
         tenant_id=tenant_id,
         external_user_id=payload.external_user_id,
@@ -405,6 +413,7 @@ async def retrieve_memories(
         as_of=payload.as_of,
         quota_mode=getattr(getattr(request.state, "quota_envelope", None), "mode", None)
         or getattr(request.state, "quota_mode", None),
+        **({"preference_context": payload.preference_context} if payload.preference_context is not None else {}),
     )
     retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
     benchmark_cpu_timing = postgres_benchmark_enabled()
@@ -442,7 +451,7 @@ async def retrieve_memories(
     domain_started = time.perf_counter()
     domain_schema_name = await _tenant_domain_schema(session, tenant_id)
     domain_schema = get_domain_schema(domain_schema_name)
-    if domain_schema is not None:
+    if domain_schema is not None and payload.preference_context is None:
         domain_prompt, domain_token_count = await domain_schema.build_retrieve_context(
             session=session,
             cache_service=cache_service,
@@ -462,11 +471,12 @@ async def retrieve_memories(
     clarification = await _pop_next_clarification(
         session=session,
         proxy_user_id=str(proxy_user.id),
-    )
+    ) if payload.preference_context is None else None
     clarification_question = clarification.question if clarification is not None else None
     clarification_ms = (time.perf_counter() - clarification_started) * 1000
     source_reviews = await list_source_reviews(
         session, tenant_id=tenant_id, proxy_user_id=str(proxy_user.id),
+        **({"preference_context": payload.preference_context} if payload.preference_context is not None else {}),
     ) if payload.as_of is None else []
     retrieval_id = None
     feedback_started = time.perf_counter()

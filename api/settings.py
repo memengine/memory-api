@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     universal_extraction_shadow_enabled: bool = Field(default=False, alias="UNIVERSAL_EXTRACTION_SHADOW_ENABLED")
     memory_passport_enabled: bool = Field(default=False, alias="MEMORY_PASSPORT_ENABLED")
     phase3a_confirmation_enabled: bool = Field(default=False, alias="PHASE3A_CONFIRMATION_ENABLED")
+    explicit_preference_claims_enabled: bool = Field(default=False, alias="EXPLICIT_PREFERENCE_CLAIMS_ENABLED")
     phase3a_confirmation_shadow_enabled: bool = Field(
         default=False,
         alias="PHASE3A_CONFIRMATION_SHADOW_ENABLED",

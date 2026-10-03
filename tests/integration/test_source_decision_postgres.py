@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
@@ -43,6 +43,7 @@ from api.errors import APIError
 from api.routers.memories import answer_memory_clarification, answer_source_review, get_memory_job_status
 from api.schemas.requests import MemoryClarificationAnswerRequest, MemorySourceReviewAnswerRequest
 from api.services.source_review_service import list_source_reviews, review_intent, view_review
+from api.services.source_review_service import target_version
 from api.services.conflict_resolver import ConflictResolver
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID, EmbeddingResult
 from api.services.extraction_service import ExtractionService
@@ -188,7 +189,7 @@ def sql_scope(monkeypatch):
 
 
 def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=None,
-         claim_state="asserted", extracted_content=None, search_error=None):
+         claim_state="asserted", extracted_content=None, search_error=None, preference_claims=None):
     model = _Model(extracted_content or content, decision, before_decision, claim_state=claim_state)
     cache = AsyncMock()
     extractor = ExtractionService(
@@ -233,6 +234,8 @@ def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=
         "external_conversation_id": "source-sql-chat",
         "messages": [{"role": "user", "content": content, "turn_id": str(job_id)}],
     }
+    if preference_claims is not None:
+        payload["preference_claims"] = preference_claims
     with scope.factory.begin() as session:
         session.add(
             ExtractionJob(
@@ -250,6 +253,232 @@ def _run(scope, monkeypatch, content, decision, *, points=None, before_decision=
         qdrant_service=Search(),
     )
     return result, model, job_id
+
+
+def _preference(value="C++", *, scope=None, commitment="asserted", **kwargs):
+    quote = f"My examples should use {value}."
+    return {
+        "property_key": "examples.language", "value": value, "quote": quote,
+        "turn_index": 0, "applicability": scope or {"kind": "global"},
+        "commitment": commitment, **kwargs,
+    }
+
+
+def _declare(scope, monkeypatch, declaration):
+    from api.settings import get_settings
+    monkeypatch.setattr(get_settings(), "explicit_preference_claims_enabled", True)
+    result, model, job_id = _run(scope, monkeypatch, declaration["quote"], _decision(), preference_claims=[declaration])
+    assert model.primary_formats == [] and model.source_prompts == []
+    assert result["tokens_used"] == 0
+    return result, job_id
+
+
+def _read_preferences(scope, monkeypatch, applicability, *, properties=None, tenant_id=None, categories=None):
+    from api.schemas.preferences import PreferenceReadContext
+    async def exercise():
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                retriever = RetrieverService(
+                    session=session, qdrant_service=SimpleNamespace(), cache_service=AsyncMock(),
+                    quota_manager=AsyncMock(), proxy_user_service=SimpleNamespace(),
+                    embedding_service=_Embedding(),
+                )
+                monkeypatch.setattr(retriever, "_queue_access_update", lambda _: None)
+                rows = await retriever.retrieve(
+                    query="example language?", external_user_id=scope.external_id,
+                    proxy_user_id=str(scope.proxy_id), tenant_id=str(tenant_id or scope.tenant_id),
+                    categories=categories or ["preference"], quota_mode="DEGRADED",
+                    preference_context=PreferenceReadContext(
+                        applicability=applicability, property_keys=properties or ["examples.language"],
+                    ),
+                )
+                assert retriever.last_cache_hit is False
+                return rows
+        finally:
+            await engine.dispose()
+    return asyncio.run(exercise())
+
+
+def test_explicit_preferences_coexist_override_and_versioned_replace(sql_scope, monkeypatch):
+    from api.services.source_review_service import target_version
+    global_result, _ = _declare(sql_scope, monkeypatch, _preference())
+    project_scope = {"kind": "context", "namespace": "project", "key": "Release Check"}
+    project, _ = _declare(sql_scope, monkeypatch, _preference(scope=project_scope))
+    global_id = uuid.UUID(global_result["stored_memories"][0]["id"])
+    project_id = uuid.UUID(project["stored_memories"][0]["id"])
+    with sql_scope.factory() as session:
+        rows = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(rows) == 2 and all(not row.is_archived for row in rows)
+        claims = session.scalars(select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(claims) == 2 and len({c.claim_fingerprint for c in claims}) == 2
+        assert all(c.authority_priority == 20 for c in claims)
+        version = target_version(session.get(Memory, project_id))
+    assert [r.id for r in _read_preferences(sql_scope, monkeypatch, {"kind": "global"})] == [str(global_id)]
+    assert [r.id for r in _read_preferences(sql_scope, monkeypatch, project_scope)] == [str(project_id)]
+    assert [r.id for r in _read_preferences(sql_scope, monkeypatch, {**project_scope, "key": "Other"})] == [str(global_id)]
+    assert _read_preferences(sql_scope, monkeypatch, project_scope, tenant_id=uuid.uuid4()) == []
+    changed = _preference("Python", scope=project_scope, commitment="replacement", replaces_memory_id=str(project_id), replaces_version=version)
+    replacement, _ = _declare(sql_scope, monkeypatch, changed)
+    replacement_id = replacement["stored_memories"][0]["id"]
+    read = _read_preferences(sql_scope, monkeypatch, project_scope)
+    assert [r.id for r in read] == [replacement_id]
+    assert "Python" in read[0].content and len(read[0].provenance["preference_version"]) == 64
+    assert [r.id for r in _read_preferences(sql_scope, monkeypatch, {"kind": "global"})] == [str(global_id)]
+    stale, _ = _declare(sql_scope, monkeypatch, changed)
+    assert stale["memories_created"] == 0 and stale["pending_candidates_buffered"] == 1
+    with sql_scope.factory() as session:
+        assert session.get(Memory, project_id).is_archived
+        assert not session.get(Memory, global_id).is_archived
+        revisions = session.scalars(select(MemoryClaimRevision).join(MemoryClaim, MemoryClaimRevision.claim_id == MemoryClaim.id).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)).all()
+        assert sorted(r.status for r in revisions) == ["activated", "activated", "superseded"]
+
+
+@pytest.mark.parametrize("kind", ["uncertain", "unresolved", "different_value", "wrong_target", "wrong_version", "higher_authority"])
+def test_explicit_preference_failures_preserve_current(sql_scope, monkeypatch, kind):
+    setup, _ = _declare(sql_scope, monkeypatch, _preference())
+    target_id = setup["stored_memories"][0]["id"]
+    incoming = _preference("Python")
+    if kind == "uncertain":
+        incoming["commitment"] = "uncertain"
+    if kind == "unresolved":
+        incoming["applicability"] = {"kind": "unresolved"}
+    if kind in {"wrong_target", "wrong_version", "higher_authority"}:
+        with sql_scope.factory.begin() as session:
+            version = target_version(session.get(Memory, uuid.UUID(target_id)))
+            if kind == "higher_authority":
+                session.execute(update(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id).values(authority_priority=90))
+        incoming.update(commitment="replacement", replaces_memory_id=str(uuid.uuid4()) if kind == "wrong_target" else target_id, replaces_version="0" * 64 if kind == "wrong_version" else version)
+    result, _ = _declare(sql_scope, monkeypatch, incoming)
+    assert result["memories_created"] == 0 and result["pending_candidates_buffered"] == 1
+    with sql_scope.factory() as session:
+        rows = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(rows) == 1 and not rows[0].is_archived
+        assert str(rows[0].id) == target_id
+
+
+def test_explicit_preference_dedup_and_ledger_failure_roll_back(sql_scope, monkeypatch):
+    from api.services.claim_ledger_service import ClaimLedgerService
+    setup, _ = _declare(sql_scope, monkeypatch, _preference())
+    target_id = uuid.UUID(setup["stored_memories"][0]["id"])
+    duplicate, _ = _declare(sql_scope, monkeypatch, _preference())
+    assert duplicate["memories_created"] == duplicate["pending_candidates_buffered"] == 0
+    with sql_scope.factory() as session:
+        version = target_version(session.get(Memory, target_id))
+        previous_outbox = session.scalar(select(func.count(VectorSyncOutbox.id)).where(VectorSyncOutbox.memory_id == target_id))
+    def failure(*args, **kwargs):
+        raise RuntimeError("controlled ledger failure")
+    monkeypatch.setattr(ClaimLedgerService, "record_memory", failure)
+    with pytest.raises(RuntimeError, match="extraction_pipeline_failed stage=store_memories"):
+        _declare(sql_scope, monkeypatch, _preference("Python", commitment="replacement", replaces_memory_id=str(target_id), replaces_version=version))
+    with sql_scope.factory() as session:
+        rows = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(rows) == 1 and not rows[0].is_archived
+        assert target_version(rows[0]) == version
+        assert session.scalar(select(func.count(VectorSyncOutbox.id)).where(VectorSyncOutbox.memory_id == target_id)) == previous_outbox
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_explicit_preference_concurrent_first_writers_and_replacements(sql_scope, monkeypatch, replacement):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from api.services.preference_claim_service import declared_preferences
+    setup, _ = _declare(sql_scope, monkeypatch, _preference())
+    target_id = uuid.UUID(setup["stored_memories"][0]["id"])
+    with sql_scope.factory() as session:
+        target = session.get(Memory, target_id)
+        user_id, conversation_id, version = str(target.user_id), str(target.source_conversation_id), target_version(target)
+    barrier = Barrier(2)
+    def write(value):
+        declaration = _preference(value)
+        if replacement:
+            declaration.update(commitment="replacement", replaces_memory_id=str(target_id), replaces_version=version)
+        else:
+            declaration["property_key"] = "other.examples.language"
+        messages = [{"role": "user", "content": declaration["quote"]}]
+        def embed(text):
+            barrier.wait(timeout=10)
+            return _embedding(text)
+        with sql_scope.factory.begin() as session:
+            resolver = ConflictResolver(
+                session=session, qdrant_service=SimpleNamespace(), embedder=embed,
+                llm_service=SimpleNamespace(), source_messages=messages,
+            )
+            stored = resolver.check_and_store(
+                declared_preferences([declaration], messages), user_id=user_id,
+                tenant_id=str(sql_scope.tenant_id), proxy_user_id=str(sql_scope.proxy_id),
+                source_conversation_id=conversation_id, auto_commit=False,
+            )
+            return len(stored), len(resolver.last_pending_candidates)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(write, ["Rust", "Go"]))
+    assert sorted(results) == [(0, 1), (1, 0)]
+    with sql_scope.factory() as session:
+        current = session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id, Memory.is_archived.is_(False))).all()
+        assert len(current) == (1 if replacement else 2)
+        claims = session.scalars(select(MemoryClaim).where(MemoryClaim.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(claims) == (1 if replacement else 2)
+        assert all(c.active_memory_id in {r.id for r in current} for c in claims)
+
+
+def test_explicit_preferences_are_not_legacy_candidates_and_review_delivery_is_scoped(sql_scope, monkeypatch):
+    setup, _ = _declare(sql_scope, monkeypatch, _preference())
+    target_id = uuid.UUID(setup["stored_memories"][0]["id"])
+    # Legacy LLM extraction cannot nominate/overwrite a typed property.
+    _run(sql_scope, monkeypatch, "I like Python too.", _decision(target_id, relation="contradicts"))
+    with sql_scope.factory() as session:
+        assert not session.get(Memory, target_id).is_archived
+    project_scope = {"kind": "context", "namespace": "project", "key": "Release Check"}
+    _declare(sql_scope, monkeypatch, _preference(scope=project_scope))
+    pending, _ = _declare(sql_scope, monkeypatch, _preference("Python", scope=project_scope))
+    assert pending["pending_candidates_buffered"] == 1
+    _declare(sql_scope, monkeypatch, _preference("Python"))
+    async def exercise():
+        from api.schemas.preferences import PreferenceReadContext
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                args = {"tenant_id": str(sql_scope.tenant_id), "proxy_user_id": str(sql_scope.proxy_id)}
+                assert await list_source_reviews(session, **args) == []
+                global_context = PreferenceReadContext(applicability={"kind": "global"}, property_keys=["examples.language"])
+                assert len(await list_source_reviews(session, preference_context=global_context, **args)) == 1
+                project_context = PreferenceReadContext(applicability=project_scope, property_keys=["examples.language"])
+                assert len(await list_source_reviews(session, preference_context=project_context, **args)) == 1
+                retriever = RetrieverService(
+                    session=session, qdrant_service=SimpleNamespace(), cache_service=AsyncMock(),
+                    quota_manager=AsyncMock(), proxy_user_service=SimpleNamespace(), embedding_service=_Embedding(),
+                )
+                # All legacy read candidate sources exclude declared preferences,
+                # including current/historical SQL and cached-result hydration.
+                args = dict(proxy_user_id=str(sql_scope.proxy_id), categories=[], agent_id=None)
+                assert str(target_id) not in await retriever._fetch_memories_by_ids(memory_ids=[str(target_id)], **args)
+                with sql_scope.factory() as sync:
+                    cached = retriever._memory_to_result(sync.get(Memory, target_id), semantic_score=1.0)
+                assert await retriever._hydrate_current_results(
+                    [cached], user_id=None, tenant_id=str(sql_scope.tenant_id), created_after=None, **args,
+                ) == []
+                assert target_id not in {row.id for row in await retriever._fetch_cold_start_memories(**args)}
+                fallback = await retriever._retrieve_postgres_fallback(user_id=None, limit=10, created_after=None, **args)
+                assert str(target_id) not in {row.id for row in fallback}
+                historical = await retriever._fetch_historical_memories_by_ids(memory_ids=[str(target_id)], user_id=None, as_of=datetime.now(UTC), created_after=None, **args)
+                assert str(target_id) not in historical
+        finally:
+            await engine.dispose()
+    asyncio.run(exercise())
+
+
+def test_explicit_pending_identical_quotes_never_reinforce_another_scope(sql_scope, monkeypatch):
+    contexts = [{"kind": "context", "namespace": "project", "key": key} for key in ["A", "B"]]
+    for context in contexts:
+        result, _ = _declare(sql_scope, monkeypatch, _preference("Python", scope=context, commitment="uncertain"))
+        assert result["memories_created"] == 0 and result["pending_candidates_buffered"] == 1
+    _declare(sql_scope, monkeypatch, _preference("Python", scope=contexts[0], commitment="uncertain"))
+    with sql_scope.factory() as session:
+        rows = session.scalars(select(PendingExtractionCandidate).where(PendingExtractionCandidate.proxy_user_id == sql_scope.proxy_id)).all()
+        assert len(rows) == 2
+        assert sorted(row.reinforcement_count for row in rows) == [1, 2]
+        assert {row.metadata_json["extraction_evidence"]["explicit_preference_v1"]["applicability"]["key"] for row in rows} == {"A", "B"}
+        assert not session.scalars(select(Memory).where(Memory.proxy_user_id == sql_scope.proxy_id)).all()
 
 
 def test_evidence_rejection_diagnostics_survive_sql_completion_and_job_response(sql_scope, monkeypatch):

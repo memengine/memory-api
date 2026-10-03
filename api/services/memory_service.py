@@ -169,7 +169,13 @@ class MemoryService:
         evidence_mode: str = "conversation_evidence",
         conversation_id: str | None = None,
         trusted_submission_kind: str | None = None,
+        preference_claims: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        if preference_claims is not None:
+            from api.services.preference_claim_service import declared_preferences
+            if not get_settings().explicit_preference_claims_enabled or not tenant_id or source is not None or agent_id is not None or trusted_submission_kind is not None:
+                raise APIError(status_code=409, code="PREF_409", error="explicit_preferences_unavailable")
+            declared_preferences(preference_claims, messages)
         proxy_user = None
         resolved_proxy_user_id = proxy_user_id
         if tenant_id:
@@ -244,6 +250,9 @@ class MemoryService:
         }
         if conversation_id:
             job["external_conversation_id"] = conversation_id
+        if preference_claims is not None:
+            job["preference_claims"] = preference_claims
+            evidence_mode = "client_assertion"
         evidence_authority = authority_for_submission(mode=evidence_mode)
         job["evidence_policy"] = {
             "mode": evidence_mode,
@@ -465,6 +474,11 @@ class MemoryService:
             external_user_id=external_user_id,
         )
         requires_vector_sync = content is not None or importance_score is not None or is_archived is not None
+        from api.services.preference_claim_service import preference_declaration
+        if preference_declaration((memory.metadata_json or {}).get("provenance")) and (
+            content is not None or is_archived is False
+        ):
+            raise APIError(status_code=409, code="PREF_409", error="explicit_preference_requires_versioned_replacement")
         next_content = content if content is not None else memory.content
         next_archived = bool(is_archived) if is_archived is not None else bool(memory.is_archived)
         next_embedding: EmbeddingResult | None = None

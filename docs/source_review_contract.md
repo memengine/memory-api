@@ -1,5 +1,8 @@
 # Non-activating source reviews
 
+Related local contract: [explicit preference applicability](explicit_preference_contract.md).
+It is opt-in and disabled by default, not an enabled SDK/assistant capability.
+
 Release status: backend commit `15da090` verified live on 2026-10-02;
 Python SDK `0.1.1` published on main PyPI and TypeScript `0.1.1` published on npm.
 Live verification used the checkout's Python client,

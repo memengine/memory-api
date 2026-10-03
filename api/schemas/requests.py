@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from api.schemas.preferences import PreferenceClaimRequest, PreferenceReadContext
 
 MemoryCategory = Literal[
     "preference",
@@ -104,6 +105,16 @@ class MemoryAddRequest(BaseModel):
     source: MemorySourceRequest | None = None
     evidence_mode: Literal["conversation_evidence", "client_assertion"] = "conversation_evidence"
     conversation_id: str | None = Field(default=None, min_length=1, max_length=255)
+    preference_claims: list[PreferenceClaimRequest] | None = Field(default=None, min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_preference_claims(self):
+        if self.preference_claims is not None:
+            if self.source is not None or self.agent_id is not None:
+                raise ValueError("explicit preferences do not accept source events or agent-bound writes in v1")
+            from api.services.preference_claim_service import declared_preferences
+            declared_preferences(self.preference_claims, [m.model_dump(mode="json") for m in self.messages])
+        return self
 
 
 class MemoryRetrieveRequest(BaseModel):
@@ -115,6 +126,13 @@ class MemoryRetrieveRequest(BaseModel):
     time_filter_days: int | None = Field(default=None, ge=1, le=3650)
     as_of: datetime | None = None
     format: MemoryFormat = "bullets"
+    preference_context: PreferenceReadContext | None = None
+
+    @model_validator(mode="after")
+    def validate_preference_history(self):
+        if self.preference_context is not None and self.as_of is not None:
+            raise ValueError("explicit preference context does not yet support as_of")
+        return self
 
     @field_validator("as_of")
     @classmethod

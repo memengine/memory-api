@@ -46,9 +46,8 @@ class ClaimIdentity:
 class ClaimLedgerService:
     """Maintains a compact source-backed claim ledger.
 
-    The ledger is write-side only for now. Retrieval remains backed by the
-    existing memory/vector path, so this does not add graph traversal latency to
-    normal mem.get() calls.
+    Legacy retrieval retains the existing memory/vector path. Opt-in explicit
+    preference reads use bounded ledger identities, not graph traversal.
     """
 
     def __init__(self, session: Any) -> None:
@@ -70,7 +69,9 @@ class ClaimLedgerService:
         if not hasattr(self.session, "add") or not hasattr(self.session, "execute"):
             return None
 
-        identity = build_claim_identity(
+        from api.services.preference_claim_service import preference_declaration, preference_identity
+        declaration = preference_declaration(provenance)
+        identity = preference_identity(declaration) if declaration else build_claim_identity(
             content=memory.content,
             category=memory.category.value
             if hasattr(memory.category, "value")
@@ -82,6 +83,13 @@ class ClaimLedgerService:
             if resolution in {"UPDATE", "MERGE"} and predecessor_memory_id is not None
             else None
         )
+        if declaration and predecessor_memory_id is not None and (
+            predecessor_claim is None
+            or predecessor_claim.claim_fingerprint != identity.fingerprint
+            or str(predecessor_claim.tenant_id) != str(tenant_id)
+            or str(predecessor_claim.proxy_user_id) != str(proxy_user_id)
+        ):
+            raise ValueError("explicit preference predecessor identity mismatch")
         claim = predecessor_claim or self._find_claim(
             tenant_id=uuid.UUID(str(tenant_id)),
             proxy_user_id=uuid.UUID(str(proxy_user_id)),
@@ -124,6 +132,7 @@ class ClaimLedgerService:
             incoming_value = normalize_text(identity.value)
             if should_activate and (
                 predecessor_claim is not None
+                or (declaration is not None and claim.active_memory_id is None)
                 or self._incoming_wins(
                     claim=claim,
                     incoming_priority=priority,
