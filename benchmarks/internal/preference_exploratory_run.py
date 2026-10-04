@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import time
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
@@ -29,6 +30,49 @@ RESERVATION = ((MAX_PROMPT_TOKENS * INPUT_RATE + MAX_OUTPUT_TOKENS * OUTPUT_RATE
                / 1_000_000).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
 MAX_RESPONSE_BYTES = 1_048_576
 OUTPUT_ROOT = prep.ROOT / "artifacts/preference-exploratory"
+BINDING_VALIDATOR = "preference-semantic-binding-v2"
+BINDING_EARLY_CASE_IDS = ("d0001", "d0121", "d0151")
+BINDING_VALIDATION_SOURCES = (
+    "benchmarks/internal/preference_exploratory_run.py",
+    "benchmarks/internal/preference_semantic_binding_v2.py",
+    "benchmarks/internal/preference_semantic_contract.py",
+    "api/schemas/preferences.py", "api/services/evidence_policy.py", "api/services/extraction_service.py",
+)
+
+
+def validation_policy(plan: dict, jobs: list):
+    """Fixed offline validator selection, never a caller-supplied callback.
+
+    Old plans retain v1. V2 must seal its wrapper contexts, source and stop policy;
+    the caller still needs separate approval of the complete execution digest.
+    """
+    selection = plan.get("validator", "preference-semantic-admission-v1")
+    if selection == "preference-semantic-admission-v1":
+        if plan.get("mode") == "preference_binding_development_v2" or "early_stop" in plan:
+            raise ValueError("binding plan requires v2 validation")
+        if any(not isinstance(shown, prep.ContractContext) for _, shown, _ in jobs):
+            raise ValueError("unexpected v1 validation context")
+        return validate_reply, ()
+    if selection != BINDING_VALIDATOR or plan.get("mode") != "preference_binding_development_v2":
+        raise ValueError("unsupported validation policy")
+    from benchmarks.internal import preference_semantic_binding_v2 as binding
+
+    if plan.get("early_stop") != {"first_case_ids": list(BINDING_EARLY_CASE_IDS),
+                                  "stop_if_all_have_zero_assessments": True}:
+        raise ValueError("binding early-stop policy changed")
+    if tuple(job[0] for job in jobs[:3]) != BINDING_EARLY_CASE_IDS:
+        raise ValueError("binding smoke case order changed")
+    sources = plan.get("source_sha256_utf8_lf", {})
+    for path in BINDING_VALIDATION_SOURCES:
+        if sources.get(path) != prep.digest((prep.ROOT / path).read_text(encoding="utf-8")):
+            raise ValueError("binding validation source changed")
+    for (_, shown, request), row in zip(jobs, plan["cases"], strict=True):
+        if not isinstance(shown, binding.BindingSnapshot):
+            raise ValueError("unexpected v2 validation context")  # noqa: TRY004 - invalid sealed plan
+        snapshot = binding.BindingSnapshot.model_validate(shown.model_dump())
+        if not binding.complete(snapshot) or request is None or not row.get("context_sha256") or not row.get("wire_sha256"):
+            raise ValueError("binding validation snapshot or wire seal missing")
+    return binding.validate_reply, BINDING_EARLY_CASE_IDS
 
 
 def prepare_execution() -> tuple[dict, list]:
@@ -164,6 +208,10 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
         prep.canonical({key: value for key, value in plan.items() if key != "execution_sha256"})
     ):
         raise ValueError("execution approval digest mismatch")
+    if plan.get("validator") == BINDING_VALIDATOR:
+        # Seal the complete trusted fixture view for this offline run, including
+        # nested dictionaries inside otherwise frozen Pydantic wrappers.
+        plan, jobs = deepcopy(plan), deepcopy(jobs)
     if not api_key.strip():
         raise ValueError("missing provider credential")
     # Check all bodies before creating the single-use lock or calling a provider.
@@ -171,6 +219,7 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
         raise ValueError("unsupported spending cap")
     if len(jobs) != len(plan["cases"]) or plan["cap_usd"] != str(cap):
         raise ValueError("execution coverage or budget changed")
+    validator, early_cases = validation_policy(plan, jobs)
     if wire_bodies is not None:
         wire_bodies = dict(wire_bodies)  # Snapshot before validation/dispatch.
         if set(wire_bodies) != {case_id for case_id, _, request in jobs if request is not None}:
@@ -231,7 +280,7 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
                 pending = Decimal(0)
                 result.update(usage=usage, uncached_token_cost_upper_bound_usd=str(charge))
                 reply = decode_reply(payload)
-                decision = validate_reply(reply, shown=shown, current=shown)
+                decision = validator(reply, shown=shown, current=shown)
                 result.update(reply=reply, decision=decision.model_dump(mode="json"))
                 if decision.status != "attributed_proposals_only":
                     raise ValueError("frozen_validator_rejected")
@@ -239,6 +288,10 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
                 assessed_responses += bool(decision.assessments)
                 assessment_count += len(decision.assessments)
                 abstention_count += len(decision.abstentions)
+                # Structural futility only, not a semantic pass/fail metric. The
+                # three smoke requests are always first; controls cannot replace them.
+                if early_cases and attempts == len(early_cases) and assessed_responses == 0:
+                    status, reason = "stopped", "binding_smoke_all_abstained"
             except (httpx.HTTPError, ValueError, UnicodeError) as exc:
                 status = "stopped"
                 # Exception text from transports can expose URLs/headers. Log type only.
