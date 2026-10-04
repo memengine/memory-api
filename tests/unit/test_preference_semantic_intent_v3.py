@@ -404,10 +404,9 @@ def test_model_projection_reuses_existing_exclusions_and_unfiltered_full_source(
         assert field not in json.dumps(projection)
 
 
-def test_production_and_existing_evaluation_paths_do_not_import_offline_v3():
+def test_production_and_v2_preparation_do_not_import_offline_v3():
     root = Path(__file__).resolve().parents[2]
     paths = list((root / "api").rglob("*.py"))
-    paths += [root / "benchmarks/internal/preference_exploratory_run.py",
-        root / "benchmarks/internal/preference_binding_development_v2.py"]
+    paths += [root / "benchmarks/internal/preference_binding_development_v2.py"]
     for path in paths:
         assert "preference_semantic_intent_v3" not in path.read_text(encoding="utf-8")

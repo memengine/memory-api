@@ -1,9 +1,10 @@
 # Offline preference intent v3
 
 This experimental contract separates source meaning from backend candidate
-routing. It is not frozen for provider execution, imported by production, or
-registered in an evaluation runner. No provider, SQL, write adapter, prompt
-change, SDK/MCP/assistant change or deployment is included. V1/v2 contracts,
+routing. It is not imported by production and contains no provider, SQL or write
+adapter. The separate [v3 development preparation](preference_intent_development_v3.md)
+seals a fixed offline runner policy; its preparation does not approve execution.
+No SDK/MCP/assistant change or deployment is included. V1/v2 contracts,
 freeze manifests and consumed results stay unchanged. Old responses are invalid
 v3 input, not material to repair or relabel.
 

@@ -38,32 +38,65 @@ BINDING_VALIDATION_SOURCES = (
     "benchmarks/internal/preference_semantic_contract.py",
     "api/schemas/preferences.py", "api/services/evidence_policy.py", "api/services/extraction_service.py",
 )
+INTENT_VALIDATOR = "preference-semantic-intent-v3"
+INTENT_EARLY_STOP = {"first_case_ids": list(BINDING_EARLY_CASE_IDS),
+                     "stop_if_all_have_zero_usable_candidates": True}
+INTENT_VALIDATION_SOURCES = tuple(dict.fromkeys((*BINDING_VALIDATION_SOURCES,
+    "benchmarks/internal/preference_semantic_intent_v3.py",
+    "benchmarks/internal/preference_intent_development_v3.py",
+    "benchmarks/internal/preference_binding_development_v2.py",
+    "benchmarks/internal/preference_exploratory.py",
+    "benchmarks/internal/preference_semantic_dataset.py",
+    "benchmarks/internal/protocols/preference-intent-development-v3.instructions.txt",
+    "benchmarks/internal/protocols/preference-exploratory-v1.json",
+    "benchmarks/internal/protocols/preference-semantic-binding-v2.freeze.json",
+    "benchmarks/internal/protocols/preference-semantic-admission-v1.json",
+    "benchmarks/internal/protocols/preference-semantic-binding-v2.json",
+    "docs/preference_semantic_admission_contract.md", "docs/preference_semantic_binding_v2.md",
+    "benchmarks/internal/datasets/preference_semantic/development/inputs-v1.json",
+    "benchmarks/internal/datasets/preference_semantic/development/manifest-v1.json",
+    "docs/preference_semantic_intent_v3.md", "docs/preference_intent_development_v3.md",
+)))
 
 
 def validation_policy(plan: dict, jobs: list):
     """Fixed offline validator selection, never a caller-supplied callback.
 
-    Old plans retain v1. V2 must seal its wrapper contexts, source and stop policy;
+    Old plans retain v1. V2/v3 seal wrapper contexts, source and stop policy;
     the caller still needs separate approval of the complete execution digest.
     """
     selection = plan.get("validator", "preference-semantic-admission-v1")
     if selection == "preference-semantic-admission-v1":
-        if plan.get("mode") == "preference_binding_development_v2" or "early_stop" in plan:
-            raise ValueError("binding plan requires v2 validation")
+        if plan.get("mode") in {"preference_binding_development_v2", "preference_intent_development_v3"} or "early_stop" in plan:
+            raise ValueError("binding plan requires explicit validation")
         if any(not isinstance(shown, prep.ContractContext) for _, shown, _ in jobs):
             raise ValueError("unexpected v1 validation context")
         return validate_reply, ()
-    if selection != BINDING_VALIDATOR or plan.get("mode") != "preference_binding_development_v2":
+    is_intent = selection == INTENT_VALIDATOR
+    if selection not in {BINDING_VALIDATOR, INTENT_VALIDATOR} or plan.get("mode") != (
+        "preference_intent_development_v3" if is_intent else "preference_binding_development_v2"
+    ):
         raise ValueError("unsupported validation policy")
     from benchmarks.internal import preference_semantic_binding_v2 as binding
 
-    if plan.get("early_stop") != {"first_case_ids": list(BINDING_EARLY_CASE_IDS),
-                                  "stop_if_all_have_zero_assessments": True}:
+    expected_stop = INTENT_EARLY_STOP if is_intent else {
+        "first_case_ids": list(BINDING_EARLY_CASE_IDS), "stop_if_all_have_zero_assessments": True}
+    if plan.get("early_stop") != expected_stop:
         raise ValueError("binding early-stop policy changed")
+    if is_intent and (len(jobs) != 24 or len({job[0] for job in jobs}) != 24
+                      or plan.get("case_count") != 24 or plan.get("request_count") != 24 or plan.get("cap_usd") != "0.50"
+                      or plan.get("candidate_routes_are_write_permission") is not False):
+        raise ValueError("intent development bounds changed")
+    if is_intent and plan.get("limits") != {
+        "attempts_per_eligible_case": 1, "sdk_retries": 0, "concurrency": 1,
+        "request_timeout_seconds": 30, "fallback_models": False,
+        "automatic_reruns": False, "stop_on_transport_or_output_failure": True,
+    }:
+        raise ValueError("intent execution limits changed")
     if tuple(job[0] for job in jobs[:3]) != BINDING_EARLY_CASE_IDS:
         raise ValueError("binding smoke case order changed")
     sources = plan.get("source_sha256_utf8_lf", {})
-    for path in BINDING_VALIDATION_SOURCES:
+    for path in INTENT_VALIDATION_SOURCES if is_intent else BINDING_VALIDATION_SOURCES:
         if sources.get(path) != prep.digest((prep.ROOT / path).read_text(encoding="utf-8")):
             raise ValueError("binding validation source changed")
     for (_, shown, request), row in zip(jobs, plan["cases"], strict=True):
@@ -72,6 +105,17 @@ def validation_policy(plan: dict, jobs: list):
         snapshot = binding.BindingSnapshot.model_validate(shown.model_dump())
         if not binding.complete(snapshot) or request is None or not row.get("context_sha256") or not row.get("wire_sha256"):
             raise ValueError("binding validation snapshot or wire seal missing")
+        if is_intent and any(request.get(key) != value for key, value in {
+            "model": "gpt-4.1-mini-2025-04-14", "temperature": 0, "max_completion_tokens": 1024,
+            "n": 1, "stream": False, "service_tier": "default",
+        }.items()):
+            raise ValueError("intent request candidate changed")
+    if is_intent:
+        from benchmarks.internal.preference_semantic_intent_v3 import (
+            validate_reply as validate_intent,
+        )
+
+        return validate_intent, BINDING_EARLY_CASE_IDS
     return binding.validate_reply, BINDING_EARLY_CASE_IDS
 
 
@@ -208,7 +252,8 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
         prep.canonical({key: value for key, value in plan.items() if key != "execution_sha256"})
     ):
         raise ValueError("execution approval digest mismatch")
-    if plan.get("validator") == BINDING_VALIDATOR:
+    is_intent = plan.get("validator") == INTENT_VALIDATOR
+    if plan.get("validator") in {BINDING_VALIDATOR, INTENT_VALIDATOR}:
         # Seal the complete trusted fixture view for this offline run, including
         # nested dictionaries inside otherwise frozen Pydantic wrappers.
         plan, jobs = deepcopy(plan), deepcopy(jobs)
@@ -250,6 +295,7 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
     durable_write(run_dir / "manifest.json", {**plan, "started_at": datetime.now(UTC).isoformat()})
     known_cost, pending = Decimal(0), Decimal(0)
     attempts = validated = assessed_responses = assessment_count = abstention_count = controls = 0
+    route_counts, usable_candidates = {}, 0
     reason, status = None, "complete"
     journal_path = run_dir / "journal.jsonl"
     with journal_path.open("x", encoding="utf-8", newline="\n") as journal:
@@ -285,13 +331,22 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
                 if decision.status != "attributed_proposals_only":
                     raise ValueError("frozen_validator_rejected")
                 validated += 1
-                assessed_responses += bool(decision.assessments)
-                assessment_count += len(decision.assessments)
+                findings = decision.proposals if is_intent else decision.assessments
+                assessed_responses += bool(findings)
+                assessment_count += len(findings)
                 abstention_count += len(decision.abstentions)
+                if is_intent:
+                    for finding in findings:
+                        route = finding.candidate_route
+                        route_counts[route] = route_counts.get(route, 0) + 1
+                        usable_candidates += route not in {"review_required", "no_current_change"}
                 # Structural futility only, not a semantic pass/fail metric. The
                 # three smoke requests are always first; controls cannot replace them.
-                if early_cases and attempts == len(early_cases) and assessed_responses == 0:
-                    status, reason = "stopped", "binding_smoke_all_abstained"
+                if early_cases and attempts == len(early_cases):
+                    if is_intent and usable_candidates == 0:
+                        status, reason = "stopped", "intent_smoke_no_usable_candidates"
+                    elif not is_intent and assessed_responses == 0:
+                        status, reason = "stopped", "binding_smoke_all_abstained"
             except (httpx.HTTPError, ValueError, UnicodeError) as exc:
                 status = "stopped"
                 # Exception text from transports can expose URLs/headers. Log type only.
@@ -324,6 +379,9 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
         "semantic_accuracy_measured": False, "human_release_gate_met": False,
         "production_enablement_allowed": False, "holdouts_loaded": False, "ai_annotations_loaded": False,
     }
+    if is_intent:
+        summary.update(intent_proposal_findings=assessment_count, candidate_route_counts=route_counts,
+                       usable_candidate_findings=usable_candidates, candidate_routes_are_write_permission=False)
     durable_write(run_dir / "summary.json", summary)
     return summary
 
