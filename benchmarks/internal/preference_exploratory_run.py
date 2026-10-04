@@ -127,10 +127,13 @@ def decode_reply(payload: dict) -> dict:
     return reply
 
 
-def fetch(client: httpx.Client, request: dict, api_key: str) -> dict:
+def fetch(client: httpx.Client, request: dict, api_key: str, *, wire_body: bytes | None = None) -> dict:
+    body_to_send = prep.canonical(request).encode("utf-8") if wire_body is None else wire_body
+    if wire_body is not None and prep.canonical(parse_json(wire_body.decode("utf-8"))) != prep.canonical(request):
+        raise ValueError("wire body differs from request")
     with client.stream("POST", "https://api.openai.com/v1/chat/completions",
                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                       content=prep.canonical(request).encode("utf-8"), timeout=30) as response:
+                       content=body_to_send, timeout=30) as response:
         if response.status_code != 200:
             # No response headers, request headers or provider error text in logs.
             raise ValueError(f"http_status_{response.status_code}")
@@ -155,7 +158,8 @@ def durable_write(path: Path, value: dict) -> None:
 
 
 def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Client,
-            api_key: str, output_root: Path = OUTPUT_ROOT, cap: Decimal = CAP) -> dict:
+            api_key: str, output_root: Path = OUTPUT_ROOT, cap: Decimal = CAP,
+            wire_bodies: dict[str, bytes] | None = None) -> dict:
     if approved_digest != plan["execution_sha256"] or approved_digest != prep.digest(
         prep.canonical({key: value for key, value in plan.items() if key != "execution_sha256"})
     ):
@@ -167,6 +171,10 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
         raise ValueError("unsupported spending cap")
     if len(jobs) != len(plan["cases"]) or plan["cap_usd"] != str(cap):
         raise ValueError("execution coverage or budget changed")
+    if wire_bodies is not None:
+        wire_bodies = dict(wire_bodies)  # Snapshot before validation/dispatch.
+        if set(wire_bodies) != {case_id for case_id, _, request in jobs if request is not None}:
+            raise ValueError("wire body coverage changed")
     for (case_id, shown, request), row in zip(jobs, plan["cases"], strict=True):
         if case_id != row["case_id"] or (request is None) != (row["action"] == "no_call"):
             raise ValueError("execution coverage changed")
@@ -175,6 +183,16 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
             raise ValueError("execution request changed")
         if "context_sha256" in row and prep.digest(prep.canonical(shown.model_dump(mode="json"))) != row["context_sha256"]:
             raise ValueError("offline validation context changed")
+        if wire_bodies is None:
+            if "wire_sha256" in row:
+                raise ValueError("frozen wire body missing")
+        elif request is not None:
+            body = wire_bodies[case_id]
+            if type(body) is not bytes:
+                raise ValueError("wire body must be immutable bytes")
+            text = body.decode("utf-8")
+            if prep.digest(text) != row.get("wire_sha256") or prep.canonical(parse_json(text)) != prep.canonical(request):
+                raise ValueError("frozen wire body changed")
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = output_root / f"run-{approved_digest}"
     if run_dir.resolve().parent != output_root.resolve():
@@ -206,7 +224,8 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
             payload = None
             result = {"case_id": case_id, "event": "response"}
             try:
-                payload = fetch(client, request, api_key)
+                payload = (fetch(client, request, api_key) if wire_bodies is None else
+                           fetch(client, request, api_key, wire_body=wire_bodies[case_id]))
                 usage, charge = usage_cost(payload)
                 known_cost += charge
                 pending = Decimal(0)
