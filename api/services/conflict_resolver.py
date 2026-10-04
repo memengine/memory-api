@@ -1462,14 +1462,38 @@ class ConflictResolver:
             return proxy is not None and str(proxy.tenant_id) == str(tenant_id)
         return memory.proxy_user_id is None
 
+    def apply_preference_choices(
+        self, requests, *, snapshot, user_id, source_conversation_id, agent_id=None,
+    ):
+        """Internal only. Caller must persist pending reviews/audits and commit
+        in this same transaction; no live endpoint or extraction dispatch.
+        """
+        from api.services.preference_choice_service import bind_choice_operations
+        if not get_settings().explicit_preference_claims_enabled:
+            raise ValueError("explicit preferences unavailable")
+        self.last_pending_candidates = []
+        self.last_preference_choices_withheld = 0
+        self.last_preference_choices_reaffirmed = 0
+        self.last_preference_choices_rejected = {}
+        memories = bind_choice_operations(requests, snapshot=snapshot, messages=self.source_messages,
+            source_conversation_id=source_conversation_id)
+        return self._store_declared_preferences(
+            memories, user_id=user_id, tenant_id=str(snapshot.tenant_id),
+            proxy_user_id=str(snapshot.proxy_user_id), source_conversation_id=str(source_conversation_id),
+            agent_id=agent_id, auto_commit=False, choice_operations=True,
+        )
+
     def _store_declared_preferences(
         self, memories, *, user_id, tenant_id, proxy_user_id,
-        source_conversation_id, agent_id, auto_commit,
+        source_conversation_id, agent_id, auto_commit, choice_operations=False,
     ):
+        from api.schemas.preferences import PreferenceClaimRequest
+        from api.services.preference_choice_service import (
+            CHOICE_OPERATION_MARKER, PreferenceChoiceOperation, lock_choice_target,
+        )
         from api.services.preference_claim_service import (
             PREFERENCE_MARKER, preference_identity, reserve_claim, set_choice_state, transition_reason,
         )
-        from api.schemas.preferences import PreferenceClaimRequest
         if not tenant_id or not proxy_user_id:
             raise ValueError("explicit preferences require an authenticated tenant/profile")
         proxy = self.session.get(ProxyUser, uuid.UUID(proxy_user_id))
@@ -1478,24 +1502,49 @@ class ConflictResolver:
         prepared = []
         identities = set()
         for memory in memories:
-            declaration = PreferenceClaimRequest.model_validate(memory.validated_evidence[PREFERENCE_MARKER])
+            declaration = (PreferenceChoiceOperation.model_validate(memory.validated_evidence[CHOICE_OPERATION_MARKER])
+                if choice_operations else PreferenceClaimRequest.model_validate(memory.validated_evidence[PREFERENCE_MARKER]))
+            if choice_operations and (
+                PREFERENCE_MARKER in memory.validated_evidence
+                or str(declaration.tenant_id) != tenant_id or str(declaration.proxy_user_id) != proxy_user_id
+                or str(declaration.source_conversation_id) != str(source_conversation_id)
+            ):
+                raise ValueError("choice representation mismatch")
             if memory.category != "preference" or memory.content != declaration.quote:
                 raise ValueError("explicit preference representation mismatch")
             if GovernedExtractionService.verified_source_turns(memory, self.source_messages) is None:
                 raise ValueError("explicit preference evidence invalid")
-            fingerprint = preference_identity(declaration).fingerprint
+            fingerprint = declaration.fingerprint if choice_operations else preference_identity(declaration).fingerprint
             if fingerprint in identities:
                 raise ValueError("duplicate explicit preference identity")
             identities.add(fingerprint)
             # Provider work precedes ALL row locks, not just each item's lock.
             embedding = (
-                None if declaration.commitment == "uncertain"
+                None if choice_operations or declaration.commitment == "uncertain"
                 else self._coerce_embedding_result(self.embedder(memory.content))
             )
             prepared.append((fingerprint, memory, declaration, embedding))
+        choice_targets = {}
+        if choice_operations:
+            # Acquire every identity in order before applying any operation.
+            # Do not add principal locks to the existing writer lock order.
+            choice_targets = {fingerprint: lock_choice_target(self.session, declaration, user_id=user_id)
+                for fingerprint, _, declaration, _ in sorted(prepared, key=lambda item: item[0])}
+            from api.db.models import User
+            owner = self.session.execute(select(User).where(
+                User.id == uuid.UUID(str(user_id)), User.external_id == f"proxy::{proxy_user_id}",
+                User.is_active.is_(True),
+            ).execution_options(populate_existing=True)).scalar_one_or_none()
+            proxy = self.session.execute(select(ProxyUser).where(
+                ProxyUser.id == uuid.UUID(proxy_user_id), ProxyUser.tenant_id == uuid.UUID(tenant_id),
+            ).execution_options(populate_existing=True)).scalar_one_or_none()
+            if owner is None or proxy is None or proxy.is_blocked:
+                raise ValueError("choice owner unavailable")
         stored = []
-        for _, memory, declaration, embedding in sorted(prepared, key=lambda item: item[0]):
-            if declaration.applicability.kind == "unresolved":
+        for fingerprint, memory, declaration, embedding in sorted(prepared, key=lambda item: item[0]):
+            if choice_operations:
+                ledger, target, reason = choice_targets[fingerprint]
+            elif declaration.applicability.kind == "unresolved":
                 reason, target = "preference_requires_review", None
             else:
                 ledger = reserve_claim(self.session, tenant_id=tenant_id, proxy_user_id=proxy_user_id, declaration=declaration)
@@ -1505,20 +1554,26 @@ class ConflictResolver:
                     Memory.user_id == uuid.UUID(user_id),
                 ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none() if ledger.active_memory_id else None
                 reason = transition_reason(declaration, ledger, target)
-            if declaration.choice_state == "current_choice_unresolved" and reason not in {"WITHHOLD", "preference_requires_review"}:
+            if ((choice_operations and reason not in {"WITHHOLD", "REAFFIRM", "DEDUP"})
+                or (not choice_operations and declaration.choice_state == "current_choice_unresolved"
+                    and reason not in {"WITHHOLD", "preference_requires_review"})):
                 self.last_preference_choices_rejected[reason] = self.last_preference_choices_rejected.get(reason, 0) + 1
                 continue  # Invalid bindings are processing outcomes, not new review text.
             if reason == "DEDUP":
                 continue
             if reason in {"WITHHOLD", "REAFFIRM"}:
                 old_state = "unresolved" if ledger.status == "disputed" else "current"
-                set_choice_state(target, ledger, unresolved=reason == "WITHHOLD", declaration=declaration)
+                set_choice_state(target, ledger, unresolved=reason == "WITHHOLD", declaration=declaration,
+                    operation_key=declaration.evidence_key if choice_operations else None)
                 self._create_audit_log(
                     user_id=user_id, proxy_user_id=proxy_user_id, action=AuditAction.updated,
                     old_value={"preference_choice": old_state},
                     new_value={"preference_choice": "unresolved" if reason == "WITHHOLD" else "current",
                                "policy": PREFERENCE_MARKER,
-                               "source_conversation_id": str(source_conversation_id)}, memory_id=target.id,
+                               "source_conversation_id": str(source_conversation_id),
+                               **({"operation_key": declaration.evidence_key,
+                                   "source_spans": memory.validated_evidence["source_spans"],
+                                   "choice_operation": declaration.action} if choice_operations else {})}, memory_id=target.id,
                 )
                 if reason == "REAFFIRM":
                     self.last_preference_choices_reaffirmed += 1

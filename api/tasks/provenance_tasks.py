@@ -84,6 +84,8 @@ def redact_expired_extraction_payloads(batch_size: int = 1000) -> dict[str, int]
         for job in jobs:
             job.payload = redact_job_payload(dict(job.payload or {}))
             job.result = redact_job_payload(dict(job.result or {}))
+            job.preference_intent_admission = None
+            job.preference_intent_admission_envelope = None
             job.payload_redacted_at = now
             if job.dead_letter_entry is not None:
                 job.dead_letter_entry.payload = redact_job_payload(

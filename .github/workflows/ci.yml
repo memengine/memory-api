@@ -102,6 +102,9 @@ jobs:
           tests/integration/test_source_decision_postgres.py
           tests/integration/test_preference_lifecycle_reviews.py
           tests/integration/test_preference_choice_policy.py
+          tests/integration/test_preference_snapshots.py
+          tests/integration/test_preference_choice_operations.py
+          tests/integration/test_preference_intent_admission.py
           tests/integration/test_source_review_query_plans.py
           tests/integration/test_retrieval_cache_currentness_postgres.py
           -v --tb=short

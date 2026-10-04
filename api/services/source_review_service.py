@@ -189,6 +189,7 @@ def view_review(
 
 
 def source_review_query(*, tenant_id: str, proxy_user_id: str, preference_context=None, now=None):
+    from api.services.preference_choice_service import CHOICE_OPERATION_MARKER
     from api.services.preference_claim_service import (
         PREFERENCE_MARKER,
         preference_fingerprint,
@@ -198,6 +199,7 @@ def source_review_query(*, tenant_id: str, proxy_user_id: str, preference_contex
     if preference_context is None:
         applicability_filter = (
             evidence[PREFERENCE_MARKER].astext.is_(None)
+            & evidence[CHOICE_OPERATION_MARKER].astext.is_(None)
             & fingerprint_column.is_(None)
         )
     else:

@@ -554,11 +554,13 @@ def _normalize_candidate_text(value: str) -> str:
 
 
 def _candidate_fingerprint(candidate: PendingExtractedMemory, *, review_generation: str | None = None) -> str:
+    from api.services.preference_choice_service import CHOICE_OPERATION_MARKER
     from api.services.preference_claim_service import PREFERENCE_MARKER
-    if PREFERENCE_MARKER in candidate.validated_evidence:
+    marker = CHOICE_OPERATION_MARKER if CHOICE_OPERATION_MARKER in candidate.validated_evidence else PREFERENCE_MARKER
+    if marker in candidate.validated_evidence:
         fields = {
-            "policy": PREFERENCE_MARKER,
-            "declaration": candidate.validated_evidence[PREFERENCE_MARKER],
+            "policy": marker,
+            "declaration": candidate.validated_evidence[marker],
             "source_review": candidate.validated_evidence.get("source_review"),
         }
         if review_generation is not None:
@@ -652,6 +654,7 @@ def _find_matching_pending_candidate(
     review_generation: uuid.UUID | None = None,
     review_created_at: datetime | None = None,
 ) -> tuple[PendingExtractionCandidate | None, bool]:
+    from api.services.preference_choice_service import CHOICE_OPERATION_MARKER
     from api.services.preference_claim_service import PREFERENCE_MARKER
     from api.services.source_review_service import is_source_review, reserve_review_capacity
     if is_source_review(candidate):
@@ -699,6 +702,7 @@ def _find_matching_pending_candidate(
             PendingExtractionCandidate.category == candidate.category,
             PendingExtractionCandidate.status == "pending",
             PendingExtractionCandidate.metadata_json["extraction_evidence"][PREFERENCE_MARKER].astext.is_(None),
+            PendingExtractionCandidate.metadata_json["extraction_evidence"][CHOICE_OPERATION_MARKER].astext.is_(None),
         )
     ).scalars().all()
     for existing in pending_for_category:

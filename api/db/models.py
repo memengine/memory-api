@@ -2783,6 +2783,14 @@ class BackfillJob(Base):
 
 class ExtractionJob(Base):
     __tablename__ = "extraction_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "preference_intent_admission IS NULL OR "
+            "(jsonb_typeof(preference_intent_admission) = 'object' "
+            "AND octet_length(preference_intent_admission::text) <= 262144)",
+            name="ck_preference_intent_admission_bound",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -2819,6 +2827,9 @@ class ExtractionJob(Base):
         JSONB, nullable=False, server_default=EMPTY_JSONB_OBJECT
     )
     result_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Server-only admission, independent of the replaceable completion result.
+    preference_intent_admission: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    preference_intent_admission_envelope: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

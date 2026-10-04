@@ -48,14 +48,15 @@ def held_choice(memory: Memory, ledger: MemoryClaim) -> bool:
     )
 
 
-def set_choice_state(memory: Memory, ledger: MemoryClaim, *, unresolved: bool, declaration=None):
+def set_choice_state(memory: Memory, ledger: MemoryClaim, *, unresolved: bool, declaration=None, operation_key=None):
     # A new backend nonce changes target_version on both hold and reaffirmation.
     # Old jobs/reviews cannot replay against a later decision on the same row.
     previous = dict((memory.metadata_json or {}).get(CHOICE_STATE_MARKER) or {})
     memory.metadata_json = {**dict(memory.metadata_json or {}), CHOICE_STATE_MARKER: {
         "state": "current_choice_unresolved" if unresolved else "current",
         "fingerprint": ledger.claim_fingerprint, "generation": str(uuid.uuid4()),
-        "evidence_key": choice_evidence_key(declaration) if unresolved else previous.get("evidence_key"),
+        "evidence_key": (operation_key or choice_evidence_key(declaration)) if unresolved else previous.get("evidence_key"),
+        **({"operation_key": operation_key} if operation_key else {}),
     }}
     ledger.status = "disputed" if unresolved else "active"
     ledger.updated_at = datetime.now(UTC)
@@ -71,32 +72,62 @@ def current_target(memory: Memory) -> bool:
     ) and not (getattr(memory, "effective_from", None) is not None and utc(memory.effective_from) > now)
 
 
+def _review_choice_binding(candidate):
+    from api.errors import APIError
+    from api.services.preference_choice_service import (
+        CHOICE_OPERATION_MARKER,
+        PreferenceChoiceOperation,
+    )
+    evidence = (candidate.metadata_json or {}).get("extraction_evidence") or {}
+    if CHOICE_OPERATION_MARKER in evidence:
+        try:
+            operation = PreferenceChoiceOperation.model_validate(evidence[CHOICE_OPERATION_MARKER])
+            if (PREFERENCE_MARKER in evidence or operation.action != "withhold"
+                or operation.tenant_id != candidate.tenant_id or operation.proxy_user_id != candidate.proxy_user_id
+                or operation.quote != candidate.content
+                or str(operation.target_memory_id) != (evidence.get("source_review") or {}).get("target_memory_id")):
+                raise ValueError("invalid choice review binding")
+            return operation.fingerprint, operation.evidence_key, operation.claim_id
+        except (TypeError, ValueError) as exc:
+            raise APIError(status_code=409, code="REV_409", error="source_review_stale_or_closed") from exc
+    declaration = preference_declaration({"extraction_evidence": evidence})
+    if declaration is not None and declaration.choice_state == "current_choice_unresolved":
+        return preference_identity(declaration).fingerprint, choice_evidence_key(declaration), None
+    return None
+
+
 async def preference_review_claim(session, candidate):
     """Acquire ledger before target, NOWAIT while the review row is held."""
-    declaration = preference_declaration({"extraction_evidence":
-        (candidate.metadata_json or {}).get("extraction_evidence") or {}})
-    if declaration is None or declaration.choice_state != "current_choice_unresolved":
+    binding = _review_choice_binding(candidate)
+    if binding is None:
         return None
     claim = (await session.execute(select(MemoryClaim).where(
         MemoryClaim.tenant_id == candidate.tenant_id,
         MemoryClaim.proxy_user_id == candidate.proxy_user_id,
-        MemoryClaim.claim_fingerprint == preference_identity(declaration).fingerprint,
+        MemoryClaim.claim_fingerprint == binding[0],
     ).with_for_update(nowait=True).execution_options(populate_existing=True))).scalar_one_or_none()
-    if claim is None:
+    owner_available = True
+    if claim is not None and binding[2] is not None:
+        from api.db.models import User
+        owner_available = (await session.execute(select(User.id).join(Memory, Memory.user_id == User.id).where(
+            Memory.id == claim.active_memory_id, Memory.proxy_user_id == candidate.proxy_user_id,
+            User.external_id == f"proxy::{candidate.proxy_user_id}", User.is_active.is_(True),
+        ))).scalar_one_or_none() is not None
+    if claim is None or (binding[2] is not None and claim.id != binding[2]) or not owner_available:
         from api.errors import APIError
         raise APIError(status_code=409, code="REV_409", error="source_review_stale_or_closed")
     return claim
 
 
 def reaffirm_review_choice(candidate, memory: Memory, ledger: MemoryClaim) -> bool:
-    declaration = preference_declaration({"extraction_evidence":
-        (candidate.metadata_json or {}).get("extraction_evidence") or {}})
+    binding = _review_choice_binding(candidate)
     marker = (memory.metadata_json or {}).get(CHOICE_STATE_MARKER) or {}
     if not held_choice(memory, ledger) or ledger.status != "disputed" or not current_target(memory):
         return False
     if int(ledger.authority_priority) > 20 or authority_priority((memory.metadata_json or {}).get("provenance"), "preference") > 20:
         return False
-    if declaration is None or marker.get("evidence_key") != choice_evidence_key(declaration):
+    if (binding is None or ledger.claim_fingerprint != binding[0] or marker.get("evidence_key") != binding[1]
+        or (binding[2] is not None and ledger.id != binding[2])):
         return False
     set_choice_state(memory, ledger, unresolved=False)
     return True
@@ -212,7 +243,7 @@ def transition_reason(declaration: PreferenceClaimRequest, ledger: MemoryClaim, 
 def preference_provenance(memory: Memory) -> dict[str, Any] | None:
     """Response-only version, including archived management targets."""
     provenance = (memory.metadata_json or {}).get("provenance")
-    if preference_declaration(provenance) is not None:
+    if provenance is not None and preference_declaration(provenance) is not None:
         return {**provenance, "preference_version": target_version(memory)}
     return provenance
 
