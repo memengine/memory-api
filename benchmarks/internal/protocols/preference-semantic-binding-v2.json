@@ -1,0 +1,33 @@
+{
+  "protocol_id": "preference-semantic-binding-v2",
+  "status": "offline-binding-contract-not-a-release-gate",
+  "frozen_policy_dependency": "preference-semantic-admission-v1",
+  "scope": "preferences-only",
+  "provider_execution_approved": false,
+  "holdout_execution_approved": false,
+  "production_wiring_allowed": false,
+  "automatic_activation_allowed": false,
+  "interpretation_fields": ["kind", "property_key", "scope_ref", "stance", "evidence", "value"],
+  "target_selection": "backend-only-exact-property-and-scope",
+  "coverage": "trusted supplier explicitly covers every offered property/scope identity, including absences",
+  "coverage_limit": 512,
+  "binding": "shown and fresh matching targets, including absence, must be equal; no scope fallback",
+  "validation": "all-or-nothing; delegate bound findings to unchanged frozen v1 policy",
+  "result": "attributed_proposals_only; binding never authorizes replacement or activation",
+  "sql_completeness_verified": false,
+  "sql_concurrency_verified": false,
+  "semantic_accuracy_measured": false,
+  "human_release_gate_met": false,
+  "latency_or_load_sla_measured": false,
+  "ai_annotations_loaded": false,
+  "holdouts_loaded": false,
+  "future_adapter_requires": [
+    "authenticated catalog and scope permissions",
+    "complete bounded SQL identity snapshots including tombstones and unresolved states",
+    "fresh ownership, authority and transactional version rechecks",
+    "reuse existing preference ledger/write policy; no automatic asserted-to-replacement conversion",
+    "one writer lane per property and paired scope-aware reads",
+    "native internal representation for value-free unresolved proposals",
+    "independent semantic evaluation and explicit release approval"
+  ]
+}
