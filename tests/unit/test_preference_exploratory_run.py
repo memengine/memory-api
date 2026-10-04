@@ -117,7 +117,10 @@ def test_reservation_is_durable_before_dispatch_and_first_smoke_is_not_repeated(
     summary = runner.execute(plan, jobs, approved_digest=plan["execution_sha256"],
                              client=None, api_key="test", output_root=tmp_path)
     assert summary["status"] == "complete"
-    assert summary["provider_attempts"] == summary["accepted_offline_proposals"] == len(calls) == 2
+    assert summary["provider_attempts"] == summary["validator_passed_responses"] == len(calls) == 2
+    assert summary["responses_with_assessments"] == summary["assessment_findings"] == 0
+    assert summary["abstention_findings"] == 2
+    assert "accepted_offline_proposals" not in summary
     assert summary["uncached_token_cost_upper_bound_usd"] == "0.000144"
     assert summary["uncertain_charge_reservation_usd"] == "0"
     assert (tmp_path / f'run-{plan["execution_sha256"]}' / "summary.json").exists()
@@ -201,7 +204,8 @@ def test_invalid_output_is_charged_but_never_retried(monkeypatch, tmp_path, prep
             "value": {"turn_index": 63, "quote": "forged"}}]})
     summary, events, calls, _, _ = run_mock(monkeypatch, tmp_path, prepared, payload)
     assert len(calls) == 1 and summary["status"] == "stopped"
-    assert summary["accepted_offline_proposals"] == 0
+    assert summary["validator_passed_responses"] == 0
+    assert summary["assessment_findings"] == summary["abstention_findings"] == 0
     assert summary["uncached_token_cost_upper_bound_usd"] == "0.000072"
     assert summary["uncertain_charge_reservation_usd"] == "0"
     assert events[-1]["provider_response"] == payload

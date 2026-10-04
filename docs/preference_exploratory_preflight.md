@@ -147,6 +147,24 @@ not cause an automatic retry. AI drafts and holdouts are never loaded by this
 executor. Tests with mocked responses demonstrate control flow and spending
 safeguards, not schema acceptance by OpenAI or semantic accuracy.
 
+## Reporting correction after the interrupted run
+
+The historical execution
+`41f3b1caaa1e9799872b4608092c1466833eb85b4364af49c9aa8d0f1dcbb48e`
+was interrupted after 319 saved replies and a reservation for `d0320`.
+All saved replies contained abstentions, not preference assessments. Its journal,
+manifest, lock and original preparation artifact are preserved, not rewritten.
+The historical executor source is in commit `495dcb2`; regenerating a plan from
+the corrected executor is not a reconstruction of the historical source hash.
+
+`accepted_offline_proposals` was a misleading counter: it included valid
+abstentions. Future summaries instead expose `validator_passed_responses`,
+`responses_with_assessments`, `assessment_findings` and `abstention_findings`.
+These are structural observations, never accuracy metrics. The shared executor
+also accepts a caller-bound lower cap, never a cap above its existing $2 ceiling.
+The separate [abstention diagnostic](preference_abstention_diagnostic.md) uses
+that same engine with a $0.50 cap; it does not resume the interrupted authorization.
+
 ## What an eventual report may claim
 
 Report schema/attribution failures, policy rejections, provider refusals,

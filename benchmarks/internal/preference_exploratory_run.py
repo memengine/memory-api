@@ -155,7 +155,7 @@ def durable_write(path: Path, value: dict) -> None:
 
 
 def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Client,
-            api_key: str, output_root: Path = OUTPUT_ROOT) -> dict:
+            api_key: str, output_root: Path = OUTPUT_ROOT, cap: Decimal = CAP) -> dict:
     if approved_digest != plan["execution_sha256"] or approved_digest != prep.digest(
         prep.canonical({key: value for key, value in plan.items() if key != "execution_sha256"})
     ):
@@ -163,14 +163,18 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
     if not api_key.strip():
         raise ValueError("missing provider credential")
     # Check all bodies before creating the single-use lock or calling a provider.
-    if len(jobs) != len(plan["cases"]) or plan["cap_usd"] != str(CAP):
+    if not cap.is_finite() or not 0 < cap <= CAP:
+        raise ValueError("unsupported spending cap")
+    if len(jobs) != len(plan["cases"]) or plan["cap_usd"] != str(cap):
         raise ValueError("execution coverage or budget changed")
-    for (case_id, _, request), row in zip(jobs, plan["cases"], strict=True):
+    for (case_id, shown, request), row in zip(jobs, plan["cases"], strict=True):
         if case_id != row["case_id"] or (request is None) != (row["action"] == "no_call"):
             raise ValueError("execution coverage changed")
         if request is not None and (request.get("service_tier") != "default" or
                 prep.digest(prep.canonical(request)) != row["request_sha256"]):
             raise ValueError("execution request changed")
+        if "context_sha256" in row and prep.digest(prep.canonical(shown.model_dump(mode="json"))) != row["context_sha256"]:
+            raise ValueError("offline validation context changed")
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = output_root / f"run-{approved_digest}"
     if run_dir.resolve().parent != output_root.resolve():
@@ -178,7 +182,7 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
     run_dir.mkdir()  # Atomic, permanent one-shot lock; no resume/overwrite path.
     durable_write(run_dir / "manifest.json", {**plan, "started_at": datetime.now(UTC).isoformat()})
     known_cost, pending = Decimal(0), Decimal(0)
-    attempts = accepted = controls = 0
+    attempts = validated = assessed_responses = assessment_count = abstention_count = controls = 0
     reason, status = None, "complete"
     journal_path = run_dir / "journal.jsonl"
     with journal_path.open("x", encoding="utf-8", newline="\n") as journal:
@@ -192,7 +196,7 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
                 record({"case_id": case_id, "event": "no_call"})
                 controls += 1
                 continue
-            if known_cost + RESERVATION > CAP:
+            if known_cost + RESERVATION > cap:
                 status, reason = "stopped", "budget_reservation_unavailable"
                 break
             pending = RESERVATION
@@ -212,7 +216,10 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
                 result.update(reply=reply, decision=decision.model_dump(mode="json"))
                 if decision.status != "attributed_proposals_only":
                     raise ValueError("frozen_validator_rejected")
-                accepted += 1
+                validated += 1
+                assessed_responses += bool(decision.assessments)
+                assessment_count += len(decision.assessments)
+                abstention_count += len(decision.abstentions)
             except (httpx.HTTPError, ValueError, UnicodeError) as exc:
                 status = "stopped"
                 # Exception text from transports can expose URLs/headers. Log type only.
@@ -235,10 +242,12 @@ def execute(plan: dict, jobs: list, *, approved_digest: str, client: httpx.Clien
                 break
     summary = {
         "execution_sha256": approved_digest, "status": status, "stop_reason": reason,
-        "provider_attempts": attempts, "accepted_offline_proposals": accepted,
+        "provider_attempts": attempts, "validator_passed_responses": validated,
+        "responses_with_assessments": assessed_responses,
+        "assessment_findings": assessment_count, "abstention_findings": abstention_count,
         "no_call_controls_seen": controls, "total_cases": len(jobs),
         "uncached_token_cost_upper_bound_usd": str(known_cost),
-        "uncertain_charge_reservation_usd": str(pending), "cap_usd": str(CAP),
+        "uncertain_charge_reservation_usd": str(pending), "cap_usd": str(cap),
         "journal_sha256": prep.digest(journal_path.read_text(encoding="utf-8")),
         "semantic_accuracy_measured": False, "human_release_gate_met": False,
         "production_enablement_allowed": False, "holdouts_loaded": False, "ai_annotations_loaded": False,
