@@ -38,6 +38,7 @@ from api.services.evidence_policy import authority_for_submission
 from api.services.proxy_user_service import ProxyUserService
 from api.services.provenance_service import ProvenanceService
 from api.services.provenance_service import SOURCE_EVENT_HASH_VERSION
+from api.services.provenance_service import conversation_ingestion_sha256
 from api.services.provenance_service import source_event_sha256
 from api.services.provenance_service import source_event_payload_matches
 from api.services.common import resolve_authorized_user
@@ -971,6 +972,11 @@ class MemoryService:
                         "policy_version": "provenance-phase2-v1",
                         "prompt_version": "general-extraction-v1",
                         "payload_hash_version": source.get("payload_hash_version"),
+                        **(
+                            {"conversation_ingestion_sha256": binding}
+                            if (binding := conversation_ingestion_sha256(job)) is not None
+                            else {}
+                        ),
                         **(
                             {"trusted_evidence_policy": dict(source["trusted_evidence_policy"])}
                             if isinstance(source.get("trusted_evidence_policy"), dict)

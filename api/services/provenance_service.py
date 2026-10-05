@@ -19,6 +19,29 @@ from api.errors import APIError
 SOURCE_EVENT_HASH_VERSION = "source-envelope-v2"
 
 
+def conversation_ingestion_sha256(job: dict[str, Any]) -> str | None:
+    """Bind a server-normalized conversational job, not a trust attestation.
+
+    Original source hashes predate prepared turn IDs. Keep that contract intact
+    and separately bind the prepared transcript and policy for runtime routing.
+    Only the persisted event metadata stores this marker; public metadata cannot.
+    """
+    source = job.get("source")
+    policy = job.get("evidence_policy")
+    if (not isinstance(source, dict) or source.get("explicit") is not False
+        or source.get("writer_id") is not None or "trusted_evidence_policy" in source
+        or source.get("payload_hash_version") != SOURCE_EVENT_HASH_VERSION
+        or job.get("agent_id") is not None or job.get("preference_claims") is not None
+        or not isinstance(policy, dict) or policy.get("mode") != "conversation_evidence"):
+        return None
+    binding = {key: job.get(key) for key in (
+        "job_id", "tenant_id", "proxy_user_id", "external_user_id", "external_conversation_id",
+        "messages", "source", "evidence_policy",
+    )}
+    canonical = json.dumps(binding, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def payload_sha256(messages: list[dict[str, str]]) -> str:
     canonical = json.dumps(messages, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

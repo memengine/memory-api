@@ -124,9 +124,18 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
 
     def _owned_job(self, session, **args):
         job, messages = super()._owned_job(session, **args)
-        if (job.payload or {}).get("source_event_id") is not None:
-            raise PreferenceAdmissionUnavailable("intent_registered_source_ineligible")
+        self._validate_source(session, job)
         return job, messages
+
+    def _validate_source(self, session, job):
+        if job.source_event_id is not None or (job.payload or {}).get("source_event_id") is not None:
+            raise PreferenceAdmissionUnavailable("intent_registered_source_ineligible")
+
+    def _write_provenance(self, job, record):
+        provenance = {"attestation": "client_asserted", "authority_priority": 20}
+        if record.external_conversation_id:
+            provenance["external_conversation_id"] = record.external_conversation_id
+        return provenance
 
     def admit(self, reply, *, job_id, tenant_id, proxy_user_id, catalog, capture_id):
         """Fix the first evidence-checked reply without classifying or writing memory."""
@@ -211,11 +220,10 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
                 if embeddings is None or memory.content not in embeddings:
                     raise PreferenceAdmissionUnavailable("intent_embedding_missing")
                 prepared[memory.content] = ConflictResolver._coerce_embedding_result(embeddings[memory.content])
-            provenance = {"attestation": "client_asserted", "authority_priority": 20}
-            if record.external_conversation_id:
-                provenance["external_conversation_id"] = record.external_conversation_id
+            provenance = self._write_provenance(job, record)
             resolver = ConflictResolver(session=session, qdrant_service=None, embedder=prepared.__getitem__,
-                source_messages=messages, default_source_conversation_id=conversation.id, provenance_snapshot=provenance)
+                source_messages=messages, default_source_conversation_id=conversation.id,
+                default_source_event_id=job.source_event_id, provenance_snapshot=provenance)
             fact_context = self._prepare_nonpreferences(session, record, backing)
             pending, rejected, declarations, requests = [], {}, [], []
 
@@ -287,7 +295,7 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
             diagnostics = {}
             buffered = _persist_pending_extraction_candidates(session, candidates=pending,
                 tenant_id=str(job.tenant_id), proxy_user_id=str(job.proxy_user_id), extraction_job_id=str(job.id),
-                source_event_id=None, diagnostics=diagnostics)
+                source_event_id=str(job.source_event_id) if job.source_event_id else None, diagnostics=diagnostics)
             receipt = self.receipt_model(created_memory_ids=tuple(uuid.UUID(m.id) for m in stored),
                 withheld=withheld, reaffirmed=reaffirmed, pending_candidates_buffered=buffered,
                 reviews_capacity_rejected=diagnostics.get("source_reviews_capacity_rejected", 0),

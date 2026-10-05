@@ -12,12 +12,16 @@ from api.db.models import ExtractionJob, ExtractionJobStatus, Memory, ProxyUser,
 from api.services.preference_intent_admission_service import (
     PreferenceAdmissionUnavailable,
 )
-from api.services.runtime_preference_worker import CATALOG_KEY, RuntimePreferenceWorker
+from api.services.runtime_preference_worker import (
+    CATALOG_KEY,
+    RuntimePreferenceTransactionService,
+    RuntimePreferenceWorker,
+)
 from api.settings import get_settings
 from api.tasks import extraction_tasks
 from tests.integration.test_preference_choice_operations import counts, read
 from tests.integration.test_preference_choice_policy import read_decisions
-from tests.integration.test_preference_fact_transaction import Model, fact, stored
+from tests.integration.test_preference_fact_transaction import Model, fact
 from tests.integration.test_preference_intent_admission import args, job
 from tests.integration.test_preference_intent_transaction import FACT, TEXT
 from tests.integration.test_preference_intent_transaction import (
@@ -30,6 +34,11 @@ from tests.unit.test_preference_intent_contract import intent, reply
 
 sql_scope = _sql_scope
 forbid_real_providers = _forbid
+
+
+def stored(scope, job_id):
+    with scope.factory() as session:
+        return RuntimePreferenceTransactionService._read(session.get(ExtractionJob, job_id))
 
 
 class Embeddings:

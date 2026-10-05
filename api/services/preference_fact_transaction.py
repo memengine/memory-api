@@ -289,7 +289,8 @@ class PreferenceFactTransactionService(PreferenceIntentTransactionService):
         stored, rejected, deferred = [], 0, 0
         writer = _PreparedFacts(session=resolver.session, qdrant_service=None, embedder=resolver.embedder,
             source_messages=resolver.source_messages, llm_service=resolver.llm_service,
-            default_source_conversation_id=record.source_conversation_id, provenance_snapshot={
+            default_source_conversation_id=record.source_conversation_id,
+            default_source_event_id=resolver.default_source_event_id, provenance_snapshot={
                 **resolver.provenance_snapshot, "authority_rules": {"default_priority": 20}})
         writer.tenant_id = record.tenant_id
         versions = {item.memory_id: item.version for item in record.fact_context}

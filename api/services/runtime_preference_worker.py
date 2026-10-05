@@ -9,23 +9,30 @@ import asyncio
 import json
 import uuid
 from dataclasses import asdict
+from datetime import datetime
 
 from pydantic import ValidationError
 from sqlalchemy import select
 
 from api.db.cache import CacheService
-from api.db.models import ExtractionJob, Tenant
+from api.db.models import ExtractionJob, MemorySourceEvent, Tenant
 from api.services.embedding_service import EmbeddingService
 from api.services.llm_service import JSONSchemaResponseFormat, LLMService
-from api.services.preference_fact_transaction import PreferenceFactTransactionService
+from api.services.preference_choice_service import Version
+from api.services.preference_fact_transaction import (
+    FactTransactionRecord,
+    PreferenceFactTransactionService,
+)
 from api.services.preference_intent_admission_service import (
     PreferenceAdmissionUnavailable,
+    _hash,
 )
 from api.services.preference_intent_contract import (
     PreferenceIntentReply,
     bind_preference_intents,
 )
 from api.services.preference_snapshot_service import PreferenceSnapshotCatalog
+from api.services.provenance_service import conversation_ingestion_sha256
 from api.services.retriever import RetrieverService
 from api.settings import get_settings
 
@@ -92,8 +99,78 @@ def classify_intents(record, messages, llm_service):
     return reply
 
 
+def _conversation_source_binding(session, job, *, lock=False):
+    """Return None for historical/registered events; changed marked jobs fail closed."""
+    payload = job.payload or {}
+    event_id = payload.get("source_event_id")
+    if job.source_event_id is None and event_id is None:
+        if conversation_ingestion_sha256(payload) is not None:
+            raise PreferenceAdmissionUnavailable("intent_source_unavailable")
+        return None
+    if job.source_event_id is None or str(job.source_event_id) != event_id:
+        # Unmarked legacy jobs are not promoted by a payload-only event ID.
+        if job.source_event_id is None:
+            return None
+        raise PreferenceAdmissionUnavailable("intent_source_binding_changed")
+    query = select(MemorySourceEvent).where(MemorySourceEvent.id == job.source_event_id)
+    if lock:
+        query = query.with_for_update(read=True)
+    event = session.scalar(query.execution_options(populate_existing=True))
+    if event is None:
+        raise PreferenceAdmissionUnavailable("intent_source_unavailable")
+    marker = (event.processing_metadata or {}).get("conversation_ingestion_sha256")
+    if marker is None:
+        return None
+    source = payload.get("source") or {}
+    expected = conversation_ingestion_sha256(payload)
+    if (expected is None or marker != expected or event.tenant_id != job.tenant_id
+        or event.proxy_user_id != job.proxy_user_id or event.writer_id is not None
+        or payload.get("job_id") != str(job.id) or payload.get("external_user_id") != job.external_user_id
+        or str(event.api_key_id) != str(source.get("api_key_id"))
+        or event.source_service != source.get("service") or event.source_event_id != source.get("event_id")
+        or event.observed_at != datetime.fromisoformat(source["observed_at"])
+        or event.payload_hash != source.get("payload_hash") or event.scope != source.get("scope")
+        or event.evidence_refs != source.get("evidence")
+        or (event.processing_metadata or {}).get("payload_hash_version") != source.get("payload_hash_version")
+        or "trusted_evidence_policy" in (event.processing_metadata or {})):
+        raise PreferenceAdmissionUnavailable("intent_source_binding_changed")
+    return _hash({"id": str(event.id), "binding": marker, "observed_at": event.observed_at.isoformat(),
+                  "hash_version": (event.processing_metadata or {}).get("payload_hash_version")})
+
+
+class RuntimePreferenceRecord(FactTransactionRecord):
+    # Optional only for already-captured jobs without a source event.
+    runtime_source_sha256: Version | None = None
+
+
 class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
     """Reuse v3 mutations; check operator/tenant gates at each transactional step."""
+
+    record_model = RuntimePreferenceRecord
+
+    def _validate_source(self, session, job):
+        binding = _conversation_source_binding(session, job, lock=True)
+        if binding is None:
+            super()._validate_source(session, job)
+
+    def _capture_fields(self, job, *, session):
+        return {**super()._capture_fields(job, session=session),
+                "runtime_source_sha256": _conversation_source_binding(session, job)}
+
+    def _check(self, session, job, messages, record, catalog, *, capture_id=None):
+        result = super()._check(session, job, messages, record, catalog, capture_id=capture_id)
+        if record.runtime_source_sha256 != _conversation_source_binding(session, job):
+            raise PreferenceAdmissionUnavailable("intent_source_binding_changed")
+        return result
+
+    def _write_provenance(self, job, record):
+        provenance = super()._write_provenance(job, record)
+        if job.source_event_id is not None:
+            source = job.payload["source"]
+            provenance.update({"source_event_id": str(job.source_event_id), "service": source["service"],
+                               "event_id": source["event_id"], "writer_id": None,
+                               "observed_at": source["observed_at"], "authority_rules": {"default_priority": 20}})
+        return provenance
 
     def _owned_job(self, session, **args):
         job, messages = super()._owned_job(session, **args)
@@ -143,10 +220,13 @@ class RuntimePreferenceWorker:
                 if job.tenant_id is None or job.proxy_user_id is None or not _enabled(job.tenant_id):
                     return None
                 payload = job.payload or {}
-                if (payload.get("agent_id") is not None or payload.get("source_event_id") is not None
+                source_binding = _conversation_source_binding(session, job)
+                if (payload.get("agent_id") is not None
                     or payload.get("preference_claims") is not None
                     or (payload.get("source") or {}).get("explicit") is True):
                     return None  # Existing registered/explicit/agent writers remain separate.
+                if (job.source_event_id is not None or payload.get("source_event_id") is not None) and source_binding is None:
+                    return None
                 if tenant is None or not tenant.is_active:
                     raise PreferenceAdmissionUnavailable("intent_tenant_unavailable")
                 raw = (tenant.metadata_json or {}).get(CATALOG_KEY)

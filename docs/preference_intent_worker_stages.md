@@ -205,8 +205,21 @@ property registry. There is no catalog-management UI/API in this stage. Its
 serialized limit is 32 KiB, with at most 16 properties, 32 scopes and 32 offered
 property/scope identities. It does not grant authority or permission.
 
-Before capture, registered events, explicit declarations and agent jobs retain
-their existing writers. An allowlisted normal job with missing/invalid catalog
+Before capture, registered events, MCP/client assertions, explicit declarations and
+agent jobs retain their existing writers. Normal conversation ingestion also
+creates a provenance event; it is eligible only with the backend-issued
+`conversation_ingestion_sha256` binding in that event's processing metadata.
+This separately binds prepared turn IDs, source, policy and ownership without
+changing the original source-envelope hash contract. Public metadata cannot issue
+the binding. A registered writer bound to the API key remains excluded even when
+the request omits `source`. Historical unmarked events remain on their existing
+path; there is no automatic backfill or authority promotion. Changed marked jobs
+fail closed. Capture fixes the source-event binding; each transactional step and
+receipt delivery rechecks it. Source events are share-locked during writes.
+Created preferences, facts and pending reviews retain the source-event ID;
+attestation remains `client_asserted` and authority stays capped at 20.
+
+An allowlisted normal job with missing/invalid catalog
 or a domain overlay fails as a configuration error; it does not silently skip an
 overlay or run the legacy preference lane. Do not allowlist domain-overlay tenants
 until that coordination is designed. Broker and public payload fields cannot
@@ -251,7 +264,7 @@ catalogs, decisions or raw transcripts.
 The controlled worker suite uses disposable PostgreSQL and isolated Redis:
 
 ```powershell
-python -m pytest tests/unit/test_runtime_preference_classifier.py tests/integration/test_runtime_preference_worker.py -q
+python -m pytest tests/unit/test_runtime_preference_classifier.py tests/integration/test_runtime_preference_worker.py tests/integration/test_runtime_preference_ingestion.py -q
 ```
 
 Do not enable writes for an integration that only uses generic retrieval:
