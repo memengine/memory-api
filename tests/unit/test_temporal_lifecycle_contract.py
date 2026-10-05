@@ -8,10 +8,11 @@ from api.services.retriever import RetrieverService
 
 
 def test_current_retrieval_enforces_effective_validity_without_as_of() -> None:
-    source = inspect.getsource(RetrieverService.retrieve)
+    source = inspect.getsource(RetrieverService._retrieve_candidates)
     current_branch = source.split("if as_of is not None:", maxsplit=1)[1]
     assert "effective_from" in current_branch
     assert "effective_until" in current_branch
+    assert "_final_current_read" in inspect.getsource(RetrieverService.retrieve)
 
 
 def test_lifecycle_manager_processes_scheduled_activation_and_expiration() -> None:

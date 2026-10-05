@@ -272,10 +272,72 @@ declared preferences require the already-existing SDK/API `preference_context`
 and `preference_decisions` read contract. Generic vector retrieval deliberately
 does not promote them. That integration contract must be exercised before an
 assistant canary, without preference-specific assistant prompt workarounds.
-Ingestion is still asynchronous: a retrieval before its job's commit can observe
-the previously committed state. The controlled journey checks reads after the
-receipt, not instant visibility of a queued uncertainty/correction. This adapter
-adds neither a synchronous model wait to chat nor a pending-write read barrier;
-that integration/currentness behavior must be checked before a tenant canary.
+### Stage 1 visibility foundation (not a launch gate)
+
+Eligible normal ingestion now reserves `runtime_route=preference_v1` in the same
+commit as the job and source event. Catalog/routing configuration is checked
+before acceptance. A reserved job cannot fall back to legacy extraction when
+rollout flags are disabled, its source binding changes or its catalog disappears.
+Existing exclusions and the client-asserted authority cap of 20 are unchanged;
+legacy conversational authority 50 is neither rewritten nor promoted.
+
+Current tenant/proxy reads use indexed ownership-scoped EXISTS checks. Pending
+updates return no learned memory data and additive `memory_visibility` with
+`state=processing` or `state=unavailable`, `scope=user_learned_context`. The fast
+preflight does not call embeddings, vector search or a read-time classifier.
+Historical `as_of` reads remain historical and do not use this currentness guard.
+Processing is not a clarification: old review cards, clarification cards and
+domain context overlays are suppressed while it is pending. The prompt-ready
+notice preserves bullets/JSON/XML formatting and respects the context budget;
+the typed status remains even when the prompt budget cannot accommodate it.
+
+When candidate ranking occurs, final processing state, refreshed SQL rows and
+explicit preference ledger selection share one short REPEATABLE READ snapshot.
+There is no provider/vector call inside that snapshot. The read releases the
+request's read-only transaction before opening it and refuses to commit pending
+caller mutations. SQL is authoritative even if cached candidate content is old.
+Query embeddings now also detach their selected model configuration and release
+the read transaction before provider work; vector search follows with no held
+SQL connection. Existing model-ID selection and provider routing are unchanged.
+An applied timestamp is only an indexed projection of the private receipt: the
+runtime writer stores it in the same transaction as memory changes and receipt.
+Cache delivery/job completion is not required to release the guard. Empty/partial
+results are possible until replacement facts reach vector ranking; no instant
+vector publication or complete causal fact read is claimed.
+
+Pre-reservation runtime captures remain guarded through their private marker.
+Only fully validated receipt delivery projects their applied timestamp. Retention
+preserves their route before erasing private evidence; it does not treat an old
+`state=applied` string as a proof. Failed/dead/expired unfinished jobs stay
+unavailable, not timeout-to-current. They require operational recovery; this
+slice does not add an unaudited cancellation/reset endpoint.
+
+This first guard is intentionally conservative across the user's learned context.
+It does not yet narrow withholding to evidence-bound properties/fact targets.
+Continuous writes or failed jobs can therefore reduce context availability;
+bounded lookup cost does not imply a latency/availability SLO. Property/target
+narrowing, recovery policy, measured sustained-load behavior and Stage 2
+catalog-driven generic reads remain required before a customer canary. Generic
+reads still do not activate declared preference winners without `preference_context`.
+
+Deploy both additive migrations and all API/worker instances while runtime flags
+remain disabled, then drain/reconcile old captured jobs before considering a
+separately approved canary. Old workers do not understand reservations. The
+concurrent indexes are a separate revision so an interrupted build can be retried
+without replaying column additions; only these exact invalid indexes are repaired.
+No automatic enrollment/backfill of historical uncaptured jobs occurs.
+
+Controlled guard checks:
+
+```powershell
+python -m pytest tests/integration/test_runtime_pending_visibility.py tests/unit/test_preference_choice_contract.py -q
+```
+
+These tests cover immediate reads, acceptance/commit races, rollback, cache lag,
+legacy authority, retention, old captures, owner isolation and a synthetic
+3,000-job backlog. The index plan check proves index compatibility, not production
+p99 or sustained-throughput performance. Backend withholding does not force a
+customer model to ignore contradictory conversation history; that is outside the
+returned-context guarantee.
 Independent semantic evaluation, provider availability/fallback evidence,
 latency/cost measurements and a separately approved tenant canary remain required.

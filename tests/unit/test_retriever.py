@@ -112,10 +112,13 @@ def make_embedding_model(
 
 
 class FakeEmbeddingService:
-    async def embed(self, text: str, model_id: str | None = None) -> EmbeddingResult:
+    async def get_model(self, model_id):
+        return SimpleNamespace(id=model_id)
+
+    async def embed(self, text: str, model_id: str | None = None, *, model_record=None) -> EmbeddingResult:
         return EmbeddingResult(
             vector=[0.1, 0.2],
-            model_id=model_id or DEFAULT_ACTIVE_MODEL_ID,
+            model_id=model_record.id if model_record else model_id or DEFAULT_ACTIVE_MODEL_ID,
             dimensions=1536,
             qdrant_collection="memories",
         )
@@ -125,8 +128,15 @@ class FakeEmbeddingService:
 
 
 class FailingEmbeddingService(FakeEmbeddingService):
-    async def embed(self, text: str, model_id: str | None = None) -> EmbeddingResult:
+    async def embed(self, text: str, model_id: str | None = None, *, model_record=None) -> EmbeddingResult:
         raise TimeoutError("embedding connection timed out")
+
+
+@pytest.fixture(autouse=True)
+def controlled_sql_lifetime(monkeypatch):
+    # These ranking tests use fake SQL sessions. Real connection lifetime,
+    # mutation protection and snapshot races are tested against PostgreSQL.
+    monkeypatch.setattr(RetrieverService, "_finish_read_transaction", AsyncMock())
 
 
 def test_semantic_floor_preserves_boundary_and_rejects_lower_score() -> None:

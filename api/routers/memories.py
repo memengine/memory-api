@@ -454,7 +454,25 @@ async def retrieve_memories(
     domain_started = time.perf_counter()
     domain_schema_name = await _tenant_domain_schema(session, tenant_id)
     domain_schema = get_domain_schema(domain_schema_name)
-    if domain_schema is not None and payload.preference_context is None:
+    memory_visibility = getattr(retriever_service, "last_memory_visibility", None)
+    if memory_visibility is not None:
+        notice = (
+            "MemoryOS has withheld learned context while a user update is "
+            + ("processing." if memory_visibility.state == "processing" else "unavailable for processing.")
+            + " Do not present a previously stored value as the current memory. "
+            "This status is not a request for user clarification."
+        )
+        if payload.format == "json":
+            system_prompt_addition = json.dumps({"memory_visibility": memory_visibility.model_dump(), "notice": notice})
+        elif payload.format == "xml":
+            system_prompt_addition = f'<memory_visibility state="{memory_visibility.state}">{notice}</memory_visibility>'
+        else:
+            system_prompt_addition = notice
+        context_token_count = context_builder._count_tokens(system_prompt_addition)
+        if context_token_count > payload.context_max_tokens:
+            system_prompt_addition = ""
+            context_token_count = 0  # Typed status survives a small prompt budget.
+    if domain_schema is not None and payload.preference_context is None and memory_visibility is None:
         domain_prompt, domain_token_count = await domain_schema.build_retrieve_context(
             session=session,
             cache_service=cache_service,
@@ -474,7 +492,7 @@ async def retrieve_memories(
     clarification = await _pop_next_clarification(
         session=session,
         proxy_user_id=str(proxy_user.id),
-    ) if payload.preference_context is None else None
+    ) if payload.preference_context is None and memory_visibility is None else None
     clarification_question = clarification.question if clarification is not None else None
     preference_decisions = (
         list(getattr(retriever_service, "last_preference_decisions", []) or [])
@@ -486,7 +504,7 @@ async def retrieve_memories(
     source_reviews = await list_source_reviews(
         session, tenant_id=tenant_id, proxy_user_id=str(proxy_user.id),
         **({"preference_context": payload.preference_context} if payload.preference_context is not None else {}),
-    ) if payload.as_of is None else []
+    ) if payload.as_of is None and memory_visibility is None else []
     retrieval_id = None
     feedback_started = time.perf_counter()
     try:
@@ -536,6 +554,7 @@ async def retrieve_memories(
         clarification=clarification,
         source_reviews=source_reviews,
         preference_decisions=preference_decisions,
+        memory_visibility=memory_visibility,
         quota_mode=getattr(retriever_service, "last_quota_mode", None),
         is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
         is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",

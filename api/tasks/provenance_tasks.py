@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from api.db.database import build_sync_session_factory
 from api.db.models import ExtractionJob
+from api.services.runtime_preference_routing import RUNTIME_ROUTE
 
 
 REDACT_EXTRACTION_PAYLOADS_TASK_NAME = "api.tasks.provenance_tasks.redact_expired_extraction_payloads"
@@ -82,6 +83,10 @@ def redact_expired_extraction_payloads(batch_size: int = 1000) -> dict[str, int]
             .limit(max(1, min(int(batch_size), 5000)))
         ).scalars().all()
         for job in jobs:
+            # Preserve the guard when erasing pre-reservation private captures.
+            # A state string alone never earns an applied receipt projection.
+            if job.runtime_route is None and "runtime_source_sha256" in (job.preference_intent_admission or {}):
+                job.runtime_route = RUNTIME_ROUTE
             job.payload = redact_job_payload(dict(job.payload or {}))
             job.result = redact_job_payload(dict(job.result or {}))
             job.preference_intent_admission = None

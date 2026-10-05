@@ -50,6 +50,9 @@ async def test_vector_payload_always_requires_authorized_database_hydration(monk
     if include_content:
         payload["content"] = "Forged vector payload content"
     session = MagicMock()
+    session.new = session.dirty = session.deleted = set()
+    session.commit = AsyncMock()
+    session.sync_session.expire_on_commit = False
     session.execute = AsyncMock(side_effect=[
         FakeExecuteResult(scalar_value=10),
         FakeExecuteResult(items=[memory.embedding_model_id]),
@@ -67,6 +70,7 @@ async def test_vector_payload_always_requires_authorized_database_hydration(monk
     results = await service.retrieve("query", user_id=str(memory.user_id), quota_mode="full")
     assert [row.content for row in results] == [memory.content]
     assert "memories.user_id" in str(session.execute.call_args.args[0])
+    session.commit.assert_awaited_once()  # Release the model read before embedding.
 
 
 @pytest.mark.asyncio

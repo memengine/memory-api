@@ -71,13 +71,14 @@ def read_decisions(scope, applicability, *, properties=None, categories=None):
                     embedding_service=SimpleNamespace())
                 service._queue_access_update = lambda _: None
                 # Other categories are controlled here; preference selection uses real SQL.
-                original = service.retrieve
+                original = service._retrieve_candidates
                 async def retrieve(**kwargs):
                     if kwargs.get("preference_context") is None:
                         service.last_preference_decisions = []  # Recursive reads must not erase outer outcomes.
+                        service._resolved_read_proxy_id = str(scope.proxy_id)
                         return []
                     return await original(**kwargs)
-                service.retrieve = retrieve
+                service._retrieve_candidates = retrieve
                 items = await service.retrieve(query="language?", external_user_id=scope.external_id,
                     tenant_id=str(scope.tenant_id), proxy_user_id=str(scope.proxy_id),
                     categories=categories or ["preference"], quota_mode="DEGRADED",

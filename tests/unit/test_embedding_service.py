@@ -90,6 +90,24 @@ def test_detached_model_can_embed_without_reopening_sql(monkeypatch) -> None:
         service.embed_sync("synthetic", model_id=record.id, model_record=record)
 
 
+@pytest.mark.asyncio
+async def test_async_detached_model_does_not_reopen_sql(monkeypatch):
+    service = EmbeddingService(async_redis_client=FakeAsyncRedis(), sync_redis_client=FakeSyncRedis())
+    record = service._to_record(make_model())
+    async def forbidden(*args, **kwargs):
+        pytest.fail("detached async embedding must not load SQL configuration")
+    monkeypatch.setattr(service, "get_model", forbidden)
+    monkeypatch.setattr(service, "get_active_model", forbidden)
+    monkeypatch.setattr(service, "_embed_with_model_sync", lambda text, model, tenant: [0.1] * model.dimensions)
+    try:
+        assert (await service.embed("synthetic", model_record=record)).model_id == record.id
+        with pytest.raises(ValueError, match="not both"):
+            await service.embed("synthetic", model_id=record.id, model_record=record)
+    finally:
+        service.sync_http_client.close()
+        await service.async_http_client.aclose()
+
+
 def make_model(
     *,
     model_id: str = DEFAULT_ACTIVE_MODEL_ID,

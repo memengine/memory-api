@@ -261,13 +261,17 @@ async def test_hot_tier_memory_is_returned_without_qdrant_lookup(monkeypatch) ->
     task_mock = MagicMock()
     monkeypatch.setattr("api.services.retriever.update_memory_accesses", task_mock)
 
-    results = await RetrieverService(
+    service = RetrieverService(
         session=session,
         qdrant_service=qdrant_service,
         cache_service=cache,
         quota_manager=quota_manager,
         proxy_user_service=SimpleNamespace(),
-    ).retrieve(
+    )
+    # This unit checks hot-tier ranking with fake SQL; final guard/snapshot
+    # ownership and connection lifetime use the real PostgreSQL guard suite.
+    service._runtime_visibility_row = AsyncMock(return_value=(False, False, False))
+    results = await service._retrieve_candidates(
         query="anything",
         external_user_id="student-1",
         proxy_user_id=proxy_user_id,

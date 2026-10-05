@@ -30,6 +30,7 @@ from api.db.models import MemoryClaim
 from api.db.models import MemoryClaimRevision
 from api.db.models import MemorySourceEvent
 from api.db.models import ProxyUser
+from api.db.models import Tenant
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.services.embedding_service import EmbeddingResult
@@ -43,6 +44,7 @@ from api.services.provenance_service import source_event_sha256
 from api.services.provenance_service import source_event_payload_matches
 from api.services.common import resolve_authorized_user
 from api.services.quota_manager import QuotaManager
+from api.services.runtime_preference_routing import RUNTIME_ROUTE, runtime_catalog, runtime_enabled
 from api.services.vector_outbox import build_vector_payload
 from api.services.vector_outbox import enqueue_vector_delete
 from api.infra.protected_storage import encrypt_json_for_dual_write
@@ -952,6 +954,10 @@ class MemoryService:
             return job, True
         source = dict(job.get("source") or {})
         try:
+            runtime_route = None
+            if conversation_ingestion_sha256(job) is not None and runtime_enabled(tenant_id):
+                runtime_catalog(await self.session.get(Tenant, uuid.UUID(str(tenant_id))))
+                runtime_route = RUNTIME_ROUTE
             source_event: MemorySourceEvent | None = None
             if source:
                 source_event = MemorySourceEvent(
@@ -1003,6 +1009,7 @@ class MemoryService:
                 ),
                 result={},
                 source_event_id=source_event.id if source_event is not None else None,
+                runtime_route=runtime_route,
                 raw_payload_expires_at=(
                     datetime.now(UTC) + timedelta(days=get_settings().extraction_payload_retention_days)
                 ),

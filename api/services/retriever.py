@@ -12,17 +12,34 @@ from itertools import islice
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, func, literal_column, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.db.cache import CacheService
-from api.db.models import Memory, MemoryClaim, ProxyUser, QuotaMode
+from api.db.models import (
+    ExtractionJob,
+    ExtractionJobStatus,
+    Memory,
+    MemoryClaim,
+    ProxyUser,
+    QuotaMode,
+)
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.infra.circuit_breaker_registry import CircuitBreakerRegistry
-from api.schemas.preferences import PreferenceApplicability, PreferenceReadContext, PreferenceReadDecision
+from api.schemas.preferences import (
+    PreferenceApplicability,
+    PreferenceReadContext,
+    PreferenceReadDecision,
+)
+from api.schemas.responses import MemoryVisibility
 from api.services.embedding_service import EmbeddingResult, EmbeddingService
-from api.services.preference_claim_service import held_choice, legacy_memory_predicate, preference_declaration, preference_fingerprint
+from api.services.preference_claim_service import (
+    held_choice,
+    legacy_memory_predicate,
+    preference_declaration,
+    preference_fingerprint,
+)
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
 from api.tasks.retrieval_tasks import update_memory_accesses
@@ -85,6 +102,12 @@ class RetrieverService:
     _memory_count_cache: dict[str, tuple[float, int]] = {}
     _hot_tier_cache: dict[str, tuple[float, list[MemoryResult]]] = {}
 
+    @staticmethod
+    def _runtime_job_predicate():
+        # Pre-reservation captures remain guarded across upgrade/rollback.
+        return or_(ExtractionJob.runtime_route.is_not(None),
+                   ExtractionJob.preference_intent_admission.op("?")(literal_column("'runtime_source_sha256'")))
+
     def __init__(
         self,
         *,
@@ -107,6 +130,7 @@ class RetrieverService:
         self.last_preference_decisions: list[PreferenceReadDecision] = []
         self.last_quota_mode = QuotaMode.full.value
         self.last_is_degraded = False
+        self.last_memory_visibility: MemoryVisibility | None = None
         self.region_id = region_id
         self.embedding_service = embedding_service or EmbeddingService(
             async_session=session,
@@ -124,6 +148,107 @@ class RetrieverService:
         cls._memory_count_cache.pop(f"user:{user_id}", None)
 
     async def retrieve(
+        self, query: str, external_user_id: str | None = None, proxy_user_id: str | None = None,
+        user_id: str | None = None, limit: int = 10, categories: list[str] | None = None,
+        agent_id: str | None = None, tenant_id: str | None = None,
+        time_filter_days: int | None = None, as_of: datetime | None = None,
+        quota_mode: str | QuotaMode | None = None, preference_context: PreferenceReadContext | None = None,
+    ) -> list[MemoryResult]:
+        self.last_memory_visibility = None
+        self._resolved_read_proxy_id: str | None = None
+        args: dict[str, Any] = {"query": query, "external_user_id": external_user_id, "proxy_user_id": proxy_user_id,
+                "user_id": user_id, "limit": limit, "categories": categories, "agent_id": agent_id,
+                "tenant_id": tenant_id, "time_filter_days": time_filter_days, "as_of": as_of,
+                "quota_mode": quota_mode, "preference_context": preference_context}
+        with self.session.no_autoflush:
+            candidates = await self._retrieve_candidates(**args)
+        if self.last_memory_visibility is not None:
+            return []  # Preflight withheld context without a provider wait.
+        owner = self._resolved_read_proxy_id
+        if as_of is not None or tenant_id is None or owner is None:
+            return candidates
+        if self.last_quota_mode in {QuotaMode.blocked.value, QuotaMode.passthrough.value}:
+            return candidates
+        return await self._final_current_read(candidates, owner=owner, **args)
+
+    async def _final_current_read(self, candidates, *, owner, **args):
+        """No providers: pending state, SQL hydration and winners share a snapshot.
+
+        Release the request's read-only transaction first; never commit caller
+        mutations. A separate short session cannot expire router-owned objects.
+        Cache/vector delivery and job completion are not applied-receipt proofs.
+        """
+        await self._finish_read_transaction()
+        bind = self.session.bind
+        if bind is None:
+            raise ValueError("governed retrieval requires a bound session")
+        sessions = async_sessionmaker(bind.execution_options(isolation_level="REPEATABLE READ"),
+                                      expire_on_commit=False, class_=type(self.session))
+        original = self.session
+        async with sessions.begin() as snapshot:
+            self.session = snapshot
+            try:
+                row = await self._runtime_visibility_row(owner, args["tenant_id"])
+                if row is None:
+                    self.last_cache_hit = False
+                    self.last_preference_decisions = []
+                    return []
+                if row[0]:
+                    self.last_memory_visibility = MemoryVisibility(state="unavailable" if row[1] else "processing")
+                    self.last_is_degraded = True
+                    self.last_cache_hit = False
+                    self.last_preference_decisions = []
+                    return []
+                if not row[2]:
+                    return candidates  # No server-selected runtime job for this owner.
+                categories = [c.lower() for c in args["categories"] or []]
+                fresh = await self._hydrate_current_results(
+                    [m for m in candidates if args["preference_context"] is None or m.category != "preference"],
+                    proxy_user_id=owner, user_id=None, tenant_id=args["tenant_id"],
+                    categories=categories, agent_id=args["agent_id"],
+                    created_after=self._created_after(args["time_filter_days"]),
+                )
+                if args["preference_context"] is not None and (not categories or "preference" in categories):
+                    preferences = await self._retrieve_declared_preferences(
+                        context=args["preference_context"], query=args["query"],
+                        identity=args["external_user_id"] or args["user_id"], proxy_user_id=owner,
+                        tenant_id=args["tenant_id"], limit=args["limit"], categories=["preference"],
+                        agent_id=args["agent_id"], time_filter_days=args["time_filter_days"],
+                        quota_mode=self.last_quota_mode, include_other=False,
+                    )
+                    fresh = preferences + fresh
+                self.last_cache_hit = False
+                return fresh[:args["limit"]]
+            finally:
+                self.session = original
+
+    async def _runtime_visibility_row(self, owner, tenant_id):
+        # Partial owner indexes; no raw evidence or unbounded job loading.
+        routed = select(ExtractionJob.id).where(
+            ExtractionJob.tenant_id == self._as_uuid(tenant_id),
+            ExtractionJob.proxy_user_id == self._as_uuid(owner), self._runtime_job_predicate(),
+        )
+        pending = routed.where(ExtractionJob.runtime_applied_at.is_(None))
+        unavailable = pending.where(or_(
+            ExtractionJob.status.in_([ExtractionJobStatus.failed, ExtractionJobStatus.dead]),
+            ExtractionJob.payload_redacted_at.is_not(None),
+        ))
+        return (await self.session.execute(select(pending.exists(), unavailable.exists(), routed.exists()).where(
+            ProxyUser.id == self._as_uuid(owner), ProxyUser.tenant_id == self._as_uuid(tenant_id),
+            ProxyUser.is_blocked.is_(False),
+        ))).first()
+
+    async def _finish_read_transaction(self):
+        if self.session.new or self.session.dirty or self.session.deleted:
+            raise ValueError("governed retrieval requires a read-only session")
+        expire = self.session.sync_session.expire_on_commit
+        self.session.sync_session.expire_on_commit = False
+        try:
+            await self.session.commit()
+        finally:
+            self.session.sync_session.expire_on_commit = expire
+
+    async def _retrieve_candidates(
         self,
         query: str,
         external_user_id: str | None = None,
@@ -148,7 +273,7 @@ class RetrieverService:
 
         self.last_is_degraded = False
 
-        proxy_user = None
+        proxy_user: ProxyUser | SimpleNamespace | None = None
         cache_identity = identity
         if tenant_id:
             if self.proxy_user_service is not None:
@@ -163,9 +288,19 @@ class RetrieverService:
                     cache_identity = str(proxy_user.id)
             elif user_id is not None:
                 cache_identity = user_id
+        self._resolved_read_proxy_id = str(proxy_user.id) if proxy_user is not None else None
 
         resolved_quota_mode = self._coerce_quota_mode(quota_mode) if quota_mode is not None else await self._resolve_quota_mode(tenant_id)
         self.last_quota_mode = resolved_quota_mode.value
+        if as_of is None and tenant_id is not None and proxy_user is not None:
+            row = await self._runtime_visibility_row(str(proxy_user.id), tenant_id)
+            if row is None or row[0]:
+                self.last_cache_hit = False
+                if row is not None:
+                    self.last_memory_visibility = MemoryVisibility(state="unavailable" if row[1] else "processing")
+                    self.last_is_degraded = True
+                return []
+
         if resolved_quota_mode in {QuotaMode.blocked, QuotaMode.passthrough}:
             return []
 
@@ -606,7 +741,7 @@ class RetrieverService:
         except Exception:
             return []
 
-        results: list[MemoryResult] = []
+        results = []
         for item in cached_memories[:50]:
             try:
                 results.append(self._memory_result_from_cache(item))
@@ -1152,7 +1287,9 @@ class RetrieverService:
         return sorted(self._deduplicate_results(results), key=lambda row: row.final_score, reverse=True)
 
     async def _embed_query(self, query: str, *, model_id: str) -> EmbeddingResult:
-        return await self.embedding_service.embed(query, model_id=model_id)
+        model = await self.embedding_service.get_model(model_id)
+        await self._finish_read_transaction()
+        return await self.embedding_service.embed(query, model_record=model)
 
     async def _search_qdrant(
         self,
@@ -1321,7 +1458,7 @@ class RetrieverService:
 
     async def _retrieve_declared_preferences(
         self, *, context, query, identity, proxy_user_id, tenant_id, limit,
-        categories, agent_id, time_filter_days, quota_mode,
+        categories, agent_id, time_filter_days, quota_mode, include_other=True,
     ) -> list[MemoryResult]:
         # <=32 indexed identities, one SQL round-trip. A vector page is not a
         # complete property set, so it cannot decide which scope wins.
@@ -1375,11 +1512,11 @@ class RetrieverService:
         # Other categories retain their existing ranking and cache behavior;
         # unknown legacy preferences are not promoted to global in this mode.
         other_categories = [c for c in (categories or ["fact", "goal", "procedure", "relationship", "expertise"]) if c != "preference"]
-        other = await self.retrieve(
+        other = await self._retrieve_candidates(
             query=query, external_user_id=identity, proxy_user_id=proxy_user_id,
             tenant_id=tenant_id, categories=other_categories, agent_id=agent_id,
             limit=limit, time_filter_days=time_filter_days, quota_mode=quota_mode,
-        ) if other_categories else []
+        ) if include_other and other_categories else []
         self.last_cache_hit = False  # Preference winners are always freshly read.
         self.last_preference_decisions = decisions
         self._queue_access_update([result.id for result in preferences])

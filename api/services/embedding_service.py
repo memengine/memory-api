@@ -149,8 +149,12 @@ class EmbeddingService:
         text: str,
         model_id: str | None = None,
         tenant_id: str | None = None,
+        *,
+        model_record: EmbeddingModelRecord | None = None,
     ) -> EmbeddingResult:
-        model = await (self.get_model(model_id) if model_id else self.get_active_model())
+        if model_record is not None and model_id is not None:
+            raise ValueError("Supply a detached model record or a model ID, not both.")
+        model = model_record or await (self.get_model(model_id) if model_id else self.get_active_model())
         vector = await asyncio.to_thread(self._embed_with_model_sync, text, model, tenant_id)
         return EmbeddingResult(
             vector=vector,

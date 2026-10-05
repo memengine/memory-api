@@ -189,6 +189,13 @@ class MemorySourceReviewAnswerResponse(ResponseEnvelope):
     data: MemorySourceReviewAnswerData
 
 
+class MemoryVisibility(BaseModel):
+    """Processing is not a clarification, authority decision or provider promise."""
+
+    state: Literal["processing", "unavailable"]
+    scope: Literal["user_learned_context"] = "user_learned_context"
+
+
 class MemoryRetrieveResponse(ResponseEnvelope):
     retrieval_id: str | None = None
     data: list[MemorySearchResult]
@@ -199,6 +206,7 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     clarification: MemoryClarificationData | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
+    memory_visibility: MemoryVisibility | None = None
     quota_mode: str | None = None
     is_degraded: bool = False
     is_passthrough: bool = False

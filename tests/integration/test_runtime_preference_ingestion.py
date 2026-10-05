@@ -188,6 +188,7 @@ def test_normal_ingestion_does_not_promote_other_source_paths(sql_scope, ingesti
         row = session.get(ExtractionJob, job_id)
         event = session.get(MemorySourceEvent, row.source_event_id)
         if kind == "historical":
+            row.runtime_route = None  # Genuinely old, unreserved job.
             event.processing_metadata = {k: v for k, v in event.processing_metadata.items()
                                          if k != "conversation_ingestion_sha256"}
         assert "conversation_ingestion_sha256" not in event.processing_metadata
@@ -207,7 +208,9 @@ def test_normal_source_does_not_open_standalone_transaction_or_disabled_rollout(
         PreferenceIntentTransactionService(sql_scope.factory).capture(**args(sql_scope, job_id))
     monkeypatch.setattr(get_settings(), "runtime_preference_enabled", False)
     instance, model, embedder = worker(sql_scope)
-    assert instance.process(job_id) is None and not model.calls and not embedder.calls
+    with pytest.raises(PreferenceAdmissionUnavailable, match="intent_rollout_unavailable"):
+        instance.process(job_id)
+    assert not model.calls and not embedder.calls
 
 
 def test_normal_pending_review_keeps_source_event_without_activating_tentative_text(sql_scope, ingestion, monkeypatch):

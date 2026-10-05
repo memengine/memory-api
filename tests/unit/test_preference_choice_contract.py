@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from api.routers.memories import retrieve_memories
 from api.schemas.preferences import PreferenceReadDecision
 from api.schemas.requests import MemoryRetrieveRequest
-from api.schemas.responses import MemoryRetrieveResponse
+from api.schemas.responses import MemoryRetrieveResponse, MemoryVisibility
 from api.services.context_builder import ContextBuilder
 from api.settings import get_settings
 from tests.unit.test_explicit_preference_contract import claim
@@ -67,3 +67,39 @@ async def test_read_exposes_policy_without_putting_withheld_value_into_context(m
     assert response.data == [] and "C++" not in (response.system_prompt_addition or "")
     assert response.preference_decisions == ([decision] if explicit else [])
     assert bool(response.clarification_question) is explicit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["processing", "unavailable"])
+@pytest.mark.parametrize("format", ["bullets", "json", "xml"])
+async def test_pending_visibility_cannot_leak_overlays_or_stale_review_cards(monkeypatch, state, format):
+    from api.routers import memories
+
+    overlay = SimpleNamespace(build_retrieve_context=AsyncMock(side_effect=AssertionError("old overlay leaked")))
+    monkeypatch.setattr(memories, "_tenant_domain_schema", AsyncMock(return_value="configured-domain"))
+    monkeypatch.setattr(memories, "get_domain_schema", lambda _: overlay)
+    reviews = AsyncMock(side_effect=AssertionError("old reviews leaked"))
+    clarifications = AsyncMock(side_effect=AssertionError("old clarification leaked"))
+    monkeypatch.setattr(memories, "list_source_reviews", reviews)
+    monkeypatch.setattr(memories, "_pop_next_clarification", clarifications)
+    monkeypatch.setattr(memories, "RetrievalFeedbackService", lambda **_: SimpleNamespace(
+        log_retrieval=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))))
+    visibility = MemoryVisibility(state=state)
+    service = SimpleNamespace(retrieve=AsyncMock(return_value=[]), last_cache_hit=False,
+        last_preference_decisions=[], last_memory_visibility=visibility,
+        last_quota_mode="FULL", last_is_degraded=True)
+    proxies = SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())))
+    payload = MemoryRetrieveRequest(external_user_id="u", query="current?", format=format)
+    response = await retrieve_memories(_request(), payload, service, proxies, ContextBuilder(),
+        AsyncMock(), AsyncMock(), str(uuid.uuid4()))
+    assert response.data == [] and response.memory_visibility == visibility
+    assert response.source_reviews == [] and response.clarification is None and response.clarification_question is None
+    overlay.build_retrieve_context.assert_not_awaited()
+    reviews.assert_not_awaited()
+    clarifications.assert_not_awaited()
+    if format == "json":
+        import json
+        assert json.loads(response.system_prompt_addition)["memory_visibility"]["state"] == state
+    elif format == "xml":
+        from xml.etree import ElementTree
+        assert ElementTree.fromstring(response.system_prompt_addition).attrib["state"] == state

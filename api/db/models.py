@@ -2817,6 +2817,10 @@ class ExtractionJob(Base):
     )
     queue_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Chosen at acceptance, not recomputed from broker data or rollout flags.
+    runtime_route: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Indexed projection of the private receipt, set in its memory-write transaction.
+    runtime_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -3258,6 +3262,11 @@ Index(
 )
 Index("ix_extraction_jobs_tenant_status", ExtractionJob.tenant_id, ExtractionJob.status)
 Index("ix_extraction_jobs_proxy_user", ExtractionJob.proxy_user_id)
+Index("ix_extraction_jobs_runtime_owner", ExtractionJob.tenant_id, ExtractionJob.proxy_user_id,
+      postgresql_where=text("runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256'"))
+Index("ix_extraction_jobs_runtime_pending", ExtractionJob.tenant_id, ExtractionJob.proxy_user_id,
+      postgresql_where=text("(runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256') "
+                            "AND runtime_applied_at IS NULL"))
 Index("ix_extraction_jobs_payload_retention", ExtractionJob.raw_payload_expires_at)
 Index(
     "ix_extraction_jobs_status_stale_after",
