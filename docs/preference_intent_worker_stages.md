@@ -24,7 +24,7 @@ same created IDs without replaying writes, even if job completion overwrote the
 ordinary result. The external conversation reference is frozen at capture and
 rechecked, with the same 255-character limit as the public ingestion contract.
 
-**Fact limitation:** this stage does not apply fact corrections. Nonpreferences
+**Version-two fact limitation:** that stage does not apply fact corrections. Nonpreferences
 are retained in the fixed reply and submitted as non-activating source reviews.
 The receipt separately reports deferred facts, buffered reviews, capacity
 rejections and closed-review replays. Capacity rejection is not successful fact
@@ -32,6 +32,58 @@ storage. Tentative, contextual and unrepresentable preferences also remain
 non-activating reviews. `state=applied` means this limited transaction finished,
 not that all findings became current memories. Relation validation and fact
 writes still require the next stage before any worker can use this service.
+
+`api/services/preference_fact_transaction.py` supplies that next, **disconnected
+version-three stage**. It captures at most 50 owned, temporally current memory
+bindings with a +1 completeness check. Protected preference rows are veto
+inputs, never fact-write targets, even if their category is mislabeled. The
+same evidence validator, relation parser, resolver mutation policy, claim
+ledger, audit, version, pending-review and vector-outbox writers are reused.
+No separate fact mutation engine or new public input schema was introduced.
+The v1/v2 wire records and terminal outcomes are not reinterpreted as v3.
+
+An injected relation service classifies detached rows after the read session
+closes; application cannot call it. The first checked reply and backend-parsed
+fact plans are persisted together, with a digest covering both lanes and the
+captured fact context. Fact corrections and accepted preferences share the
+existing single write transaction and terminal receipt. Source conversation
+and external conversation references survive both writes. Fact provenance
+explicitly supplies the existing enforced authority-rule format at priority
+20; higher stored provenance or active-ledger authority cannot be overwritten.
+Unknown legacy authority defaults remain conservative, not silently downgraded.
+
+Application uses PostgreSQL SERIALIZABLE isolation and rechecks context and
+selected versions; concurrent changes can produce SQLSTATE 40001 and require
+retrying the **same fixed record**, never recapturing or reclassifying it. This
+stage deliberately does not implement the worker's retry scheduling. Changed
+context on retry becomes pending, not an unintended replacement. All memory,
+audit, outbox, review and receipt writes roll back together on failure.
+
+Prior incoming facts are nomination-only transient candidates during planning.
+Selecting one, or reusing the same existing target in a batch, defers the
+involved findings rather than independently activating contradictory values.
+Transient IDs never become durable targets. Unrelated new facts can be stored
+together. This is conservative dependency handling, not a semantic proof that
+a classifier correctly identified every relationship.
+
+Ambiguous, unrepresentable, failed, stale, automatic-merge, protected-target and
+incomplete-context decisions stay non-activating source reviews. Pending plans
+need no embedding. The receipt distinguishes `facts_created`, `facts_rejected`
+and `deferred_facts`, alongside review-capacity outcomes and exact created IDs.
+`deferred_facts` does not mean every review was retained: existing capacity and
+closed-generation fences still apply. This fact stage does not construct new
+selectable fact alternatives or activate generated merge text.
+
+**Limits before worker integration:** a profile with more than 50 current rows
+does not get an automatic fact write, even if the intended target is in the
+first 50. The existing full-source relation prompt limits (8,000 supporting
+source characters, 32,000 prompt characters) remain enforced without qualifier
+truncation. Planning makes at most one relation call per nonpreference finding
+(combined batch limit 16). Provider work before durable admission can repeat
+after crashes or concurrent admission; exactly-once provider billing is not
+claimed. Large-profile candidate selection, live provider/model accuracy,
+latency/cost and worker retry/cache coordination still need their own gates.
+Controlled SQL tests do **not** establish those release properties.
 
 The closed reply requires both `preferences` and `nonpreferences` arrays,
 including empty arrays. The combined batch limit is 16. Each finding cites an
@@ -60,7 +112,7 @@ prove that a classifier understands those languages.
 ## Remaining transactional worker stage
 
 The provider-free preference transaction is implemented and locally tested.
-Live selection, provider execution, fact planning/application and cache/job
+Live selection, primary intent-classifier execution and cache/job
 coordination below are still unimplemented. They need separate, narrow review
 before connecting anything to the extraction pipeline.
 
@@ -70,12 +122,12 @@ before connecting anything to the extraction pipeline.
    overlays on their existing paths until their coordination is designed. Do
    not quietly skip their processing. A captured job must never fall back to
    legacy extraction after flag/configuration changes.
-2. Capture the transcript hash, source conversation, preference snapshot and
-   bounded fact-target context once using the existing job storage. Close the
-   session before classification or embedding. Add a separately versioned
-   record; do not reinterpret existing version-one receipts. Retain the
-   existing admission size bound, encryption and retention behavior.
-3. Classify once into this reply contract through the existing model router.
+2. Use the implemented v3 capture for the transcript hash, source conversation,
+   preference snapshot and bounded fact-target context. Close the session before
+   classification or embedding. Do not replace this with another capture store
+   or reinterpret v1/v2 records. Retain existing size, encryption and retention
+   checks when adding worker selection.
+3. Classify into this reply contract through the existing model router.
    Reuse the existing fact relation parser/decision mapper outside SQL
    transactions. Do not copy its mutation policy or hard-code a provider.
    Invalid, oversized, or unavailable responses must not activate preference
@@ -86,8 +138,9 @@ before connecting anything to the extraction pipeline.
    order, including absence reservations. Recheck captured absence rather than
    turning a first-writer race into an unintended replacement. Reuse the
    existing writers, audits, pending reviews and vector outbox.
-5. Apply nonpreferences separately using prepared, backend-validated relation
-   decisions. Do not make provider/vector calls from the write transaction.
+5. Use the implemented v3 adapter to apply nonpreferences with prepared,
+   backend-validated relation decisions. Do not make provider/vector calls from
+   the write transaction.
    Recheck selected targets and context before applying them. Never let that
    lane mutate governed preferences. Incomplete/stale context must become a
    pending result, not proof of absence. Explicitly test interactions between
@@ -129,3 +182,8 @@ python -m pytest tests/unit/test_preference_intent_transaction_contract.py tests
 ```
 
 The integration suite is also part of the existing governance CI gate.
+
+For the v3 fact transaction gate, add
+`tests/unit/test_preference_fact_transaction_contract.py` and
+`tests/integration/test_preference_fact_transaction.py` to the same isolated
+database run. That integration suite is also included in the governance CI gate.

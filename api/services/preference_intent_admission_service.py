@@ -229,11 +229,11 @@ class PreferenceIntentAdmissionService:
             record = self.record_model(capture_id=uuid.uuid4(), tenant_id=job.tenant_id,
                 proxy_user_id=job.proxy_user_id, source_conversation_id=conversation.id,
                 transcript_sha256=_hash(messages), catalog_sha256=_hash(catalog.model_dump(mode="json")), snapshot=snapshot,
-                **self._capture_fields(job))
+                **self._capture_fields(job, session=session))
             self._write(job, record)
             return record
 
-    def _capture_fields(self, job):
+    def _capture_fields(self, job, *, session):
         return {}
 
     def admit(self, requests, *, job_id, tenant_id, proxy_user_id, catalog, capture_id):

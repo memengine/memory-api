@@ -44,8 +44,7 @@ class IntentTransactionReceipt(_Closed):
         return self
 
 
-class IntentTransactionRecord(AdmissionCapture):
-    schema_version: Literal[2] = 2
+class _IntentTransactionRecord(AdmissionCapture):
     external_conversation_id: str | None = Field(default=None, max_length=255)
     reply: PreferenceIntentReply | None = None
     decision_sha256: Version | None = None
@@ -56,7 +55,7 @@ class IntentTransactionRecord(AdmissionCapture):
         if self.state == "captured":
             if self.reply is not None or self.decision_sha256 is not None or self.receipt is not None:
                 raise ValueError("captured intent has no decision")
-        elif self.reply is None or self.decision_sha256 != _hash(self.reply.model_dump(mode="json")):
+        elif self.reply is None or self.decision_sha256 != self.decision_hash():
             raise ValueError("intent decision mismatch")
         if self.state == "rejected":
             raise ValueError("runtime rejections are item outcomes, not a refreshed capture")
@@ -64,17 +63,31 @@ class IntentTransactionRecord(AdmissionCapture):
             raise ValueError("terminal intent requires receipt")
         if self.receipt is not None:
             result = self.receipt
-            if (result.deferred_facts != len(self.reply.nonpreferences)
+            if (not self.fact_counts_valid()
                 or len(result.created_memory_ids) + result.withheld + result.reaffirmed
-                   + sum(result.rejected.values()) > len(self.reply.preferences)
+                   + sum(result.rejected.values()) > self.write_count_limit()
                 or result.pending_candidates_buffered + result.reviews_capacity_rejected + result.reviews_closed_replays
                    > len(self.reply.preferences) + len(self.reply.nonpreferences)):
                 raise ValueError("intent receipt count mismatch")
         return self
 
+    def decision_hash(self):
+        return _hash(self.reply.model_dump(mode="json"))
+
+    def fact_counts_valid(self):
+        return self.receipt.deferred_facts == len(self.reply.nonpreferences)
+
+    def write_count_limit(self):
+        return len(self.reply.preferences)
+
+
+class IntentTransactionRecord(_IntentTransactionRecord):
+    schema_version: Literal[2] = 2
+
 
 class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
-    record_model = IntentTransactionRecord
+    record_model: type[AdmissionCapture] = IntentTransactionRecord
+    receipt_model: type[IntentTransactionReceipt] = IntentTransactionReceipt
 
     @staticmethod
     def _external_id(job):
@@ -85,8 +98,22 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
             raise PreferenceAdmissionUnavailable("intent_external_conversation_invalid")
         return value.strip() or None
 
-    def _capture_fields(self, job):
+    def _capture_fields(self, job, *, session):
         return {"external_conversation_id": self._external_id(job)}
+
+    def _embedding_memories(self, batch, record):
+        return batch.declarations
+
+    def _prepare_nonpreferences(self, session, record, backing):
+        return None
+
+    def _store_nonpreferences(self, resolver, batch, record, context, writer_args, pending, defer):
+        for memory in batch.nonpreferences:
+            defer(memory, "Fact relation validation is deferred; existing facts remain unchanged.")
+        return [], {"deferred_facts": len(batch.nonpreferences)}
+
+    def _configure_write_transaction(self, session):
+        pass
 
     def _check(self, session, job, messages, record, catalog, *, capture_id=None):
         result = super()._check(session, job, messages, record, catalog, capture_id=capture_id)
@@ -161,6 +188,7 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
         )
 
         with self.session_factory.begin() as session:
+            self._configure_write_transaction(session)
             job, messages = self._owned_job(session, job_id=job_id, tenant_id=tenant_id, proxy_user_id=proxy_user_id)
             record = self._read(job)
             if record is None:
@@ -178,7 +206,7 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
             if embeddings is not None and type(embeddings) is not dict:
                 raise TypeError("precomputed embedding mapping required, not a callback")
             prepared = {}
-            for memory in batch.declarations:
+            for memory in self._embedding_memories(batch, record):
                 if embeddings is None or memory.content not in embeddings:
                     raise PreferenceAdmissionUnavailable("intent_embedding_missing")
                 prepared[memory.content] = ConflictResolver._coerce_embedding_result(embeddings[memory.content])
@@ -187,6 +215,7 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
                 provenance["external_conversation_id"] = record.external_conversation_id
             resolver = ConflictResolver(session=session, qdrant_service=None, embedder=prepared.__getitem__,
                 source_messages=messages, default_source_conversation_id=conversation.id, provenance_snapshot=provenance)
+            fact_context = self._prepare_nonpreferences(session, record, backing)
             pending, rejected, declarations, requests = [], {}, [], []
 
             def defer(memory, reason):
@@ -197,8 +226,6 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
 
             for memory in batch.pending_preferences:
                 defer(memory, "Preference intent cannot become a current default.")
-            for memory in batch.nonpreferences:
-                defer(memory, "Fact relation validation is deferred; existing facts remain unchanged.")
             items = [(m.validated_evidence["preference_fingerprint"], "declaration", m) for m in batch.declarations]
             items += [(m.validated_evidence["preference_fingerprint"], "choice", m) for m in batch.choices]
             # Acquire all preference identities before any mutation; absence is
@@ -253,16 +280,19 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
                 withheld, reaffirmed = resolver.last_preference_choices_withheld, resolver.last_preference_choices_reaffirmed
                 for reason, count in resolver.last_preference_choices_rejected.items():
                     rejected[reason] = rejected.get(reason, 0) + count
+            fact_stored, fact_counts = self._store_nonpreferences(
+                resolver, batch, record, fact_context, writer_args, pending, defer)
+            stored.extend(fact_stored)
             diagnostics = {}
             buffered = _persist_pending_extraction_candidates(session, candidates=pending,
                 tenant_id=str(job.tenant_id), proxy_user_id=str(job.proxy_user_id), extraction_job_id=str(job.id),
                 source_event_id=None, diagnostics=diagnostics)
-            receipt = IntentTransactionReceipt(created_memory_ids=tuple(uuid.UUID(m.id) for m in stored),
+            receipt = self.receipt_model(created_memory_ids=tuple(uuid.UUID(m.id) for m in stored),
                 withheld=withheld, reaffirmed=reaffirmed, pending_candidates_buffered=buffered,
                 reviews_capacity_rejected=diagnostics.get("source_reviews_capacity_rejected", 0),
                 reviews_closed_replays=diagnostics.get("source_reviews_closed_replays", 0),
-                deferred_facts=len(batch.nonpreferences), rejected=rejected)
-            finished = IntentTransactionRecord.model_validate_json(_json({**record.model_dump(mode="json"),
+                **fact_counts, rejected=rejected)
+            finished = self.record_model.model_validate_json(_json({**record.model_dump(mode="json"),
                 "state": "applied", "receipt": receipt.model_dump(mode="json")}))
             conversation.processing_status = ConversationProcessingStatus.done
             if stored:
