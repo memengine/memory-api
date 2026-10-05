@@ -134,7 +134,8 @@ def saved(scope, job_id):
     with scope.factory() as session:
         job = session.get(ExtractionJob, job_id)
         return copy.deepcopy({"route": job.runtime_route, "applied": job.runtime_applied_at,
-            "record": job.preference_intent_admission, "source": job.payload.get("source"),
+            "record": job.preference_intent_admission, "footprint": job.runtime_withholding_footprint,
+            "source": job.payload.get("source"),
             "messages": job.payload.get("messages"), "count": job.memories_created})
 
 

@@ -33,6 +33,10 @@ from api.services.preference_intent_contract import (
 )
 from api.services.provenance_service import conversation_ingestion_sha256
 from api.services.retriever import RetrieverService
+from api.services.runtime_preference_footprint import (
+    check_footprint,
+    decision_footprint,
+)
 from api.services.runtime_preference_routing import (
     CATALOG_KEY,
     MAX_CATALOG_BYTES,
@@ -152,6 +156,9 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
 
     @staticmethod
     def _write(job, record):
+        check_footprint(job, record)
+        if record.state in {"validated", "applied"} and job.runtime_withholding_footprint is None:
+            job.runtime_withholding_footprint = decision_footprint(job, record).model_dump(mode="json")
         PreferenceFactTransactionService._write(job, record)
         job.runtime_route = RUNTIME_ROUTE
         if record.state == "applied":
@@ -170,6 +177,7 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
         result = super()._check(session, job, messages, record, catalog, capture_id=capture_id)
         if record.runtime_source_sha256 != _conversation_source_binding(session, job):
             raise PreferenceAdmissionUnavailable("intent_source_binding_changed")
+        check_footprint(job, record)
         return result
 
     def _write_provenance(self, job, record):

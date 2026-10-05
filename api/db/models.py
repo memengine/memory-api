@@ -2790,6 +2790,12 @@ class ExtractionJob(Base):
             "AND octet_length(preference_intent_admission::text) <= 262144)",
             name="ck_preference_intent_admission_bound",
         ),
+        CheckConstraint(
+            "runtime_withholding_footprint IS NULL OR "
+            "(jsonb_typeof(runtime_withholding_footprint) = 'object' "
+            "AND octet_length(runtime_withholding_footprint::text) <= 8192)",
+            name="ck_runtime_withholding_footprint_bound",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2821,6 +2827,9 @@ class ExtractionJob(Base):
     runtime_route: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Indexed projection of the private receipt, set in its memory-write transaction.
     runtime_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Minimal frozen target projection, retained independently of raw evidence.
+    # Never interpreted as an applied receipt or read-release permission.
+    runtime_withholding_footprint: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,

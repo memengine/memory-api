@@ -395,3 +395,51 @@ Controlled recovery checks (disposable PostgreSQL and Redis; providers forbidden
 ```powershell
 python -m pytest tests/integration/test_runtime_recovery.py tests/integration/test_runtime_pending_visibility.py tests/unit/test_internal_endpoints.py -q
 ```
+
+### Frozen target footprint foundation (withholding is still user-wide)
+
+Before raw evidence expires, the runtime adapter now stores a minimal
+`runtime_withholding_footprint` on the extraction job in the same transaction as
+the first validated private decision. It contains job/tenant/proxy/capture IDs,
+transcript/source/decision digests, and either backend-selected preference
+fingerprints and fact target IDs/versions or an explicit user-wide coverage
+result. It contains no preference values, quoted turns, property/scope labels,
+catalog descriptions, model confidence or authority. The projection is closed,
+bounded to 16 combined targets and 8 KiB, and fixed across application/retry.
+Its digest detects inconsistent representations; it is not a signature or an
+independent semantic correctness certificate.
+
+Uncaptured jobs have no footprint. Empty decisions, abstention/unrepresented
+preferences, missing fact targets, or incomplete fact context retain user-wide
+coverage. A mixed decision with any unknown coverage widens the whole footprint;
+do not truncate it into apparent completeness. Known targets come from captured
+backend bindings, never model-supplied memory IDs or public payload fields.
+Application/recovery compares a retained footprint against its validated private
+decision. Corruption or rebinding fails closed. Retention erases the private
+transcript/decision but preserves this minimal projection and the existing route;
+it neither sets `runtime_applied_at` nor unblocks reads. Ordinary owner deletion
+continues deleting the job and its projection together.
+
+Deploy the additive `runtime_withholding_footprint` migration before API/worker
+code. There is no table backfill, new index, public schema or rollout flag.
+The nullable column has no default. Its size/type constraint is added NOT VALID
+to avoid a deployment-time scan; PostgreSQL still enforces it on inserted/updated
+rows. Historical NULL projections remain unknown, not implicitly reconciled.
+Validated/applied historical records may acquire a projection only through the
+existing evidence-checked transactional writer, never a standalone metadata read.
+
+This stage does **not** implement target-level read withholding or terminal
+reconciliation, and does not improve current context availability yet. Retrieval
+still uses the indexed user-wide guard, including cached and generic reads.
+Next, target-bound reads must handle scoped/global fallback, legacy preferences,
+fact versions, mixed/unknown jobs and concurrent writes before returning unrelated
+context. Only then can a separate audited reconciliation record safely retain
+holds on proved targets; unknown coverage must remain user-wide. No admin
+acknowledgment, footprint digest, timeout or newer successful job proves that old
+context is current. Runtime flags remain default-off; no canary is authorized.
+
+Controlled checks (no paid providers):
+
+```powershell
+python -m pytest tests/unit/test_runtime_preference_footprint.py tests/integration/test_runtime_footprint_persistence.py tests/integration/test_runtime_recovery.py tests/integration/test_runtime_pending_visibility.py -q
+```
