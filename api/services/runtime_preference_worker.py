@@ -206,6 +206,29 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
                 self._write(job, record)
             return record, messages
 
+    def validate_recovery(self, session, **args):
+        """Provider-free preflight in the operator's locked retry transaction.
+
+        Never capture, refresh a binding, change a fixed decision or release a
+        guard here. Applied records may resume delivery under rollout rollback.
+        The worker repeats these checks before processing the same durable job.
+        """
+        job, messages = self._owned_job(session, **args, allow_applied=True)
+        if job.runtime_route not in {None, RUNTIME_ROUTE}:
+            raise PreferenceAdmissionUnavailable("intent_route_unavailable")
+        record = self._read(job)
+        if record is None:
+            if job.runtime_applied_at is not None:
+                raise PreferenceAdmissionUnavailable("intent_receipt_missing")
+            if _conversation_source_binding(session, job) is None:
+                raise PreferenceAdmissionUnavailable("intent_source_binding_changed")
+            runtime_catalog(session.get(Tenant, job.tenant_id))
+        else:
+            self._check(session, job, messages, record, record.snapshot.catalog)
+            if job.runtime_applied_at is not None and record.state != "applied":
+                raise PreferenceAdmissionUnavailable("intent_receipt_missing")
+        return record
+
 
 class RuntimePreferenceWorker:
     def __init__(self, session_factory, *, llm_service=None, embedding_service=None, cache_service=None):

@@ -14,6 +14,13 @@ CATALOG_KEY = "runtime_preference_catalog"
 MAX_CATALOG_BYTES = 32 * 1024
 
 
+def has_runtime_guard(job) -> bool:
+    """Recognize reservations and pre-reservation captures, even under rollback."""
+    raw = getattr(job, "preference_intent_admission", None)
+    return (getattr(job, "runtime_route", None) is not None
+            or isinstance(raw, dict) and "runtime_source_sha256" in raw)
+
+
 def runtime_enabled(tenant_id):
     settings = get_settings()
     return (settings.runtime_preference_enabled and settings.explicit_preference_claims_enabled

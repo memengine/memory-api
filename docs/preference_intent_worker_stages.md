@@ -341,3 +341,57 @@ customer model to ignore contradictory conversation history; that is outside the
 returned-context guarantee.
 Independent semantic evaluation, provider availability/fallback evidence,
 latency/cost measurements and a separately approved tenant canary remain required.
+
+### Stage 1 recovery hardening
+
+Internal dead-letter discard refuses runtime reservations and historical runtime
+captures with `409 runtime_job_discard_forbidden`, including applied jobs. Deleting
+the job would erase both the pending guard and the routed-owner read boundary.
+Retention can erase customer text but preserves the minimal guard. Ordinary
+legacy-job discard still uses its existing audit/deletion path.
+
+Manual runtime retry uses the existing admin-only endpoint:
+
+```text
+POST /v1/internal/dead-letter-jobs/{job_id}/retry?reason=<operator explanation>
+```
+
+`reason` must be nonblank and at most 512 characters; do not include credentials
+or customer transcripts. Legacy retries do not require it. A nonblocking row lock
+prevents concurrent retry/discard transitions (`409 dead_letter_job_busy`). Before
+queue admission, the runtime adapter checks ownership, active tenant/owner,
+rollout gates, retained source binding, snapshot and fixed private record. Changed,
+expired, redacted or inconsistent evidence returns 409 without dispatch or a fresh
+capture. Unapplied jobs need enabled gates; fully validated applied receipts may
+finish delivery under rollback. A fixed decision is never refreshed/reclassified.
+
+Retry preserves route, applied timestamp, private record, original source and
+transcript. It resets the existing operational attempt cycle, not memory authority
+or decision state. Queue reservation remains the existing Redis admission, not a
+second scheduler. An `AuditAction.updated` record with
+`event=runtime_job_retry_requested` commits atomically with the queued transition.
+It records credential class `admin_secret`, request ID, operator explanation,
+principal/job IDs, state transition and decision digest. Shared admin authentication
+does not establish a named human reviewer. No transcript/catalog enters this audit.
+Database/audit failure rolls back retry and releases its queue reservation.
+
+Runtime broker messages contain only the durable job reference. SQL commits before
+dispatch, and the blocking broker operation runs off the API event loop. A
+successful acknowledgement conditionally installs its task lease,
+without replacing a worker/watchdog lease. If dispatch fails, the API returns 503
+with `runtime_retry_dispatch_unavailable`, `job_id`, and `status=queued`. The guard
+and audit remain; the existing watchdog can recover the unleased queued row after
+its dispatch grace. Do not interpret that 503 as permission to create a new job.
+This is recoverable dispatch, not exactly-once delivery or a latency guarantee.
+
+Evidence loss is not resolved by clearing a guard, deleting a job, changing rollout
+flags, or submitting an unrelated successful job. Such jobs remain unavailable;
+evidence-backed terminal reconciliation is still a separate release requirement.
+There is no new cancellation/reset endpoint, UI, trust tier or authority promotion.
+Property-level narrowing and catalog-driven generic reads remain unimplemented.
+
+Controlled recovery checks (disposable PostgreSQL and Redis; providers forbidden):
+
+```powershell
+python -m pytest tests/integration/test_runtime_recovery.py tests/integration/test_runtime_pending_visibility.py tests/unit/test_internal_endpoints.py -q
+```

@@ -41,7 +41,8 @@ class FakeDiscardSession:
         self.deleted: list[object] = []
         self.committed = False
 
-    async def get(self, _model, identifier):
+    async def get(self, _model, identifier, **kwargs):
+        assert kwargs == {"with_for_update": {"nowait": True}, "populate_existing": True}
         if str(identifier) == str(self.job.id):
             return self.job
         return None

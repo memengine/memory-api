@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import calendar
 import json
@@ -9,11 +10,12 @@ from datetime import UTC
 from datetime import datetime
 from datetime import time
 from datetime import timedelta
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Request
 from fastapi import status
 from sqlalchemy import Float
@@ -27,6 +29,8 @@ from sqlalchemy import literal
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy import update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.celery_app import celery_app
@@ -103,6 +107,9 @@ from api.services.claim_versions import CLAIM_SCHEMA_VERSION
 from api.services.embedding_service import EmbeddingService
 from api.services.llm_service import get_llm_provider_health
 from api.services.quota_manager import QuotaManager
+from api.services.preference_intent_admission_service import PreferenceAdmissionUnavailable
+from api.services.runtime_preference_routing import has_runtime_guard
+from api.services.runtime_preference_worker import RuntimePreferenceTransactionService
 from api.tasks.backfill_tasks import run_backfill_proxy_user_ids
 from api.tasks.backfill_tasks import run_backfill_tenant_provenance
 from api.tasks.backfill_tasks import run_backfill_universal_provenance
@@ -1587,17 +1594,30 @@ async def _list_audit_logs(
     )
 
 
+async def _locked_dead_letter_job(session: AsyncSession, job_id: str) -> ExtractionJob | None:
+    try:
+        return await session.get(ExtractionJob, uuid.UUID(job_id),
+                                 with_for_update={"nowait": True}, populate_existing=True)
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "55P03":
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="dead_letter_job_busy") from exc
+        raise
+
+
 async def _discard_dead_letter_job(
     session: AsyncSession,
     *,
     request: Request,
     job_id: str,
 ) -> DeadLetterDiscardResponse:
-    job = await session.get(ExtractionJob, uuid.UUID(job_id))
+    job = await _locked_dead_letter_job(session, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dead_letter_job_not_found")
     if job.status != ExtractionJobStatus.dead:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="dead_letter_job_not_dead")
+    if has_runtime_guard(job):
+        raise HTTPException(status_code=409, detail="runtime_job_discard_forbidden")
 
     session.add(
         AuditLog(
@@ -2212,10 +2232,22 @@ async def retry_dead_letter_job(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
     cache_service: CacheService = Depends(get_cache_service),
+    reason: Annotated[str | None, Query(max_length=512)] = None,
 ) -> dict[str, object]:
-    job = await session.get(ExtractionJob, uuid.UUID(job_id))
+    job = await _locked_dead_letter_job(session, job_id)
     if job is None or job.status != ExtractionJobStatus.dead:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dead_letter_job_not_found")
+    runtime = has_runtime_guard(job)
+    record = None
+    retry_reason = (reason or "").strip()
+    if runtime:
+        if not retry_reason:
+            raise HTTPException(status_code=422, detail="runtime_retry_reason_required")
+        try:
+            record = await session.run_sync(lambda sync: RuntimePreferenceTransactionService(None).validate_recovery(
+                sync, job_id=job.id, tenant_id=job.tenant_id, proxy_user_id=job.proxy_user_id))
+        except PreferenceAdmissionUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     dead_letter = await session.execute(
         select(DeadLetterJob).where(DeadLetterJob.job_id == job.id)
     )
@@ -2223,7 +2255,8 @@ async def retry_dead_letter_job(
     if dead_letter_row is not None and not isinstance(dead_letter_row, DeadLetterJob):
         dead_letter_row = None
 
-    reservation = await QueueRouter(session=session, cache_service=cache_service).reserve_extraction_slot(
+    queue_router = QueueRouter(session=session, cache_service=cache_service)
+    reservation = await queue_router.reserve_extraction_slot(
         tenant_id=str(job.tenant_id),
         job_id=str(job.id),
     )
@@ -2241,7 +2274,8 @@ async def retry_dead_letter_job(
     job.payload = payload
     job.celery_task_id = None
     job.attempts = 0
-    job.memories_created = 0
+    if not runtime:
+        job.memories_created = 0
     job.error = None
     job.error_type = None
     job.stale_after = None
@@ -2249,16 +2283,51 @@ async def retry_dead_letter_job(
     job.started_at = None
     job.completed_at = None
     job.dead_lettered_at = None
-    job.updated_at = datetime.now(UTC)
-    if dead_letter_row is not None:
-        dead_letter_row.last_retried_at = datetime.now(UTC)
-        await session.flush()
-    await session.commit()
+    now = datetime.now(UTC)
+    job.updated_at = now
+    retry_job_id, retry_tenant_id = str(job.id), str(job.tenant_id)
+    if runtime:
+        job.queued_at = now  # A fresh dispatch grace, not the original submission's age.
+        session.add(AuditLog(action=AuditAction.updated, proxy_user_id=job.proxy_user_id,
+            metadata_json={"event": "runtime_job_retry_requested", "subject": "extraction_job",
+                "job_id": retry_job_id, "tenant_id": retry_tenant_id,
+                "actor_credential_class": "admin_secret", "request_id": get_request_id(request),
+                "reason": retry_reason, "previous_status": "dead", "new_status": "queued",
+                "record_state": record.state if record is not None else "uncaptured",
+                "decision_sha256": record.decision_sha256 if record is not None else None},
+            ip_address=request.client.host if request.client else None))
+    try:
+        if dead_letter_row is not None:
+            dead_letter_row.last_retried_at = now
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        await queue_router.release_extraction_slot(
+            tenant_id=retry_tenant_id, queue_name=queue_name, job_id=retry_job_id)
+        raise
 
-    celery_app.send_task(EXTRACTION_TASK_NAME, args=[payload], queue=queue_name)
+    if runtime:
+        task_id = str(uuid.uuid4())
+        dispatch_payload = {"job_id": retry_job_id, "tenant_id": retry_tenant_id,
+                            "queue_name": queue_name, "_payload_reference": "extraction_job"}
+        try:
+            await asyncio.to_thread(celery_app.send_task, EXTRACTION_TASK_NAME,
+                                    args=[dispatch_payload], queue=queue_name, task_id=task_id)
+        except Exception as exc:
+            # The committed queued row has no lease. The existing watchdog owns
+            # recovery; neither this API nor the caller creates a second job.
+            raise HTTPException(status_code=503, detail={"code": "runtime_retry_dispatch_unavailable",
+                "job_id": retry_job_id, "status": "queued"}) from exc
+        await session.execute(update(ExtractionJob).where(
+            ExtractionJob.id == uuid.UUID(retry_job_id), ExtractionJob.status == ExtractionJobStatus.queued,
+            ExtractionJob.celery_task_id.is_(None),
+        ).values(celery_task_id=task_id))
+        await session.commit()
+    else:
+        celery_app.send_task(EXTRACTION_TASK_NAME, args=[payload], queue=queue_name)
     return {
         "data": {
-            "job_id": str(job.id),
+            "job_id": retry_job_id,
             "status": "queued",
             "queue_name": queue_name,
         },
