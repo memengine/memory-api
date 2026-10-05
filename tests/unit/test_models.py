@@ -49,6 +49,7 @@ def test_expected_tables_are_registered() -> None:
         "regions",
         "retrieval_events",
         "retrieval_feedback_events",
+        "runtime_job_reconciliations",
         "service_writers",
         "shared_context_signals",
         "support_memories",

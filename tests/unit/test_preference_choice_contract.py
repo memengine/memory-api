@@ -72,7 +72,8 @@ async def test_read_exposes_policy_without_putting_withheld_value_into_context(m
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["processing", "unavailable"])
 @pytest.mark.parametrize("format", ["bullets", "json", "xml"])
-async def test_pending_visibility_cannot_leak_overlays_or_stale_review_cards(monkeypatch, state, format):
+@pytest.mark.parametrize("partial", [False, True])
+async def test_pending_visibility_cannot_leak_overlays_or_stale_review_cards(monkeypatch, state, format, partial):
     from api.routers import memories
 
     overlay = SimpleNamespace(build_retrieve_context=AsyncMock(side_effect=AssertionError("old overlay leaked")))
@@ -84,15 +85,18 @@ async def test_pending_visibility_cannot_leak_overlays_or_stale_review_cards(mon
     monkeypatch.setattr(memories, "_pop_next_clarification", clarifications)
     monkeypatch.setattr(memories, "RetrievalFeedbackService", lambda **_: SimpleNamespace(
         log_retrieval=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))))
-    visibility = MemoryVisibility(state=state)
-    service = SimpleNamespace(retrieve=AsyncMock(return_value=[]), last_cache_hit=False,
+    from tests.unit.test_context_builder import make_memory_result
+    eligible = [make_memory_result(content="Unrelated exam is October 18")] if partial else []
+    visibility = MemoryVisibility(state=state, scope="affected_context" if partial else "user_learned_context")
+    service = SimpleNamespace(retrieve=AsyncMock(return_value=eligible), last_cache_hit=False,
         last_preference_decisions=[], last_memory_visibility=visibility,
         last_quota_mode="FULL", last_is_degraded=True)
     proxies = SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())))
     payload = MemoryRetrieveRequest(external_user_id="u", query="current?", format=format)
     response = await retrieve_memories(_request(), payload, service, proxies, ContextBuilder(),
         AsyncMock(), AsyncMock(), str(uuid.uuid4()))
-    assert response.data == [] and response.memory_visibility == visibility
+    assert bool(response.data) is partial and response.memory_visibility == visibility
+    assert ("Unrelated exam" in response.system_prompt_addition) is partial
     assert response.source_reviews == [] and response.clarification is None and response.clarification_question is None
     overlay.build_retrieve_context.assert_not_awaited()
     reviews.assert_not_awaited()
@@ -102,4 +106,5 @@ async def test_pending_visibility_cannot_leak_overlays_or_stale_review_cards(mon
         assert json.loads(response.system_prompt_addition)["memory_visibility"]["state"] == state
     elif format == "xml":
         from xml.etree import ElementTree
-        assert ElementTree.fromstring(response.system_prompt_addition).attrib["state"] == state
+        root = ElementTree.fromstring(response.system_prompt_addition)
+        assert (root.find("memory_visibility") if partial else root).attrib["state"] == state

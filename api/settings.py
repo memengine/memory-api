@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     phase3a_confirmation_enabled: bool = Field(default=False, alias="PHASE3A_CONFIRMATION_ENABLED")
     explicit_preference_claims_enabled: bool = Field(default=False, alias="EXPLICIT_PREFERENCE_CLAIMS_ENABLED")
     runtime_preference_enabled: bool = Field(default=False, alias="RUNTIME_PREFERENCE_ENABLED")
+    runtime_target_withholding_enabled: bool = Field(default=False, alias="RUNTIME_TARGET_WITHHOLDING_ENABLED")
     runtime_preference_tenant_ids: str = Field(default="", alias="RUNTIME_PREFERENCE_TENANT_IDS")
     source_review_profile_row_limit: int = Field(default=256, ge=1, le=10000, alias="SOURCE_REVIEW_PROFILE_ROW_LIMIT")
     source_review_tenant_row_limit: int = Field(default=10000, ge=1, le=1000000, alias="SOURCE_REVIEW_TENANT_ROW_LIMIT")

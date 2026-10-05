@@ -1,7 +1,7 @@
 """Minimal server-owned projection of a fixed runtime decision's write targets.
 
 This is not semantic proof, authority, an applied receipt, or permission to return
-context. Retrieval remains user-wide until overlap/fallback handling is added.
+context. Narrow reads require separate gated coverage and overlap checks.
 """
 from __future__ import annotations
 

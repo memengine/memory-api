@@ -6,8 +6,8 @@ import math
 from dataclasses import dataclass
 from html import escape
 
+from api.schemas.responses import MemoryVisibility
 from api.services.retriever import MemoryResult
-
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,38 @@ class ContextResult:
 
 
 class ContextBuilder:
+    def build_guarded(self, memories: list[MemoryResult], *, visibility: MemoryVisibility,
+                      format: str = "bullets", max_tokens: int = DEFAULT_MAX_TOKENS) -> ContextResult:
+        """Render only final SQL-eligible context, keeping the notice in its budget."""
+        if format not in SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported context format: {format}")
+        partial = visibility.scope == "affected_context"
+        selected, dropped = self._prepare_memories(memories if partial else [])
+        notice = ("MemoryOS has withheld " + ("affected context" if partial else "learned context")
+            + " while a user update is "
+            + ("processing." if visibility.state == "processing" else "unavailable for processing.")
+            + " Do not present a withheld stored value as current. "
+            "This status is not a request for user clarification.")
+        def render():
+            base = self._render(selected, format) if selected else ""
+            if format == "json":
+                return json.dumps({"memories": json.loads(base)["memories"] if base else {},
+                    "memory_visibility": visibility.model_dump(), "notice": notice})
+            element = (f'<memory_visibility state="{visibility.state}" scope="{visibility.scope}">'
+                       f'{escape(notice)}</memory_visibility>')
+            if format == "xml":
+                return f"<governed_memory_context>{element}{base}</governed_memory_context>" if base else element
+            return notice + ("\n\n" + base if base else "")
+        rendered = render()
+        while selected and self._count_tokens(rendered) > max_tokens:
+            selected.remove(min(selected, key=lambda m: (m.importance_score, m.final_score)))
+            dropped += 1
+            rendered = render()
+        count = self._count_tokens(rendered)
+        if max_tokens <= 0 or count > max_tokens:
+            return self._empty_result(format, dropped)
+        return ContextResult(rendered, count, len(selected), dropped, format)
+
     def build(
         self,
         memories: list[MemoryResult],

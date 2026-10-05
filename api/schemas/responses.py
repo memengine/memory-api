@@ -193,7 +193,7 @@ class MemoryVisibility(BaseModel):
     """Processing is not a clarification, authority decision or provider promise."""
 
     state: Literal["processing", "unavailable"]
-    scope: Literal["user_learned_context"] = "user_learned_context"
+    scope: Literal["user_learned_context", "affected_context"] = "user_learned_context"
 
 
 class MemoryRetrieveResponse(ResponseEnvelope):

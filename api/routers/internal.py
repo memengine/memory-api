@@ -53,6 +53,7 @@ from api.db.models import PendingExtractionCandidate
 from api.db.models import PermissionGrant
 from api.db.models import PlanTier
 from api.db.models import ProxyUser
+from api.db.models import RuntimeJobReconciliation
 from api.db.models import RetrievalFeedbackEvent
 from api.db.models import QuotaMode
 from api.db.models import Tenant
@@ -110,6 +111,7 @@ from api.services.quota_manager import QuotaManager
 from api.services.preference_intent_admission_service import PreferenceAdmissionUnavailable
 from api.services.runtime_preference_routing import has_runtime_guard
 from api.services.runtime_preference_worker import RuntimePreferenceTransactionService
+from api.services.runtime_reconciliation import quarantine_runtime_job
 from api.tasks.backfill_tasks import run_backfill_proxy_user_ids
 from api.tasks.backfill_tasks import run_backfill_tenant_provenance
 from api.tasks.backfill_tasks import run_backfill_universal_provenance
@@ -2226,6 +2228,27 @@ async def dead_letter_jobs(
     }
 
 
+@router.post("/dead-letter-jobs/{job_id}/reconcile")
+async def reconcile_runtime_job(
+    job_id: uuid.UUID, request: Request, reason: Annotated[str, Query(min_length=1, max_length=512)],
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="runtime_reconciliation_reason_required")
+    job = await _locked_dead_letter_job(session, str(job_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="dead_letter_job_not_found")
+    try:
+        record = await session.run_sync(lambda sync: quarantine_runtime_job(sync, job, reason=reason,
+            request_id=get_request_id(request)[:128], ip_address=request.client.host if request.client else None))
+        data = {"job_id": str(job_id), "audit_id": str(record.audit_id) if record.audit_id else None, **record.record_json}
+        await session.commit()
+    except PreferenceAdmissionUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"data": data, "request_id": get_request_id(request), "timestamp": datetime.now(UTC).isoformat()}
+
+
 @router.post("/dead-letter-jobs/{job_id}/retry")
 async def retry_dead_letter_job(
     job_id: str,
@@ -2238,6 +2261,8 @@ async def retry_dead_letter_job(
     if job is None or job.status != ExtractionJobStatus.dead:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dead_letter_job_not_found")
     runtime = has_runtime_guard(job)
+    if runtime and await session.get(RuntimeJobReconciliation, job.id) is not None:
+        raise HTTPException(status_code=409, detail="runtime_job_quarantined")
     record = None
     retry_reason = (reason or "").strip()
     if runtime:

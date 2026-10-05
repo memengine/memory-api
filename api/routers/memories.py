@@ -437,11 +437,10 @@ async def retrieve_memories(
         )
         for result in results
     ]
-    context = context_builder.build(
-        results,
-        format=payload.format,
-        max_tokens=payload.context_max_tokens,
-    )
+    memory_visibility = getattr(retriever_service, "last_memory_visibility", None)
+    context = (context_builder.build_guarded(results, visibility=memory_visibility,
+        format=payload.format, max_tokens=payload.context_max_tokens) if memory_visibility is not None
+        else context_builder.build(results, format=payload.format, max_tokens=payload.context_max_tokens))
     system_prompt_addition = context.system_prompt_addition
     context_token_count = context.token_count
     context_ms = (time.perf_counter() - context_started) * 1000
@@ -454,24 +453,6 @@ async def retrieve_memories(
     domain_started = time.perf_counter()
     domain_schema_name = await _tenant_domain_schema(session, tenant_id)
     domain_schema = get_domain_schema(domain_schema_name)
-    memory_visibility = getattr(retriever_service, "last_memory_visibility", None)
-    if memory_visibility is not None:
-        notice = (
-            "MemoryOS has withheld learned context while a user update is "
-            + ("processing." if memory_visibility.state == "processing" else "unavailable for processing.")
-            + " Do not present a previously stored value as the current memory. "
-            "This status is not a request for user clarification."
-        )
-        if payload.format == "json":
-            system_prompt_addition = json.dumps({"memory_visibility": memory_visibility.model_dump(), "notice": notice})
-        elif payload.format == "xml":
-            system_prompt_addition = f'<memory_visibility state="{memory_visibility.state}">{notice}</memory_visibility>'
-        else:
-            system_prompt_addition = notice
-        context_token_count = context_builder._count_tokens(system_prompt_addition)
-        if context_token_count > payload.context_max_tokens:
-            system_prompt_addition = ""
-            context_token_count = 0  # Typed status survives a small prompt budget.
     if domain_schema is not None and payload.preference_context is None and memory_visibility is None:
         domain_prompt, domain_token_count = await domain_schema.build_retrieve_context(
             session=session,

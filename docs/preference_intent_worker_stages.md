@@ -308,15 +308,16 @@ vector publication or complete causal fact read is claimed.
 Pre-reservation runtime captures remain guarded through their private marker.
 Only fully validated receipt delivery projects their applied timestamp. Retention
 preserves their route before erasing private evidence; it does not treat an old
-`state=applied` string as a proof. Failed/dead/expired unfinished jobs stay
-unavailable, not timeout-to-current. They require operational recovery; this
+`state=applied` string as a proof. Failed/dead/redacted unfinished jobs report
+unavailable. Expired evidence cannot be retried, and retention marks it unavailable;
+expiry never makes an old value current. They require operational recovery; this
 slice does not add an unaudited cancellation/reset endpoint.
 
-This first guard is intentionally conservative across the user's learned context.
-It does not yet narrow withholding to evidence-bound properties/fact targets.
+This initial guard is conservative across the user's learned context. The later
+target-withholding stage below adds an independently gated narrowing path.
 Continuous writes or failed jobs can therefore reduce context availability;
-bounded lookup cost does not imply a latency/availability SLO. Property/target
-narrowing, recovery policy, measured sustained-load behavior and Stage 2
+bounded lookup cost does not imply a latency/availability SLO. Evidence-backed
+hold discharge, measured sustained-load behavior and Stage 2
 catalog-driven generic reads remain required before a customer canary. Generic
 reads still do not activate declared preference winners without `preference_context`.
 
@@ -386,9 +387,10 @@ This is recoverable dispatch, not exactly-once delivery or a latency guarantee.
 
 Evidence loss is not resolved by clearing a guard, deleting a job, changing rollout
 flags, or submitting an unrelated successful job. Such jobs remain unavailable;
-evidence-backed terminal reconciliation is still a separate release requirement.
+evidence-backed hold discharge is still a separate release requirement. The later
+quarantine stage records terminal operational diagnosis without discharging holds.
 There is no new cancellation/reset endpoint, UI, trust tier or authority promotion.
-Property-level narrowing and catalog-driven generic reads remain unimplemented.
+Catalog-driven generic reads remain unimplemented.
 
 Controlled recovery checks (disposable PostgreSQL and Redis; providers forbidden):
 
@@ -396,7 +398,7 @@ Controlled recovery checks (disposable PostgreSQL and Redis; providers forbidden
 python -m pytest tests/integration/test_runtime_recovery.py tests/integration/test_runtime_pending_visibility.py tests/unit/test_internal_endpoints.py -q
 ```
 
-### Frozen target footprint foundation (withholding is still user-wide)
+### Frozen target footprint foundation
 
 Before raw evidence expires, the runtime adapter now stores a minimal
 `runtime_withholding_footprint` on the extraction job in the same transaction as
@@ -428,9 +430,9 @@ rows. Historical NULL projections remain unknown, not implicitly reconciled.
 Validated/applied historical records may acquire a projection only through the
 existing evidence-checked transactional writer, never a standalone metadata read.
 
-This stage does **not** implement target-level read withholding or terminal
+The foundation stage did **not** implement target-level read withholding or terminal
 reconciliation, and does not improve current context availability yet. Retrieval
-still uses the indexed user-wide guard, including cached and generic reads.
+used the indexed user-wide guard, including cached and generic reads.
 Next, target-bound reads must handle scoped/global fallback, legacy preferences,
 fact versions, mixed/unknown jobs and concurrent writes before returning unrelated
 context. Only then can a separate audited reconciliation record safely retain
@@ -443,3 +445,106 @@ Controlled checks (no paid providers):
 ```powershell
 python -m pytest tests/unit/test_runtime_preference_footprint.py tests/integration/test_runtime_footprint_persistence.py tests/integration/test_runtime_recovery.py tests/integration/test_runtime_pending_visibility.py -q
 ```
+
+### Gated target withholding and audited quarantine
+
+`RUNTIME_TARGET_WITHHOLDING_ENABLED=false` is a new default-off read gate. Narrowing
+also requires membership in the existing `RUNTIME_PREFERENCE_TENANT_IDS` allowlist.
+Write rollout rollback does not clear holds. Disabling narrowing or removing
+membership restores the conservative user-wide hold; it does not restore old
+context. No tenant is enrolled or production configuration changed by this stage.
+
+Current reads keep the indexed pending/routed-owner checks. When narrowing is
+enabled, they load at most nine minimal job projections to prove that at most
+eight pending jobs exist. Each must have a supported route, a closed valid
+server-owned footprint and matching job/tenant/proxy binding. Any unknown coverage,
+missing projection, overflow or invalid binding retains user-wide withholding.
+Digests detect representation inconsistencies, not independent semantic accuracy.
+No transcript, private classifier snapshot or read-time model call is needed.
+
+Up to 128 combined targets can be examined across the eight jobs. Fact targets
+must still exist under the same owner, remain unarchived and match their frozen
+versions. Missing/changed targets widen withholding instead of guessing a successor.
+Hydrated fact targets and directly linked previous-version results are withheld.
+For explicit preference reads, held requested identities and held global identities
+are checked **before** scoped/global winner fallback. A held project cannot silently
+reactivate a global default for that project; a held global default conservatively
+blocks its scoped reads too. An unrelated explicit global/project read can remain
+available. Legacy generic preferences cannot prove typed identity, so **all generic
+preference candidates** are withheld when any preference identity is held. Generic
+reads still do not activate declared preference winners without `preference_context`.
+
+Final hold checks, SQL hydration and preference selection share the existing short
+REPEATABLE READ snapshot. Ranking/provider work is outside it. Candidate caches
+are not authority; partial results are SQL-rechecked and not labeled cache hits.
+Unknown coverage can still suppress all learned context during continuous writes.
+These fixed query/row bounds are not a measured production latency or throughput SLO.
+
+The additive `memory_visibility.scope=affected_context` means that affected
+learned context was withheld while unrelated eligible results can be returned.
+`user_learned_context` remains the broad/default scope. Both use the existing
+`processing`/`unavailable` states. Neither is a clarification or authorization.
+Bullets/JSON/XML notices and safe context share the requested prompt budget; if
+the notice cannot fit, the prompt is empty but typed visibility survives.
+Pending states suppress domain overlays, old review cards and preference decisions.
+MemoryOS cannot enforce how a customer's model treats separate conversation history.
+
+Deploy `runtime_job_reconciliation` **before** this API/worker code. It creates a
+small internal `runtime_job_reconciliations` table keyed uniquely by job ID, with
+owned tenant/proxy references, a closed record capped at 4 KiB, and an audit link.
+Ordinary job/owner deletion cascades this record. Audit retention may null the
+audit link but cannot remove the job's hold. No data backfill is required. Do not
+downgrade this table while new API/worker instances are running.
+
+The existing admin authentication protects the new endpoint:
+
+```text
+POST /v1/internal/dead-letter-jobs/{job_id}/reconcile?reason=<operator explanation>
+```
+
+It accepts only unapplied dead runtime jobs with an active, matching owner/tenant.
+The operator explanation must be nonblank and at most 512 characters; never put
+credentials or transcripts there. It records credential class `admin_secret`,
+not an independently verified human identity. A nonblocking job-row lock prevents
+concurrent retry/quarantine/discard transitions. Missing/busy/conflicting requests
+return 404/409, invalid explanations 422, and failed admin authentication 403.
+
+The backend checks permanent evidence failure without providers or recapture:
+expired/redacted source, invalid retained record, or changed source binding.
+Provider outages, rollout flags or missing current catalog alone are **not** proof
+of evidence loss (`409 runtime_job_recoverable`). Expired/redacted evidence may
+retain an already valid bound target hold. Invalid/changed evidence and unknown
+coverage require user-wide withholding. No footprint is synthesized or repaired.
+
+An `AuditAction.updated` record with `event=runtime_job_quarantined` commits
+atomically with the quarantine record. The same normalized reason returns the
+original record/audit; a different reason cannot rewrite it. Audit/database failure
+rolls back both. A quarantined job stays dead and keeps its source, private record,
+footprint and unapplied timestamp unchanged. Manual retry returns
+`409 runtime_job_quarantined`; discard still refuses to delete the guard. There is
+no new scheduler, provider call, trust tier, cancellation/reset or authority change.
+
+**Quarantine is an operational diagnosis, not recovery of current context.** It
+does not clear the guard, set an applied receipt, activate old values, or treat an
+unrelated successful job as covering lost evidence. Evidence-backed hold discharge
+using new authoritative covering input is not implemented in this stage. Unknown
+coverage can therefore remain user-wide indefinitely; do not enable a customer
+canary until that availability policy is explicitly settled and tested. Independent
+semantic evaluation and measured latency/load/provider resilience gates also remain.
+
+Controlled checks (disposable PostgreSQL/Redis; no paid providers):
+
+```powershell
+python -m pytest tests/integration/test_runtime_target_withholding.py tests/integration/test_runtime_quarantine.py tests/unit/test_runtime_guarded_context.py tests/unit/test_runtime_reconciliation_schema.py tests/unit/test_preference_choice_contract.py -q
+```
+
+Local verification on 2026-10-06: 225 focused runtime/read/recovery/contract tests
+passed, followed by 19 target/preflight checks after a nullable-branch type fix.
+The complete local unit suite passed 2,603 tests (four dependency/runtime warnings).
+This count includes existing local exploratory tests; it is not a GitHub CI run.
+Fresh PostgreSQL migration and downgrade/re-upgrade passed. New modules and
+focused tests passed Ruff. Comparing scoped Mypy results against HEAD confirmed
+the existing 35 router errors and one context-builder annotation error, rather
+than hiding them or claiming the whole repository type-checks cleanly. All
+providers were controlled/forbidden; no live traffic, paid semantic evaluation,
+holdout, production activation or load/SLO validation was performed.

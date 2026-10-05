@@ -15,7 +15,13 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from api.db.cache import CacheService
-from api.db.models import ExtractionJob, MemorySourceEvent, Tenant
+from api.db.models import (
+    ExtractionJob,
+    ExtractionJobStatus,
+    MemorySourceEvent,
+    RuntimeJobReconciliation,
+    Tenant,
+)
 from api.services.embedding_service import EmbeddingService
 from api.services.llm_service import JSONSchemaResponseFormat, LLMService
 from api.services.preference_choice_service import Version
@@ -191,6 +197,8 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
 
     def _owned_job(self, session, **args):
         job, messages = super()._owned_job(session, **args)
+        if job.status == ExtractionJobStatus.dead and session.get(RuntimeJobReconciliation, job.id) is not None:
+            raise PreferenceAdmissionUnavailable("runtime_job_quarantined")
         tenant = session.get(Tenant, job.tenant_id, populate_existing=True)
         if tenant is None or not tenant.is_active:
             raise PreferenceAdmissionUnavailable("intent_tenant_unavailable")

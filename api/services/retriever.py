@@ -42,6 +42,7 @@ from api.services.preference_claim_service import (
 )
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
+from api.services.runtime_withholding import RuntimeHold, read_runtime_hold
 from api.tasks.retrieval_tasks import update_memory_accesses
 
 CACHE_TTL_SECONDS = 60
@@ -162,7 +163,7 @@ class RetrieverService:
                 "quota_mode": quota_mode, "preference_context": preference_context}
         with self.session.no_autoflush:
             candidates = await self._retrieve_candidates(**args)
-        if self.last_memory_visibility is not None:
+        if self.last_memory_visibility is not None and self.last_memory_visibility.scope == "user_learned_context":
             return []  # Preflight withheld context without a provider wait.
         owner = self._resolved_read_proxy_id
         if as_of is not None or tenant_id is None or owner is None:
@@ -194,11 +195,19 @@ class RetrieverService:
                     self.last_preference_decisions = []
                     return []
                 if row[0]:
-                    self.last_memory_visibility = MemoryVisibility(state="unavailable" if row[1] else "processing")
+                    hold = await read_runtime_hold(self.session, owner=self._as_uuid(owner),
+                        tenant_id=self._as_uuid(args["tenant_id"]), predicate=self._runtime_job_predicate(),
+                        unavailable=bool(row[1]))
+                    self.last_memory_visibility = MemoryVisibility(state="unavailable" if hold.unavailable else "processing",
+                        scope="user_learned_context" if hold.broad else "affected_context")
                     self.last_is_degraded = True
                     self.last_cache_hit = False
                     self.last_preference_decisions = []
-                    return []
+                    if hold.broad:
+                        return []
+                else:
+                    hold = RuntimeHold(broad=False)
+                    self.last_memory_visibility = None
                 if not row[2]:
                     return candidates  # No server-selected runtime job for this owner.
                 categories = [c.lower() for c in args["categories"] or []]
@@ -208,6 +217,8 @@ class RetrieverService:
                     categories=categories, agent_id=args["agent_id"],
                     created_after=self._created_after(args["time_filter_days"]),
                 )
+                fresh = [m for m in fresh if m.id not in hold.fact_ids and m.previous_version_id not in hold.fact_ids
+                         and not (hold.preference_fingerprints and m.category == "preference")]
                 if args["preference_context"] is not None and (not categories or "preference" in categories):
                     preferences = await self._retrieve_declared_preferences(
                         context=args["preference_context"], query=args["query"],
@@ -215,8 +226,14 @@ class RetrieverService:
                         tenant_id=args["tenant_id"], limit=args["limit"], categories=["preference"],
                         agent_id=args["agent_id"], time_filter_days=args["time_filter_days"],
                         quota_mode=self.last_quota_mode, include_other=False,
+                        withheld_fingerprints=hold.preference_fingerprints,
                     )
                     fresh = preferences + fresh
+                if row[0]:
+                    # While any update is held, do not turn old choice cards into
+                    # a new clarification request through a partial response.
+                    self.last_preference_decisions = []
+                    self.last_is_degraded = True
                 self.last_cache_hit = False
                 return fresh[:args["limit"]]
             finally:
@@ -294,12 +311,18 @@ class RetrieverService:
         self.last_quota_mode = resolved_quota_mode.value
         if as_of is None and tenant_id is not None and proxy_user is not None:
             row = await self._runtime_visibility_row(str(proxy_user.id), tenant_id)
-            if row is None or row[0]:
+            if row is None:
                 self.last_cache_hit = False
-                if row is not None:
-                    self.last_memory_visibility = MemoryVisibility(state="unavailable" if row[1] else "processing")
-                    self.last_is_degraded = True
                 return []
+            if row[0]:
+                hold = await read_runtime_hold(self.session, owner=self._as_uuid(proxy_user.id),
+                    tenant_id=self._as_uuid(tenant_id), predicate=self._runtime_job_predicate(),
+                    unavailable=bool(row[1]))
+                if hold.broad:
+                    self.last_cache_hit = False
+                    self.last_memory_visibility = MemoryVisibility(state="unavailable" if hold.unavailable else "processing")
+                    self.last_is_degraded = True
+                    return []
 
         if resolved_quota_mode in {QuotaMode.blocked, QuotaMode.passthrough}:
             return []
@@ -1458,7 +1481,7 @@ class RetrieverService:
 
     async def _retrieve_declared_preferences(
         self, *, context, query, identity, proxy_user_id, tenant_id, limit,
-        categories, agent_id, time_filter_days, quota_mode, include_other=True,
+        categories, agent_id, time_filter_days, quota_mode, include_other=True, withheld_fingerprints=(),
     ) -> list[MemoryResult]:
         # <=32 indexed identities, one SQL round-trip. A vector page is not a
         # complete property set, so it cannot decide which scope wins.
@@ -1481,6 +1504,9 @@ class RetrieverService:
             by_fingerprint = {claim.claim_fingerprint: (claim, memory) for claim, memory in rows}
             created_after = self._created_after(time_filter_days)
             for key in context.property_keys:
+                if any(preference_fingerprint(key, scope) in withheld_fingerprints
+                       for scope in (context.applicability, PreferenceApplicability(kind="global"))):
+                    continue  # A held scoped identity cannot reactivate a global fallback.
                 selected = None
                 for scope in (context.applicability, PreferenceApplicability(kind="global")):
                     pair = by_fingerprint.get(preference_fingerprint(key, scope))

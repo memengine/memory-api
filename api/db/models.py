@@ -3114,6 +3114,23 @@ class PendingExtractionCandidate(Base):
     )
 
 
+class RuntimeJobReconciliation(Base):
+    __tablename__ = "runtime_job_reconciliations"
+    __table_args__ = (CheckConstraint(
+        "jsonb_typeof(record_json) = 'object' AND octet_length(record_json::text) <= 4096",
+        name="ck_runtime_reconciliation_bound"),)
+
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+        ForeignKey("extraction_jobs.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    proxy_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+        ForeignKey("proxy_users.id", ondelete="CASCADE"), nullable=False)
+    record_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    audit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True),
+        ForeignKey("audit_logs.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class DeadLetterJob(Base):
     __tablename__ = "dead_letter_jobs"
 
