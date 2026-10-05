@@ -7,6 +7,32 @@ worker, router, SDK, MCP tool, or assistant imports it. No provider calls or SQL
 writes were added. Existing version-one admissions and production flags are
 unchanged. This is **not** a completed worker integration or a release gate.
 
+`api/services/preference_intent_transaction.py` now supplies the disconnected,
+provider-free transaction stage. It is not imported by the live worker or any
+router. It stores a separately versioned reply/receipt in the existing bounded
+job columns, using the existing ownership, encryption and retention checks.
+Version-one and version-two readers reject one another's records; existing v1
+records are not migrated or reinterpreted. No schema migration is needed.
+
+Its `capture`, `admit` and `apply` operations preserve the original snapshot and
+first validated decision. `apply` accepts a plain mapping of already prepared
+embeddings, never a provider callback. Preference identities are locked in
+stable order and absence/target versions and authority are rechecked before
+the existing writers run. Memories, audits, vector outbox, reviews and the
+terminal receipt commit or roll back together. A retry after commit returns the
+same created IDs without replaying writes, even if job completion overwrote the
+ordinary result. The external conversation reference is frozen at capture and
+rechecked, with the same 255-character limit as the public ingestion contract.
+
+**Fact limitation:** this stage does not apply fact corrections. Nonpreferences
+are retained in the fixed reply and submitted as non-activating source reviews.
+The receipt separately reports deferred facts, buffered reviews, capacity
+rejections and closed-review replays. Capacity rejection is not successful fact
+storage. Tentative, contextual and unrepresentable preferences also remain
+non-activating reviews. `state=applied` means this limited transaction finished,
+not that all findings became current memories. Relation validation and fact
+writes still require the next stage before any worker can use this service.
+
 The closed reply requires both `preferences` and `nonpreferences` arrays,
 including empty arrays. The combined batch limit is 16. Each finding cites an
 exact user quote and a turn index in 0..63. Preference values are verbatim and
@@ -33,8 +59,10 @@ prove that a classifier understands those languages.
 
 ## Remaining transactional worker stage
 
-This stage is not implemented. It needs separate, narrow review because it
-adds provider execution and writes to the durable extraction pipeline.
+The provider-free preference transaction is implemented and locally tested.
+Live selection, provider execution, fact planning/application and cache/job
+coordination below are still unimplemented. They need separate, narrow review
+before connecting anything to the extraction pipeline.
 
 1. Select only eligible, durable tenant-owned jobs using a default-off backend
    flag and a tenant-owned catalog. Do not trust broker/public opt-in fields.
@@ -90,3 +118,14 @@ adds provider execution and writes to the durable extraction pipeline.
 No paid evaluation, production configuration changes, or SDK/MCP/assistant
 changes are part of this staged work. Synthetic transaction tests do not replace
 an independent semantic evaluation before any future activation.
+
+The local transaction gate uses synthetic owners in a disposable PostgreSQL
+instance, with provider methods forbidden. Set `DATABASE_URL` explicitly to
+that isolated database (never the application or production database), migrate
+it, then run:
+
+```powershell
+python -m pytest tests/unit/test_preference_intent_transaction_contract.py tests/integration/test_preference_intent_transaction.py tests/unit/test_preference_intent_admission_service.py tests/integration/test_preference_intent_admission.py -q
+```
+
+The integration suite is also part of the existing governance CI gate.

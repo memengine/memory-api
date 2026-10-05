@@ -76,8 +76,7 @@ class AdmissionOutcome(_Closed):
         return self
 
 
-class PreferenceIntentAdmission(_Closed):
-    schema_version: Literal[1] = 1
+class AdmissionCapture(_Closed):
     capture_id: uuid.UUID
     tenant_id: uuid.UUID
     proxy_user_id: uuid.UUID
@@ -86,16 +85,24 @@ class PreferenceIntentAdmission(_Closed):
     catalog_sha256: Version
     snapshot: PreferenceSnapshot
     state: Literal["captured", "validated", "applied", "rejected"] = "captured"
+
+    @model_validator(mode="after")
+    def consistent_capture(self):
+        validate_snapshot_coverage(self.snapshot)
+        if (self.snapshot.tenant_id != self.tenant_id or self.snapshot.proxy_user_id != self.proxy_user_id
+            or self.catalog_sha256 != _hash(self.snapshot.catalog.model_dump(mode="json"))):
+            raise ValueError("admission principal/catalog mismatch")
+        return self
+
+
+class PreferenceIntentAdmission(AdmissionCapture):
+    schema_version: Literal[1] = 1
     requests: tuple[PreferenceChoiceRequest, ...] = Field(default=(), max_length=16)
     decision_sha256: Version | None = None
     outcome: AdmissionOutcome | None = None
 
     @model_validator(mode="after")
     def consistent_record(self):
-        validate_snapshot_coverage(self.snapshot)
-        if (self.snapshot.tenant_id != self.tenant_id or self.snapshot.proxy_user_id != self.proxy_user_id
-            or self.catalog_sha256 != _hash(self.snapshot.catalog.model_dump(mode="json"))):
-            raise ValueError("admission principal/catalog mismatch")
         if self.state == "captured":
             if self.requests or self.decision_sha256 is not None or self.outcome is not None:
                 raise ValueError("captured admission has no decision")
@@ -118,6 +125,8 @@ class PreferenceAdmissionUnavailable(ValueError):
 
 
 class PreferenceIntentAdmissionService:
+    record_model: type[AdmissionCapture] = PreferenceIntentAdmission
+
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
@@ -152,8 +161,8 @@ class PreferenceIntentAdmissionService:
             raise PreferenceAdmissionUnavailable("admission_source_unavailable")
         return job, messages
 
-    @staticmethod
-    def _read(job):
+    @classmethod
+    def _read(cls, job):
         raw = job.preference_intent_admission
         if raw is None:
             if job.preference_intent_admission_envelope is not None:
@@ -163,7 +172,7 @@ class PreferenceIntentAdmissionService:
             encoded = _json(raw)
             if len(encoded.encode()) > MAX_ADMISSION_BYTES:
                 raise ValueError("admission oversized")
-            return PreferenceIntentAdmission.model_validate_json(encoded)
+            return cls.record_model.model_validate_json(encoded)
         except (TypeError, ValueError) as exc:
             raise PreferenceAdmissionUnavailable("admission_record_inconsistent") from exc
 
@@ -217,11 +226,15 @@ class PreferenceIntentAdmissionService:
             snapshot = read_preference_snapshot(session, tenant_id=job.tenant_id,
                 proxy_user_id=job.proxy_user_id, catalog=catalog)
             conversation = _create_source_conversation(session, user_id=backing.id, agent_id=None, message_count=len(messages))
-            record = PreferenceIntentAdmission(capture_id=uuid.uuid4(), tenant_id=job.tenant_id,
+            record = self.record_model(capture_id=uuid.uuid4(), tenant_id=job.tenant_id,
                 proxy_user_id=job.proxy_user_id, source_conversation_id=conversation.id,
-                transcript_sha256=_hash(messages), catalog_sha256=_hash(catalog.model_dump(mode="json")), snapshot=snapshot)
+                transcript_sha256=_hash(messages), catalog_sha256=_hash(catalog.model_dump(mode="json")), snapshot=snapshot,
+                **self._capture_fields(job))
             self._write(job, record)
             return record
+
+    def _capture_fields(self, job):
+        return {}
 
     def admit(self, requests, *, job_id, tenant_id, proxy_user_id, catalog, capture_id):
         """First checked decision wins. Invalid replies cannot modify a capture."""
