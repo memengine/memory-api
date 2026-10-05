@@ -70,6 +70,26 @@ class FakeSyncExecuteResult(FakeAsyncExecuteResult):
     pass
 
 
+def test_detached_model_can_embed_without_reopening_sql(monkeypatch) -> None:
+    session = MagicMock()
+    session.execute.return_value = FakeSyncExecuteResult(scalar=make_model(provider="openai"))
+    service = EmbeddingService(async_redis_client=FakeAsyncRedis(), sync_redis_client=FakeSyncRedis())
+    record = service.get_active_model_sync(session=session)
+    session.execute.assert_called_once()
+    session.reset_mock()
+    received = []
+    def embed(text, model, tenant):
+        received.append((text, model, tenant))
+        return [0.1] * model.dimensions
+    monkeypatch.setattr(service, "_embed_with_model_sync", embed)
+    result = service.embed_sync("synthetic fact", tenant_id="tenant-1", model_record=record)
+    assert result.model_id == record.id and received == [("synthetic fact", record, "tenant-1")]
+    session.execute.assert_not_called()
+    assert service.sync_session is None and service.llm_router.sync_session is None
+    with pytest.raises(ValueError, match="not both"):
+        service.embed_sync("synthetic", model_id=record.id, model_record=record)
+
+
 def make_model(
     *,
     model_id: str = DEFAULT_ACTIVE_MODEL_ID,

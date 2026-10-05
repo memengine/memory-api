@@ -130,8 +130,8 @@ class PreferenceIntentAdmissionService:
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
-    def _owned_job(self, session, *, job_id, tenant_id, proxy_user_id):
-        if not get_settings().explicit_preference_claims_enabled:
+    def _owned_job(self, session, *, job_id, tenant_id, proxy_user_id, allow_applied=False):
+        if not get_settings().explicit_preference_claims_enabled and not allow_applied:
             raise PreferenceAdmissionUnavailable("explicit_preferences_unavailable")
         job = session.execute(select(ExtractionJob).where(
             ExtractionJob.id == uuid.UUID(str(job_id)), ExtractionJob.tenant_id == uuid.UUID(str(tenant_id)),
@@ -140,6 +140,10 @@ class PreferenceIntentAdmissionService:
         proxy = session.get(ProxyUser, uuid.UUID(str(proxy_user_id)), populate_existing=True)
         if job is None or proxy is None or proxy.tenant_id != job.tenant_id or proxy.is_blocked:
             raise PreferenceAdmissionUnavailable("admission_owner_unavailable")
+        if not get_settings().explicit_preference_claims_enabled:
+            record = self._read(job)
+            if record is None or record.state != "applied":
+                raise PreferenceAdmissionUnavailable("explicit_preferences_unavailable")
         now = datetime.now(UTC)
         expires = job.raw_payload_expires_at
         if expires is not None:

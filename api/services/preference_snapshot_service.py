@@ -1,4 +1,4 @@
-"""Read-only, detached preference bindings. Not registered in any live pipeline.
+"""Read-only, detached preference bindings, including default-off queue preparation.
 
 The catalog is a backend-supplied contract, not a model-discovered namespace or
 an authorization mechanism. No benchmark imports, provider calls, or writes.

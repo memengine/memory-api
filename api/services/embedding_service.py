@@ -164,8 +164,12 @@ class EmbeddingService:
         text: str,
         model_id: str | None = None,
         tenant_id: str | None = None,
+        *,
+        model_record: EmbeddingModelRecord | None = None,
     ) -> EmbeddingResult:
-        model = self.get_model_sync(model_id) if model_id else self.get_active_model_sync()
+        if model_record is not None and model_id is not None:
+            raise ValueError("Supply a detached model record or a model ID, not both.")
+        model = model_record or (self.get_model_sync(model_id) if model_id else self.get_active_model_sync())
         vector = self._embed_with_model_sync(text, model, tenant_id)
         return EmbeddingResult(
             vector=vector,
@@ -192,14 +196,15 @@ class EmbeddingService:
         await self._cache_active_model_async(record)
         return record
 
-    def get_active_model_sync(self) -> EmbeddingModelRecord:
-        if self.sync_session is None:
+    def get_active_model_sync(self, *, session: Session | None = None) -> EmbeddingModelRecord:
+        read_session = session if session is not None else self.sync_session
+        if read_session is None:
             cached = self._get_cached_active_model_sync()
             if cached is not None:
                 return cached
             return self._default_model_record()
 
-        model = self.sync_session.execute(
+        model = read_session.execute(
             select(EmbeddingModel).where(EmbeddingModel.is_active.is_(True)).limit(1)
         ).scalar_one_or_none()
         if model is None or not self._is_embedding_model_like(model):

@@ -63,6 +63,59 @@ async def test_invalidation_removes_query_and_hot_tier_keys_only_for_user(fake_r
     assert await service.get_hot_tier_memories("proxy-2") == [{"id": "safe"}]
 
 
+@pytest.mark.asyncio
+async def test_strict_invalidation_propagates_failure(fake_redis, monkeypatch) -> None:
+    service = CacheService(client=fake_redis)
+    async def fail(*_args, **_kwargs):
+        raise RedisConnectionError("controlled outage")
+    monkeypatch.setattr(fake_redis, "delete", fail)
+    await service.invalidate_user_cache("user-1")  # Existing best-effort contract.
+    with pytest.raises(RedisConnectionError):
+        await service.invalidate_user_cache("user-1", strict=True)
+
+
+@pytest.mark.asyncio
+async def test_strict_invalidation_does_not_accept_open_circuit_fallback(fake_redis) -> None:
+    from api.infra.circuit_breaker import CircuitOpenError
+
+    class OpenBreaker:
+        async def call(self, _fn, *_args, fallback=None):
+            if fallback is None:
+                raise CircuitOpenError("controlled")
+            return fallback()
+    service = CacheService(client=fake_redis)
+    service.breaker = OpenBreaker()
+    await service.invalidate_user_cache("user-1")
+    with pytest.raises(CircuitOpenError):
+        await service.invalidate_user_cache("user-1", strict=True)
+
+
+@pytest.mark.asyncio
+async def test_strict_invalidation_batches_large_keysets(fake_redis, monkeypatch) -> None:
+    service = CacheService(client=fake_redis)
+    for index in range(305):
+        await fake_redis.set(f"retrieve:user-1:{index}", "old")
+    await fake_redis.set("retrieve:user-2:safe", "safe")
+    delete = fake_redis.delete
+    scan = fake_redis.scan_iter
+    batches = []
+    async def track(*keys):
+        batches.append(len(keys))
+        return await delete(*keys)
+    monkeypatch.setattr(fake_redis, "delete", track)
+    async def scan_snapshot(pattern):
+        # fakeredis uses positional pages, unlike Redis's hash cursor; deletion
+        # shifts those pages. Native SCAN/delete is covered by the SQL/Redis test.
+        keys = [key async for key in scan(pattern)]
+        for key in keys:
+            yield key
+    monkeypatch.setattr(fake_redis, "scan_iter", scan_snapshot)
+    await service.invalidate_user_cache("user-1", strict=True)
+    assert max(batches) <= 100
+    assert await fake_redis.get("retrieve:user-2:safe") == "safe"
+    assert not [key async for key in fake_redis.scan_iter("retrieve:user-1:*")]
+
+
 def _enable_generation_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "benchmark")
     monkeypatch.setenv("MEMORYOS_SCALE_DEDICATED", "1")

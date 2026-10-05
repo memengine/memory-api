@@ -189,6 +189,9 @@ def _invalidate_proxy_user_cache(proxy_user_id: str) -> None:
 
 def classify_error(exc: Exception | str) -> str:
     root_cause = exc.cause if isinstance(exc, ExtractionPipelineError) else exc
+    diagnostic = getattr(root_cause, "orig", None)
+    if (getattr(diagnostic, "sqlstate", None) or getattr(diagnostic, "pgcode", None)) == "40001":
+        return "database_serialization_retry"
     message = str(root_cause or "")
     normalized = message.lower()
     if "503" in message or "Service Unavailable" in message:
@@ -216,7 +219,7 @@ def _safe_failure_detail(exc: Exception) -> str:
     if isinstance(exc, ExtractionPipelineError):
         detail = f"extraction_pipeline_failed stage={exc.stage} cause={exc.cause_type}"
         diagnostic = getattr(exc.cause, "orig", None)
-        sqlstate = getattr(diagnostic, "sqlstate", None)
+        sqlstate = getattr(diagnostic, "sqlstate", None) or getattr(diagnostic, "pgcode", None)
         constraint = getattr(getattr(diagnostic, "diag", None), "constraint_name", None)
         if sqlstate:
             detail += f" sqlstate={sqlstate}"
@@ -1750,6 +1753,15 @@ def run_extraction_pipeline(
         session.close()
 
 
+def _run_runtime_preference_job(job_id: str) -> dict[str, Any] | None:
+    from api.services.runtime_preference_worker import RuntimePreferenceWorker
+
+    try:
+        return RuntimePreferenceWorker(build_extraction_session_factory()).process(job_id)
+    except Exception as exc:
+        raise ExtractionPipelineError(stage="runtime_preference", cause=exc) from exc
+
+
 def _process_extraction_job(
     job_payload: dict[str, Any],
     *,
@@ -1764,22 +1776,23 @@ def _process_extraction_job(
             "status": "duplicate_ignored",
             "memories_created": 0,
         }
-    if dispatched_payload.get("_payload_reference") == "extraction_job":
-        job_payload = _load_referenced_job_payload(job_id)
-        if dispatched_payload.get("queue_name"):
-            job_payload["queue_name"] = dispatched_payload["queue_name"]
-    _wait_for_development_crash_barrier(job_id=job_id, job_payload=job_payload)
-    operational_metrics = dict(job_payload.get("operational_metrics") or {})
-    operational_metrics["queue_wait_ms"] = queue_wait_ms(job_payload)
-    job_payload = {**job_payload, "operational_metrics": operational_metrics}
-    processing_payload = {
-        **job_payload,
-        "status": "processing",
-    }
-    _set_job_status(job_id, processing_payload)
-
     try:
-        completed_payload = run_extraction_pipeline(job_payload)
+        if dispatched_payload.get("_payload_reference") == "extraction_job":
+            job_payload = _load_referenced_job_payload(job_id)
+            if dispatched_payload.get("queue_name"):
+                job_payload["queue_name"] = dispatched_payload["queue_name"]
+        _wait_for_development_crash_barrier(job_id=job_id, job_payload=job_payload)
+        operational_metrics = dict(job_payload.get("operational_metrics") or {})
+        operational_metrics["queue_wait_ms"] = queue_wait_ms(job_payload)
+        job_payload = {**job_payload, "operational_metrics": operational_metrics}
+        _set_job_status(job_id, {**job_payload, "status": "processing"})
+        completed_payload = _run_runtime_preference_job(job_id)
+        if completed_payload is None:
+            completed_payload = run_extraction_pipeline(job_payload)
+        else:
+            completed_payload["operational_metrics"] = operational_metrics
+            if job_payload.get("queue_name"):
+                completed_payload["queue_name"] = job_payload["queue_name"]
         _set_db_job_completed(job_id=job_id, payload=completed_payload)
         _set_job_status(job_id, completed_payload)
         return completed_payload

@@ -1,8 +1,8 @@
-"""Inactive runtime intent contract and pure evidence binding.
+"""Runtime intent contract and pure evidence binding.
 
 This module does not classify text or write data. Semantics are model judgments,
 not proof or authority. Its output must be rechecked by a transactional worker
-before the existing writers can apply it. No live pipeline imports this module.
+before the existing writers can apply it. Queue use is default-off and tenant-gated.
 """
 from __future__ import annotations
 

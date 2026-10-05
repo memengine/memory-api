@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from uuid import UUID
 
 from pydantic import AliasChoices
 from pydantic import Field
@@ -10,6 +11,19 @@ from pydantic_settings import SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    @field_validator("runtime_preference_tenant_ids")
+    @classmethod
+    def validate_runtime_preference_tenants(cls, value: str) -> str:
+        if not value.strip():
+            return ""
+        entries = value.split(",")
+        if len(entries) > 64:
+            raise ValueError("Runtime preference rollout allows at most 64 tenant IDs.")
+        ids = [str(UUID(item.strip())) for item in entries]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Duplicate runtime preference tenant ID.")
+        return ",".join(ids)
+
     @field_validator("llm_provider_concurrency_limits")
     @classmethod
     def validate_provider_limits(cls, value: str) -> str:
@@ -67,6 +81,8 @@ class Settings(BaseSettings):
     memory_passport_enabled: bool = Field(default=False, alias="MEMORY_PASSPORT_ENABLED")
     phase3a_confirmation_enabled: bool = Field(default=False, alias="PHASE3A_CONFIRMATION_ENABLED")
     explicit_preference_claims_enabled: bool = Field(default=False, alias="EXPLICIT_PREFERENCE_CLAIMS_ENABLED")
+    runtime_preference_enabled: bool = Field(default=False, alias="RUNTIME_PREFERENCE_ENABLED")
+    runtime_preference_tenant_ids: str = Field(default="", alias="RUNTIME_PREFERENCE_TENANT_IDS")
     source_review_profile_row_limit: int = Field(default=256, ge=1, le=10000, alias="SOURCE_REVIEW_PROFILE_ROW_LIMIT")
     source_review_tenant_row_limit: int = Field(default=10000, ge=1, le=1000000, alias="SOURCE_REVIEW_TENANT_ROW_LIMIT")
     source_review_closed_retention_days: int = Field(default=30, ge=1, le=365, alias="SOURCE_REVIEW_CLOSED_RETENTION_DAYS")

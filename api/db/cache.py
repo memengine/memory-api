@@ -235,34 +235,31 @@ class CacheService:
         except REDIS_FAILURES:
             return None
 
-    async def invalidate_user_cache(self, user_id: str) -> None:
+    async def invalidate_user_cache(self, user_id: str, *, strict: bool = False) -> None:
+        # A durable worker must not acknowledge a swallowed dependency failure.
+        # Existing request callers retain best-effort behavior.
+        async def call(fn, *args):
+            if strict:
+                return await self.breaker.call(fn, *args)
+            return await self.breaker.call(fn, *args, fallback=lambda: on_redis_open(None))
+
         try:
             if self._generation_invalidation:
-                await self.breaker.call(
-                    self.client.incr,
-                    self._generation_key(user_id),
-                    fallback=lambda: on_redis_open(None),
-                )
+                await call(self.client.incr, self._generation_key(user_id))
                 return
-            await self.breaker.call(
-                self.client.delete,
-                self._hot_memories_key(user_id),
-                fallback=lambda: on_redis_open(None),
-            )
-            retrieval_keys: list[str] = []
-            async for key in self.client.scan_iter(f"retrieve:{user_id}:*"):
-                retrieval_keys.append(str(key))
-            hot_tier_keys: list[str] = []
-            async for key in self.client.scan_iter(self._hot_tier_memory_pattern(user_id)):
-                hot_tier_keys.append(str(key))
-            scoped_keys = [*retrieval_keys, *hot_tier_keys]
-            if scoped_keys:
-                await self.breaker.call(
-                    self.client.delete,
-                    *scoped_keys,
-                    fallback=lambda: on_redis_open(None),
-                )
+            await call(self.client.delete, self._hot_memories_key(user_id))
+            for pattern in (f"retrieve:{user_id}:*", self._hot_tier_memory_pattern(user_id)):
+                keys: list[str] = []
+                async for key in self.client.scan_iter(pattern):
+                    keys.append(str(key))
+                    if len(keys) == 100:
+                        await call(self.client.delete, *keys)
+                        keys.clear()
+                if keys:
+                    await call(self.client.delete, *keys)
         except REDIS_FAILURES:
+            if strict:
+                raise
             return None
 
     async def set_hot_tier_memory(

@@ -1,4 +1,4 @@
-"""Inactive v3 fact planning/application; no queue, router or provider selection.
+"""V3 fact planning/application; no queue, router or provider selection here.
 
 The injected relation service runs only after the read session closes. Apply
 replays backend-parsed decisions, never a provider response or a new target.

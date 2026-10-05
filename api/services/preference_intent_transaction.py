@@ -1,7 +1,8 @@
-"""Disconnected, provider-free durable runtime decisions on extraction jobs.
+"""Provider-free durable runtime decisions on extraction jobs.
 
 Reuses v1 ownership, capture, encrypted storage and retention. No queue/router
-calls this service. Facts are deferred pending relation validation, not current.
+calls v2 directly. Its v3 subclass is used by the default-off runtime adapter.
+In v2 facts are deferred pending relation validation, not current.
 """
 from __future__ import annotations
 

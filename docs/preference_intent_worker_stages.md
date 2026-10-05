@@ -2,14 +2,15 @@
 
 ## Current state
 
-`api/services/preference_intent_contract.py` is inactive preparation only. No
-worker, router, SDK, MCP tool, or assistant imports it. No provider calls or SQL
-writes were added. Existing version-one admissions and production flags are
-unchanged. This is **not** a completed worker integration or a release gate.
+The closed contract and v3 transaction now have a **default-off queue adapter**
+in `api/services/runtime_preference_worker.py`. This completes the controlled
+worker integration, not production activation or a semantic release gate.
+Existing v1/v2 records are not upgraded. SDK, MCP, assistant, UI and production
+configuration were not changed by this stage.
 
 `api/services/preference_intent_transaction.py` now supplies the disconnected,
-provider-free transaction stage. It is not imported by the live worker or any
-router. It stores a separately versioned reply/receipt in the existing bounded
+provider-free transaction stage, reused through its v3 subclass. It stores a
+separately versioned reply/receipt in the existing bounded
 job columns, using the existing ownership, encryption and retention checks.
 Version-one and version-two readers reject one another's records; existing v1
 records are not migrated or reinterpreted. No schema migration is needed.
@@ -33,8 +34,8 @@ non-activating reviews. `state=applied` means this limited transaction finished,
 not that all findings became current memories. Relation validation and fact
 writes still require the next stage before any worker can use this service.
 
-`api/services/preference_fact_transaction.py` supplies that next, **disconnected
-version-three stage**. It captures at most 50 owned, temporally current memory
+`api/services/preference_fact_transaction.py` supplies the **version-three
+transaction stage** used by the default-off adapter. It captures at most 50 owned, temporally current memory
 bindings with a +1 completeness check. Protected preference rows are veto
 inputs, never fact-write targets, even if their category is mislabeled. The
 same evidence validator, relation parser, resolver mutation policy, claim
@@ -74,7 +75,7 @@ and `deferred_facts`, alongside review-capacity outcomes and exact created IDs.
 closed-generation fences still apply. This fact stage does not construct new
 selectable fact alternatives or activate generated merge text.
 
-**Limits before worker integration:** a profile with more than 50 current rows
+**Current limits:** a profile with more than 50 current rows
 does not get an automatic fact write, even if the intended target is in the
 first 50. The existing full-source relation prompt limits (8,000 supporting
 source characters, 32,000 prompt characters) remain enforced without qualifier
@@ -82,7 +83,8 @@ truncation. Planning makes at most one relation call per nonpreference finding
 (combined batch limit 16). Provider work before durable admission can repeat
 after crashes or concurrent admission; exactly-once provider billing is not
 claimed. Large-profile candidate selection, live provider/model accuracy,
-latency/cost and worker retry/cache coordination still need their own gates.
+latency/cost still need their own gates. Retry/cache coordination is now covered
+by controlled worker tests, not by deployed service or provider measurements.
 Controlled SQL tests do **not** establish those release properties.
 
 The closed reply requires both `preferences` and `nonpreferences` arrays,
@@ -109,12 +111,10 @@ semantic evaluation must measure that risk independently. Controlled multilingua
 fixtures verify that binding has no phrase-matching dependency; they do not
 prove that a classifier understands those languages.
 
-## Remaining transactional worker stage
+## Implemented default-off worker stage
 
-The provider-free preference transaction is implemented and locally tested.
-Live selection, primary intent-classifier execution and cache/job
-coordination below are still unimplemented. They need separate, narrow review
-before connecting anything to the extraction pipeline.
+The queue entry point checks the durable job before dispatching legacy extraction.
+The implementation follows these constraints; activation remains separately gated.
 
 1. Select only eligible, durable tenant-owned jobs using a default-off backend
    flag and a tenant-owned catalog. Do not trust broker/public opt-in fields.
@@ -153,7 +153,7 @@ before connecting anything to the extraction pipeline.
    durable admission can repeat after crashes; do not claim exactly-once
    provider billing.
 
-## Required tests before wiring or activation
+## Controlled coverage and activation checks
 
 - Real disposable PostgreSQL: mixed preference/fact correction, uncertainty,
   reaffirmation, captured absence race and protected-authority rejection.
@@ -187,3 +187,82 @@ For the v3 fact transaction gate, add
 `tests/unit/test_preference_fact_transaction_contract.py` and
 `tests/integration/test_preference_fact_transaction.py` to the same isolated
 database run. That integration suite is also included in the governance CI gate.
+
+## Rollout contract and remaining activation gates
+
+Fresh selection requires all three operator settings:
+
+- `RUNTIME_PREFERENCE_ENABLED=true` (default `false`).
+- `RUNTIME_PREFERENCE_TENANT_IDS` contains the job's tenant UUID (default empty;
+  normalized, unique UUIDs, maximum 64).
+- `EXPLICIT_PREFERENCE_CLAIMS_ENABLED=true` for the existing read/write contract.
+
+The active owned tenant must have `metadata.runtime_preference_catalog`, a closed
+object with only `properties` and `scopes`, matching `PreferenceSnapshotCatalog`
+without its `tenant_id` field. The backend derives that ID from the durable job.
+The catalog is server configuration, not a new API input or a model-generated
+property registry. There is no catalog-management UI/API in this stage. Its
+serialized limit is 32 KiB, with at most 16 properties, 32 scopes and 32 offered
+property/scope identities. It does not grant authority or permission.
+
+Before capture, registered events, explicit declarations and agent jobs retain
+their existing writers. An allowlisted normal job with missing/invalid catalog
+or a domain overlay fails as a configuration error; it does not silently skip an
+overlay or run the legacy preference lane. Do not allowlist domain-overlay tenants
+until that coordination is designed. Broker and public payload fields cannot
+enable this route, replace its catalog or select its owner.
+
+After capture, the frozen catalog and source are reused even if live catalog
+configuration changes. Rollback flags suspend unfinished records through the
+existing bounded retry/dead-letter machinery, never recapture or legacy fallback.
+An already-applied receipt may finish cache delivery/job completion under rollback
+flags, but source retention/hash, ownership, profile blocking and tenant activity
+are still rechecked. Unknown v1/v2 or malformed records fail closed, not conversion.
+
+One primary structured classification call runs through `LLMService`, retaining
+configured provider/model selection and its existing provider limits. It is not
+a regex prefilter or a call added to synchronous retrieval. It runs per selected
+queued ingestion; repeated provider attempts before admission remain possible.
+The primary prompt is bounded to 128 KiB UTF-8 and its reply to 64 KiB, with an
+8,192-token output cap. Oversized/invalid/unavailable responses fail without
+legacy activation. Evidence validation is independent of provider schema support.
+Relation planning retains the existing limits described above. Embedding model
+configuration is read in a short SQL session, detached, and supplied to the
+existing embedder after that session closes; an unavailable Redis model cache
+cannot silently pick an unrelated DB model.
+
+The SERIALIZABLE apply transaction and receipt remain atomic. SQLSTATE 40001 is
+reported separately and uses the existing queue retry schedule with the same fixed
+decision. Primary/relation classification is not repeated after validated admission.
+Precomputed embeddings are not durable and may be requested again after a crash.
+The adapter adds no second retry scheduler or memory-write engine.
+
+Cache invalidation runs after commit in strict mode: Redis errors/open circuits
+are not swallowed. Existing request-side cache callers retain best-effort behavior.
+Deletes are batched at 100 keys, but SCAN still has Redis-keyspace work; this is
+not a constant-time invalidation claim. SQL read hydration/currentness remains
+the safety boundary, not cache deletion alone. Local worker caches are cleared;
+other processes' local caches are not broadcast-cleared. A cache outage can leave
+the job failed/dead after its memories committed; the private receipt records that
+outcome and retries do not write again. No exactly-once delivery/billing claim.
+Public job results contain created IDs and bounded counters, not private evidence,
+catalogs, decisions or raw transcripts.
+
+The controlled worker suite uses disposable PostgreSQL and isolated Redis:
+
+```powershell
+python -m pytest tests/unit/test_runtime_preference_classifier.py tests/integration/test_runtime_preference_worker.py -q
+```
+
+Do not enable writes for an integration that only uses generic retrieval:
+declared preferences require the already-existing SDK/API `preference_context`
+and `preference_decisions` read contract. Generic vector retrieval deliberately
+does not promote them. That integration contract must be exercised before an
+assistant canary, without preference-specific assistant prompt workarounds.
+Ingestion is still asynchronous: a retrieval before its job's commit can observe
+the previously committed state. The controlled journey checks reads after the
+receipt, not instant visibility of a queued uncertainty/correction. This adapter
+adds neither a synchronous model wait to chat nor a pending-write read barrier;
+that integration/currentness behavior must be checked before a tenant canary.
+Independent semantic evaluation, provider availability/fallback evidence,
+latency/cost measurements and a separately approved tenant canary remain required.

@@ -209,6 +209,7 @@ def test_worker_loads_compact_tenant_payload_before_processing(monkeypatch) -> N
         return {**payload, "status": "processed", "memories_created": 0}
 
     monkeypatch.setattr(extraction_tasks, "run_extraction_pipeline", fake_pipeline)
+    monkeypatch.setattr(extraction_tasks, "_run_runtime_preference_job", lambda _job_id: None)
 
     result = extraction_tasks._process_extraction_job(
         {
