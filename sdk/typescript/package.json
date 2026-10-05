@@ -1,6 +1,6 @@
 {
   "name": "memoryo-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Zero-runtime-dependency TypeScript SDK for governed, traceable AI memory with MemoryOS.",
   "license": "MIT",
   "author": {
@@ -31,9 +31,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
   "files": [
@@ -51,8 +56,10 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "test:contract": "npm run build && node --test tests/contract.mjs",
+    "test:package": "node tests/package.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "npm run typecheck && npm run test:contract"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run test:package"
   },
   "devDependencies": {
     "tsup": "^8.3.5",

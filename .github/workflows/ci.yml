@@ -137,11 +137,11 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
 
-      - name: TypeScript SDK typecheck
+      - name: TypeScript SDK types and installed-package contracts
         run: |
           cd sdk/typescript
           npm ci
           npm run typecheck
-          npm run test:contract
+          npm run test:package
 
 

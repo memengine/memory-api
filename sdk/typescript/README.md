@@ -38,11 +38,12 @@ const systemPrompt = context.hasContext
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
 
-## Opt-in scoped preferences (local, unreleased)
+## Opt-in scoped preferences (0.1.2 release candidate)
 
 This source checkout exposes an application-declared contract, **not automatic
-natural-language scope/uncertainty recognition**. Published `0.1.1` does not
-include these fields. The backend feature remains disabled by default; disabled
+natural-language scope/uncertainty recognition**. These fields are included in
+the `0.1.2` source/tarball, not the published `0.1.1` package. Preparing a tarball
+does not publish a release. The backend feature remains disabled by default; disabled
 requests fail with `409 / PREF_409` rather than falling back to unscoped writes.
 
 ```ts
@@ -82,7 +83,7 @@ guarantee in the SDK. See [the full contract](../../docs/explicit_preference_con
 
 ### An explicitly unresolved current choice
 
-The local, unreleased types also accept `choiceState: "current_choice_unresolved"`
+The `0.1.2` types also accept `choiceState: "current_choice_unresolved"`
 with `commitment: "uncertain"`, known applicability, and both existing-winner
 references. This is an application declaration, not automatic interpretation of
 the user's wording. Merely tentative interest is not a reason to withhold a default.
@@ -133,6 +134,32 @@ Review dismissal/expiry cannot restore a withheld default. A matching
 replacement can resolve the choice. Neither raises authority or activates
 candidate text. This capability remains unpublished and disabled by default,
 and does not add automatic semantic admission.
+
+### Validate a release before publication
+
+From `sdk/typescript`, after installing development dependencies:
+
+```bash
+npm run typecheck
+npm run test:package
+```
+
+`test:package` builds via the real `prepack` lifecycle, packs the release, and
+installs that tarball into a disposable consumer offline. It reuses the existing
+contract tests through the public package name in ESM and CommonJS, and checks
+positive/negative preference type fixtures with Node16, NodeNext and Bundler
+resolution. It also rejects unexpected package files or runtime dependencies.
+The disposable consumer and tarball are removed after testing; nothing is published.
+
+For a tarball to hand off, run `npm pack` after those checks. Packing rebuilds
+`dist` so an old local bundle cannot silently become the release. Publication
+also runs the typecheck and installed-package gate in `prepublishOnly`.
+Both lifecycles follow [npm's documented script ordering](https://docs.npmjs.com/cli/v11/using-npm/scripts/).
+
+These are client packaging/contract checks against controlled responses, not
+proof of live extraction accuracy or permission to enable backend features.
+Consumers must upgrade their dependency explicitly; publishing a release does
+not update a deployed assistant automatically.
 
 ## Multi-service mode: support, billing, CRM, and product services
 
