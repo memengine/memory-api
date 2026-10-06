@@ -354,4 +354,8 @@ def test_unresolved_guard_predicate_can_use_discharge_aware_index(sql_scope):
             "AND (runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256') "
             "AND runtime_applied_at IS NULL AND runtime_hold_released_at IS NULL LIMIT 1"),
             {"tenant": sql_scope.tenant_id, "owner": sql_scope.proxy_id}).scalars().all()
-        assert any("ix_extraction_jobs_runtime_unreleased" in line for line in plan), plan
+        # Both managed partial indexes exclude fully discharged jobs. The new
+        # visibility index also supports applied residuals; PostgreSQL may pick
+        # either for this narrower historical quarantine predicate.
+        assert any(name in " ".join(plan) for name in (
+            "ix_extraction_jobs_runtime_unreleased", "ix_extraction_jobs_runtime_visibility")), plan

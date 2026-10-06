@@ -242,11 +242,13 @@ def test_pre_reservation_applied_receipt_requires_full_validation_before_release
 def test_large_backlog_is_an_indexed_boolean_not_job_payload_loading(sql_scope, monkeypatch):
     old = fact(sql_scope)
     enable(sql_scope, monkeypatch)
+    monkeypatch.setattr(get_settings(), "runtime_target_release_enabled", True)
     now = datetime.now(UTC)
     with sql_scope.factory.begin() as session:
         session.add_all([ExtractionJob(id=uuid.uuid4(), tenant_id=sql_scope.tenant_id,
             proxy_user_id=sql_scope.proxy_id, external_user_id=sql_scope.external_id,
             runtime_route=RUNTIME_ROUTE, runtime_applied_at=now if n < 2900 else None,
+            runtime_visibility_finalized_at=now if n < 2900 else None,
             status=ExtractionJobStatus.completed if n < 2900 else ExtractionJobStatus.queued,
             payload={}) for n in range(3000)])
     assert read(sql_scope, [old])[1].state == "processing"
@@ -255,11 +257,13 @@ def test_large_backlog_is_an_indexed_boolean_not_job_payload_loading(sql_scope, 
         # in a prepared generic plan. This is not a production p99/load claim.
         session.execute(text("ANALYZE extraction_jobs"))
         session.execute(text("SET LOCAL enable_seqscan = off"))
+        from api.services.runtime_fact_visibility import unresolved_runtime_predicate
         query = select(ExtractionJob.id).where(RetrieverService._runtime_job_predicate(),
-            ExtractionJob.runtime_applied_at.is_(None), ExtractionJob.tenant_id == sql_scope.tenant_id,
+            ExtractionJob.runtime_hold_released_at.is_(None),
+            unresolved_runtime_predicate(), ExtractionJob.tenant_id == sql_scope.tenant_id,
             ExtractionJob.proxy_user_id == sql_scope.proxy_id)
         plan = session.execute(text("EXPLAIN " + str(query.compile(compile_kwargs={"literal_binds": True})))).scalars().all()
-        assert "ix_extraction_jobs_runtime_pending" in " ".join(plan)
+        assert "ix_extraction_jobs_runtime_visibility" in " ".join(plan), plan
 
 
 @pytest.mark.parametrize("quota_mode", ["FULL", "BLOCKED", "PASSTHROUGH"])

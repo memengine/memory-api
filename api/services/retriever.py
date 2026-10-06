@@ -42,6 +42,7 @@ from api.services.preference_claim_service import (
 )
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
+from api.services.runtime_fact_visibility import unresolved_runtime_predicate
 from api.services.runtime_preference_routing import target_release_enabled
 from api.services.runtime_withholding import RuntimeHold, read_runtime_hold
 from api.tasks.retrieval_tasks import update_memory_accesses
@@ -246,12 +247,13 @@ class RetrieverService:
             ExtractionJob.tenant_id == self._as_uuid(tenant_id),
             ExtractionJob.proxy_user_id == self._as_uuid(owner), self._runtime_job_predicate(),
         )
-        pending = routed.where(ExtractionJob.runtime_applied_at.is_(None))
+        pending = routed.where(unresolved_runtime_predicate())
         if target_release_enabled(tenant_id):
             pending = pending.where(ExtractionJob.runtime_hold_released_at.is_(None))
         unavailable = pending.where(or_(
             ExtractionJob.status.in_([ExtractionJobStatus.failed, ExtractionJobStatus.dead]),
             ExtractionJob.payload_redacted_at.is_not(None),
+            ExtractionJob.runtime_applied_at.is_not(None),
         ))
         return (await self.session.execute(select(pending.exists(), unavailable.exists(), routed.exists()).where(
             ProxyUser.id == self._as_uuid(owner), ProxyUser.tenant_id == self._as_uuid(tenant_id),

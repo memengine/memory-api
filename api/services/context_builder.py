@@ -56,7 +56,7 @@ class ContextBuilder:
         selected, dropped = self._prepare_memories(memories if partial else [])
         notice = ("MemoryOS has withheld " + ("affected context" if partial else "learned context")
             + " while a user update is "
-            + ("processing." if visibility.state == "processing" else "unavailable for processing.")
+            + ("processing." if visibility.state == "processing" else "not yet resolved safely.")
             + " Do not present a withheld stored value as current. "
             "This status is not a request for user clarification.")
         def render():

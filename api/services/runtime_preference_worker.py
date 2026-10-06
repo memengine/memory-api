@@ -181,6 +181,10 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
         job.runtime_route = RUNTIME_ROUTE
         if record.state == "applied":
             job.runtime_applied_at = job.runtime_applied_at or datetime.now(UTC)
+            from sqlalchemy.orm import object_session
+
+            from api.services.runtime_fact_visibility import project_fact_visibility
+            project_fact_visibility(object_session(job), job, record)
 
     def _validate_source(self, session, job):
         binding = _conversation_source_binding(session, job, lock=True)
@@ -209,7 +213,8 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
 
     def _owned_job(self, session, **args):
         job, messages = super()._owned_job(session, **args)
-        if job.status == ExtractionJobStatus.dead and session.get(RuntimeJobReconciliation, job.id) is not None:
+        diagnosis = session.get(RuntimeJobReconciliation, job.id) if job.status == ExtractionJobStatus.dead else None
+        if diagnosis is not None and diagnosis.record_json.get("outcome") != "residual_fact_hold":
             raise PreferenceAdmissionUnavailable("runtime_job_quarantined")
         tenant = session.get(Tenant, job.tenant_id, populate_existing=True)
         if tenant is None or not tenant.is_active:
@@ -229,7 +234,8 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
             if record is None:
                 raise PreferenceAdmissionUnavailable("admission_capture_missing")
             self._check(session, job, messages, record, record.snapshot.catalog)
-            if job.runtime_route is None or (record.state == "applied" and job.runtime_applied_at is None):
+            if job.runtime_route is None or (record.state == "applied" and (
+                job.runtime_applied_at is None or job.runtime_visibility_finalized_at is None)):
                 # Validate old captures fully before projecting a receipt.
                 self._write(job, record)
             return record, messages

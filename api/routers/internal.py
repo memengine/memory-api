@@ -2261,8 +2261,10 @@ async def retry_dead_letter_job(
     if job is None or job.status != ExtractionJobStatus.dead:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dead_letter_job_not_found")
     runtime = has_runtime_guard(job)
-    if runtime and await session.get(RuntimeJobReconciliation, job.id) is not None:
-        raise HTTPException(status_code=409, detail="runtime_job_quarantined")
+    if runtime:
+        diagnosis = await session.get(RuntimeJobReconciliation, job.id)
+        if diagnosis is not None and diagnosis.record_json.get("outcome") != "residual_fact_hold":
+            raise HTTPException(status_code=409, detail="runtime_job_quarantined")
     record = None
     retry_reason = (reason or "").strip()
     if runtime:

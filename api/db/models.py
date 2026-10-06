@@ -2796,6 +2796,8 @@ class ExtractionJob(Base):
             "AND octet_length(runtime_withholding_footprint::text) <= 8192)",
             name="ck_runtime_withholding_footprint_bound",
         ),
+        CheckConstraint("runtime_residual_hold IS NULL OR (jsonb_typeof(runtime_residual_hold) = 'object' "
+                        "AND octet_length(runtime_residual_hold::text) <= 8192)", name="ck_runtime_residual_hold_bound"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2829,6 +2831,8 @@ class ExtractionJob(Base):
     runtime_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # A discharged hold is not a successfully applied extraction job.
     runtime_hold_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    runtime_visibility_finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    runtime_residual_hold: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # Minimal frozen target projection, retained independently of raw evidence.
     # Never interpreted as an applied receipt or read-release permission.
     runtime_withholding_footprint: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
@@ -3301,6 +3305,10 @@ Index("ix_extraction_jobs_runtime_pending", ExtractionJob.tenant_id, ExtractionJ
 Index("ix_extraction_jobs_runtime_unreleased", ExtractionJob.tenant_id, ExtractionJob.proxy_user_id,
       postgresql_where=text("(runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256') "
                             "AND runtime_applied_at IS NULL AND runtime_hold_released_at IS NULL"))
+Index("ix_extraction_jobs_runtime_visibility", ExtractionJob.tenant_id, ExtractionJob.proxy_user_id,
+      postgresql_where=text("(runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256') "
+          "AND runtime_hold_released_at IS NULL "
+          "AND (runtime_applied_at IS NULL OR runtime_visibility_finalized_at IS NULL OR runtime_residual_hold IS NOT NULL)"))
 Index("ix_extraction_jobs_payload_retention", ExtractionJob.raw_payload_expires_at)
 Index(
     "ix_extraction_jobs_status_stale_after",

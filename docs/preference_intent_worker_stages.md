@@ -301,7 +301,9 @@ the read transaction before provider work; vector search follows with no held
 SQL connection. Existing model-ID selection and provider routing are unchanged.
 An applied timestamp is only an indexed projection of the private receipt: the
 runtime writer stores it in the same transaction as memory changes and receipt.
-Cache delivery/job completion is not required to release the guard. Empty/partial
+It does not prove unresolved facts are safe to read; the later applied-fact
+visibility stage below retains residual holds. Cache delivery/job completion is
+not a release proof. Empty/partial
 results are possible until replacement facts reach vector ranking; no instant
 vector publication or complete causal fact read is claimed.
 
@@ -645,3 +647,88 @@ proof corruption, backlog progress and index compatibility. Fresh migration and
 downgrade/re-upgrade passed; scoped Ruff and Mypy checks passed. These are local
 controlled-provider results, not GitHub CI, production load measurements or semantic
 holdout accuracy. No paid provider calls, deployment or flag activation occurred.
+
+### Applied processing with unresolved facts
+
+Processing completion is not proof that every fact is resolved. The runtime writer
+now records one backend-produced outcome per non-preference item: `stored`,
+`rejected`, `pending`, or `authority_protected`. Indices, counts and captured
+target versions must match the closed applied receipt. These are actual writer
+outcomes, not model confidence or permission to increase authority.
+
+`runtime_applied_at` continues to mean committed processing. The separate
+`runtime_visibility_finalized_at` means the backend projected those outcomes;
+it does not necessarily clear a hold. `runtime_residual_hold` retains unresolved
+fact targets independently of the original immutable decision footprint.
+
+- A pending exact, unchanged owned fact stays withheld even when the job is
+  completed. With target withholding enabled for the tenant, unrelated eligible
+  context can remain readable.
+- Missing target coverage, incomplete context, or legacy deferred counts without
+  per-item outcomes retain a whole learned-context hold. No guessed successor
+  or timeout clears it.
+- A lower-authority challenge rejected by the existing authority boundary does
+  not hide a higher-authority fact. Both provenance and the claim ledger are
+  checked; no authority is raised.
+- Memory writes, applied receipt, residual projection and its diagnosis/audit
+  commit together. Missing or corrupt residual diagnosis fails closed.
+- A later newly accepted exact correction may discharge a known residual target
+  through the existing gated target-release proof path. An applied replay, review
+  dismissal, rejection or unrelated write does not supply such proof.
+
+The residual diagnosis stores no raw text. Retention can erase private evidence
+without erasing the minimal unresolved hold. Ordinary owner deletion still
+cascades. These changes do not invent a whole-context recovery policy or change
+the current generic preference routing and SDK visibility limitations.
+
+Deployment order: apply `runtime_fact_visibility` and
+`runtime_fact_visibility_index` before API/worker code, with runtime write and
+release flags disabled. The columns are nullable with no implicit historical
+backfill; the residual constraint is NOT VALID, avoiding a historical table scan.
+The concurrent partial index includes unresolved, unreleased jobs; fully released
+backlogs are excluded. Rollback with release disabled remains conservative using
+the existing owner index. Do not downgrade while new instances are running.
+Old code cannot safely interpret the new closed receipt field: keep runtime
+writes disabled during mixed-version rollout and until older workers are drained.
+
+Historical applied jobs without the visibility-finalized marker remain broadly
+withheld until validated metadata repair. Inspect tenant-scoped batches first:
+
+```powershell
+python -m scripts.backfill_runtime_visibility --tenant-id <tenant-uuid> --limit 100
+```
+
+After reviewing the counts, explicitly apply the same batch:
+
+```powershell
+python -m scripts.backfill_runtime_visibility --tenant-id <tenant-uuid> --limit 100 --apply
+```
+
+Use returned `next_id` as `--after-id` for subsequent batches. Each apply batch
+locks at most 100 jobs with NOWAIT and commits atomically. Contention aborts the
+batch for retry. The tool never calls a provider, reclassifies source text, writes
+memories, enrolls a tenant or raises authority. Missing/invalid receipts count as
+`unrecoverable` and stay withheld. Valid legacy deferred receipts still project
+an unknown whole-context hold; repair does not pretend they are resolved.
+
+Local controlled checks use isolated PostgreSQL/Redis and forbid paid providers:
+
+```powershell
+python -m pytest tests/integration/test_runtime_fact_visibility.py tests/integration/test_runtime_pending_visibility.py tests/integration/test_runtime_target_release.py tests/integration/test_runtime_recovery.py tests/integration/test_runtime_footprint_persistence.py tests/integration/test_runtime_preference_worker.py tests/integration/test_preference_fact_transaction.py tests/unit/test_runtime_fact_visibility_contract.py -q
+```
+
+These checks establish storage/read safety, not independent semantic accuracy,
+production latency or a customer launch gate. Generic preference reads, typed SDK
+visibility delivery, current-turn admission order and broader unknown-context
+recovery remain separate release-readiness work.
+
+Local verification on 2026-10-06: 2,623 unit tests passed with four existing
+dependency/cancellation warnings. The final serial PostgreSQL/Redis regression
+run passed 156 checks; after tightening per-item target-to-plan binding, all 25
+focused residual/contract checks passed. Scoped Ruff/Mypy checks, CLI help, and
+fresh migration plus downgrade/re-upgrade passed. Earlier fixture/parser/index
+assertions were corrected without relaxing production authority or holds; a
+global-count test affected by concurrent test runs passed in the serial run.
+These results are local and controlled-provider, not production or semantic
+holdout evidence. Provider spend was $0. No deployment, live backfill or flag
+activation occurred.

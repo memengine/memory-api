@@ -48,6 +48,20 @@ class FactTarget(_Closed):
     version: Version
 
 
+class FactReadOutcome(_Closed):
+    index: int = Field(strict=True, ge=0, le=15)
+    state: Literal["stored", "rejected", "pending", "authority_protected"]
+    target: FactTarget | None
+
+    @model_validator(mode="after")
+    def consistent_target(self):
+        if self.state in {"stored", "rejected"} and self.target is not None:
+            raise ValueError("resolved fact has no residual target")
+        if self.state == "authority_protected" and self.target is None:
+            raise ValueError("authority veto requires a bound target")
+        return self
+
+
 class FactPlan(_Closed):
     target_id: uuid.UUID | None
     action: Literal["UPDATE", "KEEP_BOTH", "REJECT", "pending"]
@@ -66,6 +80,8 @@ class FactPlan(_Closed):
 class FactTransactionReceipt(IntentTransactionReceipt):
     facts_created: int = Field(strict=True, ge=0, le=16)
     facts_rejected: int = Field(strict=True, ge=0, le=16)
+    # Legacy NULL is not per-item proof. This is emitted by apply, never a model.
+    fact_outcomes: tuple[FactReadOutcome, ...] | None = Field(default=None, max_length=16)
 
 
 class FactTransactionRecord(_IntentTransactionRecord):
@@ -88,6 +104,16 @@ class FactTransactionRecord(_IntentTransactionRecord):
             raise ValueError("fact plans require exact captured context")
         if not self.fact_context_complete and self.fact_plans and any(p.action != "pending" for p in self.fact_plans):
             raise ValueError("incomplete fact context cannot authorize writes")
+        if self.receipt is not None and self.receipt.fact_outcomes is not None:
+            outcomes = self.receipt.fact_outcomes
+            bindings = {t.memory_id: t.version for t in self.fact_context}
+            if (tuple(o.index for o in outcomes) != tuple(range(len(self.reply.nonpreferences)))
+                or sum(o.state == "stored" for o in outcomes) != self.receipt.facts_created
+                or sum(o.state == "rejected" for o in outcomes) != self.receipt.facts_rejected
+                or sum(o.state in {"pending", "authority_protected"} for o in outcomes) != self.receipt.deferred_facts
+                or any(o.target is not None and (bindings.get(o.target.memory_id) != o.target.version
+                    or o.target.memory_id != self.fact_plans[o.index].target_id) for o in outcomes)):
+                raise ValueError("fact outcomes do not match the actual receipt")
         return self
 
     def decision_hash(self):
@@ -115,6 +141,13 @@ def _pending(reason: str, target=None) -> FactPlan:
 def _protected(row):
     return row.category == MemoryCategory.preference or bool(
         preference_declaration((row.metadata_json or {}).get("provenance")))
+
+
+def fact_target_authority(session, target, tenant_id):
+    ledger = session.scalar(select(func.max(MemoryClaim.authority_priority)).where(
+        MemoryClaim.active_memory_id == target.id, MemoryClaim.tenant_id == tenant_id,
+        MemoryClaim.proxy_user_id == target.proxy_user_id))
+    return max(ledger or 0, authority_priority((target.metadata_json or {}).get("provenance"), target.category.value))
 
 
 def _targets(session, record):
@@ -157,12 +190,7 @@ class _PreparedFacts(ConflictResolver):
                 return None, self._classifier_failure_decision(
                     conflict_type=ConflictType.UNKNOWN, reason_code="source_target_stale")
             target = current
-            ledger_authority = self.session.scalar(select(func.max(MemoryClaim.authority_priority)).where(
-                MemoryClaim.active_memory_id == current.id,
-                MemoryClaim.tenant_id == self.tenant_id,
-                MemoryClaim.proxy_user_id == current.proxy_user_id))
-            if max(ledger_authority or 0, authority_priority(
-                    (current.metadata_json or {}).get("provenance"), current.category.value)) > 20:
+            if fact_target_authority(self.session, current, self.tenant_id) > 20:
                 decision = self._classifier_failure_decision(
                     conflict_type=ConflictType.UNKNOWN, reason_code="source_authority_insufficient")
                 decision.source_review = review_intent(current)
@@ -286,7 +314,7 @@ class PreferenceFactTransactionService(PreferenceIntentTransactionService):
         return rows if complete and record.fact_context_complete and _bindings(rows) == record.fact_context else None
 
     def _store_nonpreferences(self, resolver, batch, record, context, writer_args, pending, defer):
-        stored, rejected, deferred = [], 0, 0
+        stored, rejected, deferred, outcomes = [], 0, 0, []
         writer = _PreparedFacts(session=resolver.session, qdrant_service=None, embedder=resolver.embedder,
             source_messages=resolver.source_messages, llm_service=resolver.llm_service,
             default_source_conversation_id=record.source_conversation_id,
@@ -294,7 +322,13 @@ class PreferenceFactTransactionService(PreferenceIntentTransactionService):
                 **resolver.provenance_snapshot, "authority_rules": {"default_priority": 20}})
         writer.tenant_id = record.tenant_id
         versions = {item.memory_id: item.version for item in record.fact_context}
-        for memory, plan in zip(batch.nonpreferences, record.fact_plans, strict=True):
+        def pending_outcome(index, target):
+            if (target is None or _protected(target) or target_version(target) != versions.get(target.id)):
+                return FactReadOutcome(index=index, state="pending", target=None)
+            return FactReadOutcome(index=index, state="authority_protected" if fact_target_authority(
+                resolver.session, target, record.tenant_id) > 20 else "pending",
+                target=FactTarget(memory_id=target.id, version=versions[target.id]))
+        for index, (memory, plan) in enumerate(zip(batch.nonpreferences, record.fact_plans, strict=True)):
             writer.last_pending_candidates = []
             if context is None or plan.action == "pending":
                 if context is None:
@@ -306,6 +340,7 @@ class PreferenceFactTransactionService(PreferenceIntentTransactionService):
                 pending.extend(writer.last_pending_candidates)
                 writer.last_pending_candidates = []
                 deferred += 1
+                outcomes.append(pending_outcome(index, target))
                 continue
             writer.plan = plan
             writer.expected_version = versions.get(plan.target_id)
@@ -314,10 +349,14 @@ class PreferenceFactTransactionService(PreferenceIntentTransactionService):
             stored.extend(result)
             pending.extend(writer.last_pending_candidates)
             if result:
+                outcomes.append(FactReadOutcome(index=index, state="stored", target=None))
                 context = [r for r in context if not r.is_archived]
                 context.extend(resolver.session.get(Memory, uuid.UUID(m.id)) for m in result)
             elif writer.last_pending_candidates:
                 deferred += 1
+                outcomes.append(pending_outcome(index, next((r for r in context if r.id == plan.target_id), None)))
             else:
                 rejected += 1
-        return stored, {"facts_created": len(stored), "facts_rejected": rejected, "deferred_facts": deferred}
+                outcomes.append(FactReadOutcome(index=index, state="rejected", target=None))
+        return stored, {"facts_created": len(stored), "facts_rejected": rejected,
+                        "deferred_facts": deferred, "fact_outcomes": tuple(outcomes)}

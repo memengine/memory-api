@@ -4,12 +4,16 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from api.db.models import ExtractionJob, Memory, RuntimeJobReconciliation
-from api.schemas.runtime_reconciliation import RuntimeReconciliationRecord
+from api.schemas.runtime_reconciliation import (
+    RuntimeReconciliationRecord,
+    RuntimeResidualRecord,
+)
 from api.schemas.runtime_target_release import (
     fact_key,
     preference_key,
     read_target_releases,
 )
+from api.services.runtime_fact_visibility import unresolved_runtime_predicate
 from api.services.runtime_preference_footprint import RuntimePreferenceFootprint
 from api.services.runtime_preference_routing import (
     RUNTIME_ROUTE,
@@ -37,17 +41,22 @@ async def read_runtime_hold(session, *, owner, tenant_id, predicate, unavailable
     rows = (await session.execute(select(ExtractionJob.id, ExtractionJob.runtime_route,
         ExtractionJob.runtime_withholding_footprint, RuntimeJobReconciliation.record_json,
         RuntimeJobReconciliation.tenant_id, RuntimeJobReconciliation.proxy_user_id,
-        RuntimeJobReconciliation.release_json).outerjoin(
+        RuntimeJobReconciliation.release_json, ExtractionJob.runtime_applied_at,
+        ExtractionJob.runtime_visibility_finalized_at, ExtractionJob.runtime_residual_hold).outerjoin(
         RuntimeJobReconciliation, RuntimeJobReconciliation.job_id == ExtractionJob.id).where(
         ExtractionJob.tenant_id == tenant_id, ExtractionJob.proxy_user_id == owner,
-        predicate, ExtractionJob.runtime_applied_at.is_(None),
+        predicate, unresolved_runtime_predicate(),
         *([ExtractionJob.runtime_hold_released_at.is_(None)] if target_release_enabled(tenant_id) else []),
     ).limit(MAX_PENDING_FOOTPRINTS + 1))).all()
     # A page cannot prove coverage when more jobs exist. Unknown stays broad.
     if not rows or len(rows) > MAX_PENDING_FOOTPRINTS:
         return RuntimeHold(unavailable=unavailable)
     prefs, facts = set(), {}
-    for job_id, route, raw, reconciled, reconciled_tenant, reconciled_owner, release_json in rows:
+    for job_id, route, raw, reconciled, reconciled_tenant, reconciled_owner, release_json, applied, finalized, residual in rows:
+        if applied is not None:
+            if finalized is None or residual is None or reconciled is None:
+                return RuntimeHold(unavailable=True)  # Historical completion is not resolution proof.
+            raw = residual
         if route != RUNTIME_ROUTE or raw is None:
             return RuntimeHold(unavailable=unavailable)
         try:
@@ -59,10 +68,13 @@ async def read_runtime_hold(session, *, owner, tenant_id, predicate, unavailable
             return RuntimeHold(unavailable=True)
         if reconciled is not None:
             try:
-                record = RuntimeReconciliationRecord.model_validate(reconciled)
+                record = (RuntimeResidualRecord if applied is not None else RuntimeReconciliationRecord).model_validate(reconciled)
                 if (reconciled_tenant != tenant_id or reconciled_owner != owner
                     or record.hold_scope != "affected_context"
                     or record.footprint_sha256 != footprint.projection_sha256):
+                    return RuntimeHold(unavailable=True)
+                if applied is not None and (record.capture_id != footprint.capture_id
+                    or record.decision_sha256 != footprint.decision_sha256):
                     return RuntimeHold(unavailable=True)
             except (TypeError, ValueError):
                 return RuntimeHold(unavailable=True)

@@ -3,7 +3,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from api.db.models import (
     AuditAction,
@@ -15,7 +15,10 @@ from api.db.models import (
     MemoryClaimRevision,
     RuntimeJobReconciliation,
 )
-from api.schemas.runtime_reconciliation import RuntimeReconciliationRecord
+from api.schemas.runtime_reconciliation import (
+    RuntimeReconciliationRecord,
+    RuntimeResidualRecord,
+)
 from api.schemas.runtime_target_release import (
     RuntimeTargetReleases,
     TargetRelease,
@@ -64,27 +67,34 @@ class HeldTargets:
 def prepare_target_releases(session, job, record):
     if not target_release_enabled(job.tenant_id) or record.runtime_source_sha256 is None:
         return ()
-    # Only quarantined, unapplied jobs predating this newly accepted source.
+    # Quarantined work or an applied residual hold predating this source.
     # NOWAIT prevents holding a write transaction behind another recovery action.
     rows = session.execute(select(ExtractionJob.id, ExtractionJob.runtime_route,
-        ExtractionJob.runtime_withholding_footprint, RuntimeJobReconciliation).join(
+        ExtractionJob.runtime_withholding_footprint, RuntimeJobReconciliation,
+        ExtractionJob.runtime_applied_at, ExtractionJob.runtime_residual_hold).join(
         RuntimeJobReconciliation, RuntimeJobReconciliation.job_id == ExtractionJob.id).where(
         ExtractionJob.tenant_id == job.tenant_id, ExtractionJob.proxy_user_id == job.proxy_user_id,
-        ExtractionJob.status == ExtractionJobStatus.dead, ExtractionJob.runtime_applied_at.is_(None),
+        or_(and_(ExtractionJob.status == ExtractionJobStatus.dead, ExtractionJob.runtime_applied_at.is_(None)),
+            and_(ExtractionJob.runtime_applied_at.is_not(None), ExtractionJob.runtime_residual_hold.is_not(None),
+                 ExtractionJob.runtime_visibility_finalized_at.is_not(None))),
         ExtractionJob.runtime_hold_released_at.is_(None), ExtractionJob.created_at < job.created_at,
         RuntimeJobReconciliation.created_at < job.created_at,
     ).limit(MAX_RELEASE_JOBS).with_for_update(of=(ExtractionJob, RuntimeJobReconciliation), nowait=True)).all()
     # Release only proved targets of this page's jobs. Unseen jobs keep their
     # guards; this bounded write page never claims whole-user coverage.
     holds = []
-    for old_id, route, raw, reconciliation in rows:
+    for old_id, route, raw, reconciliation, applied, residual in rows:
         try:
+            if applied is not None:
+                raw = residual
             foot = RuntimePreferenceFootprint.model_validate(raw)
-            diagnosis = RuntimeReconciliationRecord.model_validate(reconciliation.record_json)
+            diagnosis = (RuntimeResidualRecord if applied is not None else RuntimeReconciliationRecord).model_validate(reconciliation.record_json)
             if (route != RUNTIME_ROUTE or foot.coverage != "targets" or foot.job_id != old_id
                 or foot.tenant_id != job.tenant_id or foot.proxy_user_id != job.proxy_user_id
                 or reconciliation.tenant_id != job.tenant_id or reconciliation.proxy_user_id != job.proxy_user_id
                 or diagnosis.hold_scope != "affected_context" or diagnosis.footprint_sha256 != foot.projection_sha256):
+                continue
+            if applied is not None and (diagnosis.capture_id != foot.capture_id or diagnosis.decision_sha256 != foot.decision_sha256):
                 continue
             releases = read_target_releases(reconciliation.release_json, foot)
         except (TypeError, ValueError):
@@ -186,7 +196,7 @@ def commit_target_releases(session, job, record, holds, batch, stored, reaffirma
         if complete:
             session.execute(update(ExtractionJob).where(ExtractionJob.id == foot.job_id,
                 ExtractionJob.tenant_id == job.tenant_id, ExtractionJob.proxy_user_id == job.proxy_user_id,
-                ExtractionJob.runtime_applied_at.is_(None)).values(runtime_hold_released_at=datetime.now(UTC)))
+                ExtractionJob.runtime_hold_released_at.is_(None)).values(runtime_hold_released_at=datetime.now(UTC)))
     # The audit flush and later receipt write must both succeed before commit.
     session.flush()
     return len(reaffirmations)
