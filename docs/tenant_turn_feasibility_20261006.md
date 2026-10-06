@@ -126,3 +126,11 @@ are retained. SHA-256:
 
 Disposable test containers/data were removed after completion. The preserved
 JSON outcome artifact and this report remain available for review.
+
+## Separate follow-up
+
+[One fresh observed rejection](tenant_turn_rejection_20261006.md) captured the
+raw provider response and exact exception chain. It confirms recall incorrectly
+proposed as reaffirmation, with a stored value not present in user evidence, for
+that new case. It does not retroactively identify all earlier rejection causes,
+change this batch's results, or reverse the wait-only NO-GO decision.
