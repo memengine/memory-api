@@ -73,6 +73,7 @@ class GateResult:
     reason: str | None
     retry_after_seconds: int | None = None
     budget_remaining_pct: float | None = None
+    estimated_tokens: int = 0
 
 
 class QualityGateService:
@@ -109,6 +110,7 @@ class QualityGateService:
         external_user_id: str,
         *,
         semantic_deduplication: bool = True,
+        turn_admission: bool = False,
     ) -> GateResult:
         quality_score = 0.0
         semantic_similarity: float | None = None
@@ -138,8 +140,8 @@ class QualityGateService:
                     budget_remaining_pct=budget_remaining_pct,
                 )
 
-            quality_score = self._conversation_quality_score(messages)
-            if quality_score < QUALITY_SCORE_THRESHOLD:
+            quality_score = self._conversation_quality_score(messages) if not turn_admission else 0.0
+            if not turn_admission and quality_score < QUALITY_SCORE_THRESHOLD:
                 blocked_layer = CallQualityBlockedLayer.l2
                 gate_reason = "low_quality"
                 return GateResult(
@@ -149,7 +151,7 @@ class QualityGateService:
                     budget_remaining_pct=budget_remaining_pct,
                 )
 
-            if semantic_deduplication:
+            if semantic_deduplication and not turn_admission:
                 semantic_similarity = await self._semantic_deduplication(
                     messages=messages,
                     tenant_id=tenant_id,
@@ -172,6 +174,7 @@ class QualityGateService:
                 messages=messages,
                 tenant_id=tenant_id,
                 tenant_budget=tenant_budget,
+                **({"dispatch_notifications": False} if turn_admission else {}),
             )
             if not budget_decision.passed:
                 blocked_layer = CallQualityBlockedLayer.l4
@@ -184,15 +187,17 @@ class QualityGateService:
                 )
 
             await self._increment_rate_counter(rate_key)
-            await self.budget_governor.dispatch_usage_increment(
-                tenant_id,
-                budget_decision.estimated_tokens,
-            )
+            if not turn_admission:
+                await self.budget_governor.dispatch_usage_increment(
+                    tenant_id,
+                    budget_decision.estimated_tokens,
+                )
             return GateResult(
                 passed=True,
                 blocked_layer=None,
                 reason=None,
                 budget_remaining_pct=budget_decision.budget_remaining_pct,
+                estimated_tokens=budget_decision.estimated_tokens,
             )
         except Exception:
             LOGGER.exception("Quality gate failed for tenant %s", tenant_id)

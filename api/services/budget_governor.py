@@ -56,6 +56,7 @@ class BudgetGovernor:
         messages: list[dict[str, Any]],
         tenant_id: str,
         tenant_budget: TenantBudget | None = None,
+        dispatch_notifications: bool = True,
     ) -> BudgetDecision:
         budget = tenant_budget or await self.get_tenant_budget(tenant_id)
         estimated_tokens = self.estimate_tokens(messages)
@@ -90,7 +91,7 @@ class BudgetGovernor:
         remaining_pct = max(0.0, round(1.0 - usage_pct, 4))
         should_alert = usage_pct >= float(budget.alert_threshold_pct or 0.8)
 
-        if should_alert:
+        if should_alert and dispatch_notifications:
             await self._dispatch(
                 ALERT_BUDGET_TASK_NAME,
                 [tenant_id, usage_pct, estimated_tokens],

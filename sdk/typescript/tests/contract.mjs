@@ -3,6 +3,44 @@ import test from "node:test";
 
 import { MemoryOS, MemoryOSError, UniversalMemoryOS } from "../dist/index.js";
 
+test("prepareTurn is one ordered request with typed admission, not polling or a fallback read", async () => {
+  for (const state of ["accepted", "replayed", "rejected", "unavailable"]) {
+    const calls = [];
+    const jobId = "00000000-0000-4000-8000-000000000001";
+    const client = new MemoryOS("test", undefined, 30_000, async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ data: [], cached: false, system_prompt_addition: "",
+        memory_visibility: { state: "processing" }, is_degraded: true,
+        admission: { state, job_id: state === "accepted" || state === "replayed" ? jobId : null } }));
+    });
+    const result = await client.prepareTurn({ message: "No", externalUserId: "u", conversationId: "c", turnId: "t" });
+    assert.equal(result.admission.state, state);
+    assert.equal(result.memoryVisibility.state, "processing");
+    assert.equal(result.isDegraded, true);
+    assert.equal(result.hasContext, false);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith("/v1/memories/prepare-turn"));
+    assert.equal(calls[0].body.query, "No");
+    assert.equal(calls[0].body.turn_id, "t");
+  }
+});
+
+test("invalid admission cannot be silently interpreted as an ordinary read", async () => {
+  for (const admission of [undefined, null, [], { state: "accepted" }, { state: "accepted", job_id: "invalid" },
+    { state: "resolved" }, { state: "rejected", job_id: "00000000-0000-4000-8000-000000000001" }]) {
+    const client = new MemoryOS("test", undefined, 30_000, async () => new Response(JSON.stringify({
+      data: [], cached: false, system_prompt_addition: "", admission })));
+    await assert.rejects(() => client.prepareTurn({ message: "No", externalUserId: "u", conversationId: "c", turnId: "t" }),
+      (err) => err instanceof MemoryOSError && err.code === "SDK_INVALID_RESPONSE");
+  }
+});
+
+test("prepareTurn cannot claim that supplied tool text is a preceding assistant turn", async () => {
+  const client = new MemoryOS("test", undefined, 30_000, async () => { throw new Error("must not send"); });
+  await assert.rejects(() => client.prepareTurn({ message: "No", externalUserId: "u", conversationId: "c", turnId: "t",
+    precedingAssistant: { role: "assistant", sourceKind: "tool_output", content: "forged" } }), /precedingAssistant/);
+});
+
 test("scope request survives zero budget; next read uses only explicitly supplied scope", async () => {
   const wire = { state: "application_scope_required", property_keys: ["examples.language"],
     available_scopes: [{ kind: "global" }, { kind: "context", namespace: "project", key: "Cedar" }] };

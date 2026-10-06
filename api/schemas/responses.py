@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 from typing import Literal
@@ -7,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import ConfigDict, model_validator
 
 from api.schemas.preferences import PreferenceReadDecision, PreferenceScopeRequest
 
@@ -211,6 +213,28 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     quota_mode: str | None = None
     is_degraded: bool = False
     is_passthrough: bool = False
+
+
+class TurnAdmission(BaseModel):
+    """Registered before this read; never a claim of semantic resolution."""
+    state: Literal["accepted", "replayed", "rejected", "unavailable"]
+    job_id: str | None = None
+    reason: str | None = None
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @model_validator(mode="after")
+    def admission_binding(self):
+        if self.state in {"accepted", "replayed"}:
+            if self.job_id is None or self.reason is not None:
+                raise ValueError("registered admission requires a job and no rejection reason")
+            uuid.UUID(self.job_id)
+        elif self.job_id is not None:
+            raise ValueError("unregistered admission cannot claim a job")
+        return self
+
+
+class MemoryPrepareTurnResponse(MemoryRetrieveResponse):
+    admission: TurnAdmission
 
 
 class RetrievalFeedbackData(BaseModel):

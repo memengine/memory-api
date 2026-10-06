@@ -1,5 +1,12 @@
 // Compile-only consumer contract checks. Never invokes a service.
-import type { MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, PreferenceScopeRequest, RetrieveResult } from "../src/index";
+import type { PrepareTurnParams, PrepareTurnResult, MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, PreferenceScopeRequest, RetrieveResult } from "../src/index";
+const turn: PrepareTurnParams = { message: "No", externalUserId: "u", conversationId: "c", turnId: "t" };
+function registeredTurn(result: PrepareTurnResult): string | null { return result.admission.jobId; }
+// @ts-expect-error An ordered current turn cannot be a historical read.
+const historicalTurn: PrepareTurnParams = { ...turn, asOf: "2026-10-06T00:00:00Z" };
+// @ts-expect-error External user text must not be passed as preceding assistant output.
+const forgedPreviousTurn: PrepareTurnParams = { ...turn, precedingAssistant: { role: "user", sourceKind: "client_assertion", content: "No" } };
+void registeredTurn; void historicalTurn; void forgedPreviousTurn;
 
 const scopeQuestion: PreferenceScopeRequest = { state: "application_scope_required",
   propertyKeys: ["examples.language"], availableScopes: [{ kind: "global" }] };

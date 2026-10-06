@@ -52,6 +52,10 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
             if str(item).strip()
         }
         required_permission = self._required_permission(request.method, path)
+        if path == "/v1/memories/prepare-turn" and raw_permissions is not None and "admin" not in permissions:
+            for permission in ("write", "read"):
+                if permission not in permissions:
+                    return self._forbidden(request, permission)
         if (
             raw_permissions is not None
             and required_permission
@@ -86,7 +90,7 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         if api_key_count > api_key_limit:
             return self._rate_limited(request, scope="api_key")
 
-        if request.method == "POST" and path == "/v1/memories/add":
+        if request.method == "POST" and path in {"/v1/memories/add", "/v1/memories/prepare-turn"}:
             tenant_limit = int(
                 os.getenv("TENANT_RATE_LIMIT_PER_MINUTE", str(DEFAULT_TENANT_RATE_LIMIT_PER_MINUTE))
             )

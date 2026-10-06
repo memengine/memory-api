@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from api.schemas.preferences import PreferenceClaimRequest, PreferenceReadContext
 
 MemoryCategory = Literal[
@@ -141,6 +141,39 @@ class MemoryRetrieveRequest(BaseModel):
             raise ValueError("as_of must include a timezone")
         return value
     context_max_tokens: int = Field(default=500, ge=50, le=4000)
+
+
+class MemoryPrepareTurnRequest(MemoryRetrieveRequest):
+    """Explicit write-before-read operation, not a historical or agent read."""
+    model_config = ConfigDict(extra="forbid")
+    conversation_id: str = Field(min_length=1, max_length=255)
+    turn_id: str = Field(min_length=1, max_length=255)
+    message: str = Field(min_length=1, max_length=16_000)
+    preceding_assistant: ConversationMessageRequest | None = None
+
+    @field_validator("message", "conversation_id", "turn_id")
+    @classmethod
+    def nonempty_turn_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("turn text and identifiers must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def current_user_turn(self):
+        if self.as_of is not None or self.agent_id is not None:
+            raise ValueError("turn preparation requires a current, non-agent tenant read")
+        previous = self.preceding_assistant
+        if previous is not None and (previous.role != "assistant" or previous.source_kind != "assistant_output"):
+            raise ValueError("preceding_assistant must be assistant output, never user/tool evidence")
+        return self
+
+    def transcript(self) -> list[dict[str, Any]]:
+        previous = [self.preceding_assistant.model_dump(mode="json")] if self.preceding_assistant else []
+        return previous + [{"role": "user", "content": self.message.strip(),
+            "external_turn_id": self.turn_id, "source_kind": "client_assertion"}]
+
+    def retrieval_request(self) -> MemoryRetrieveRequest:
+        return MemoryRetrieveRequest.model_validate(self.model_dump(include=set(MemoryRetrieveRequest.model_fields)))
 
 
 class MemorySourceReviewAnswerRequest(BaseModel):

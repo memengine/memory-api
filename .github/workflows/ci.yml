@@ -110,6 +110,7 @@ jobs:
           tests/integration/test_runtime_preference_worker.py
           tests/integration/test_source_review_query_plans.py
           tests/integration/test_retrieval_cache_currentness_postgres.py
+          tests/integration/test_turn_preparation.py
           -v --tb=short
 
       - name: Run blocking FAST benchmark regression gate

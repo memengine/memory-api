@@ -38,6 +38,9 @@ from memoryos.types import (
     RetrievalFeedbackResult,
     RetrieveEnvelope,
     RetrieveResult,
+    PrepareTurnResult,
+    PrepareTurnEnvelope,
+    prepare_turn_body,
 )
 
 
@@ -206,7 +209,10 @@ class AsyncMemory:
             "/v1/memories/retrieve",
             json=body,
         )
-        parsed = RetrieveEnvelope.model_validate(self._parse_json(response))
+        return self._retrieve_result(response)
+
+    def _retrieve_result(self, response: httpx.Response, parsed: RetrieveEnvelope | None = None) -> RetrieveResult:
+        parsed = parsed or RetrieveEnvelope.model_validate(self._parse_json(response))
         quota_mode = parsed.quota_mode or self._quota_mode_from_response(response)
         return RetrieveResult(
             retrieval_id=parsed.retrieval_id,
@@ -226,6 +232,23 @@ class AsyncMemory:
             preference_scope_request=parsed.preference_scope_request,
             memory_visibility=parsed.memory_visibility,
         )
+
+    async def prepare_turn(
+        self, message: str, external_user_id: str, *, conversation_id: str, turn_id: str,
+        query: str | None = None, preceding_assistant: ConversationMessage | dict[str, Any] | None = None,
+        limit: int = 10, categories: list[str] | None = None, time_filter_days: int | None = None,
+        format: str = "bullets", context_max_tokens: int = 500,
+        preference_context: PreferenceReadContext | dict[str, Any] | None = None,
+    ) -> PrepareTurnResult:
+        """Register this exact turn before retrieval; never poll or infer its meaning."""
+        body = prepare_turn_body(message=message, external_user_id=external_user_id,
+            conversation_id=conversation_id, turn_id=turn_id, query=query,
+            preceding_assistant=preceding_assistant, preference_context=preference_context,
+            limit=limit, categories=categories or [], format=format, context_max_tokens=context_max_tokens,
+            **({"time_filter_days": time_filter_days} if time_filter_days is not None else {}))
+        response = await self._request_response("POST", "/v1/memories/prepare-turn", json=body)
+        parsed = PrepareTurnEnvelope.model_validate(self._parse_json(response))
+        return PrepareTurnResult(**self._retrieve_result(response, parsed).model_dump(), admission=parsed.admission)
 
     async def get_job_status(self, job_id: str) -> MemoryJobStatus:
         """Return the current state of an asynchronous extraction job."""

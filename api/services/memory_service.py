@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import uuid
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
-from typing import Awaitable
 from typing import Callable
 
 from sqlalchemy import func
@@ -57,7 +57,8 @@ from api.settings import get_settings
 
 EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
 DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
-DispatchTask = Callable[[str, list[Any]], Awaitable[Any] | Any]
+# Celery transport accepts args/queue keywords and may return an awaitable.
+DispatchTask = Callable[..., Any]
 LOGGER = logging.getLogger("memoryos.memory_service")
 
 
@@ -173,6 +174,7 @@ class MemoryService:
         conversation_id: str | None = None,
         trusted_submission_kind: str | None = None,
         preference_claims: list[dict[str, Any]] | None = None,
+        turn_preparation: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if preference_claims is not None:
             from api.services.preference_claim_service import declared_preferences
@@ -237,8 +239,8 @@ class MemoryService:
             if cached_job is not None:
                 return cached_job
 
-        job_id = str(uuid.uuid4())
-        job = {
+        job_id = turn_preparation["job_id"] if turn_preparation is not None else str(uuid.uuid4())
+        job: dict[str, Any] = {
             "job_id": job_id,
             "status": "queued",
             "memories_created": 0,
@@ -253,6 +255,8 @@ class MemoryService:
         }
         if conversation_id:
             job["external_conversation_id"] = conversation_id
+        if turn_preparation is not None:
+            job["turn_preparation_sha256"] = turn_preparation["sha256"]
         if preference_claims is not None:
             job["preference_claims"] = preference_claims
             evidence_mode = "client_assertion"
@@ -310,6 +314,8 @@ class MemoryService:
             }
             if trusted_evidence_policy is not None:
                 job["source"]["trusted_evidence_policy"] = trusted_evidence_policy
+        if turn_preparation is not None and conversation_ingestion_sha256(job) is None:
+            raise APIError(status_code=409, code="TURN_409", error="turn_ingestion_ineligible")
         if tenant_id:
             reservation = await self.queue_router.reserve_extraction_slot(
                 tenant_id=tenant_id,
@@ -342,6 +348,8 @@ class MemoryService:
                     job_id=job["job_id"],
                 )
             return persisted_job
+        if turn_preparation is not None:
+            return job  # Committed admission; transport/cache work is not acknowledgement proof.
         await self.cache_service.set_job_status(job["job_id"], _job_status_snapshot(job), ttl=3600)
         if idempotency_key:
             await self.cache_service.set_idempotent_response(
@@ -369,6 +377,39 @@ class MemoryService:
                 )
             await self.cache_service.set_job_status(job["job_id"], _job_status_snapshot(job), ttl=3600)
         return job
+
+    async def prepared_turn_identity(
+        self, *, tenant_id: str, proxy_user_id: str, conversation_id: str, turn_id: str,
+        messages: list[dict[str, Any]],
+    ) -> tuple[dict[str, str], dict[str, Any] | None]:
+        identity = json.dumps(["turn-preparation-v1", tenant_id, proxy_user_id, conversation_id, turn_id],
+                              ensure_ascii=False, separators=(",", ":"))
+        job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+        binding = hashlib.sha256(json.dumps({"identity": identity, "messages": messages},
+            ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+        # Serialize this exact turn, without an unbounded wait or duplicate queue reservation.
+        lock_key = int.from_bytes(uuid.UUID(job_id).bytes[:8], signed=True)
+        if not await self.session.scalar(select(func.pg_try_advisory_xact_lock(lock_key))):
+            raise APIError(status_code=409, code="TURN_409", error="turn_admission_in_progress")
+        existing = await self._prepared_turn_replay(job_id, tenant_id, proxy_user_id, binding)
+        return {"job_id": job_id, "sha256": binding}, existing
+
+    async def _prepared_turn_replay(
+        self, job_id: str, tenant_id: str, owner: str, binding: str,
+    ) -> dict[str, Any] | None:
+        row = await self.session.get(ExtractionJob, uuid.UUID(job_id), populate_existing=True)
+        if row is None:
+            return None
+        event = await self.session.get(MemorySourceEvent, row.source_event_id) if row.source_event_id else None
+        if (str(row.tenant_id) != tenant_id or str(row.proxy_user_id) != owner or event is None
+            or event.tenant_id != row.tenant_id or event.proxy_user_id != row.proxy_user_id
+            or (event.processing_metadata or {}).get("turn_preparation_sha256") != binding):
+            raise APIError(status_code=409, code="TURN_409", error="turn_payload_mismatch")
+        if row.runtime_route != RUNTIME_ROUTE:
+            raise APIError(status_code=409, code="TURN_409", error="turn_guard_unavailable")
+        replay = self._job_payload_with_live_status(row)
+        replay["turn_preparation_replayed"] = True
+        return replay
 
     async def list_memories(
         self,
@@ -958,6 +999,8 @@ class MemoryService:
             if conversation_ingestion_sha256(job) is not None and runtime_enabled(tenant_id):
                 runtime_catalog(await self.session.get(Tenant, uuid.UUID(str(tenant_id))))
                 runtime_route = RUNTIME_ROUTE
+            if "turn_preparation_sha256" in job and runtime_route != RUNTIME_ROUTE:
+                raise APIError(status_code=409, code="TURN_409", error="turn_guard_unavailable")
             source_event: MemorySourceEvent | None = None
             if source:
                 source_event = MemorySourceEvent(
@@ -983,6 +1026,8 @@ class MemoryService:
                             if (binding := conversation_ingestion_sha256(job)) is not None
                             else {}
                         ),
+                        **({"turn_preparation_sha256": job["turn_preparation_sha256"]}
+                           if "turn_preparation_sha256" in job else {}),
                         **(
                             {"trusted_evidence_policy": dict(source["trusted_evidence_policy"])}
                             if isinstance(source.get("trusted_evidence_policy"), dict)
@@ -1034,6 +1079,11 @@ class MemoryService:
             return job, True
         except IntegrityError:
             await self.session.rollback()
+            if "turn_preparation_sha256" in job:
+                replay = await self._prepared_turn_replay(job["job_id"], str(tenant_id), str(proxy_user_id),
+                                                         job["turn_preparation_sha256"])
+                if replay is not None:
+                    return replay, False
             if not source:
                 raise
             existing_event = (
@@ -1200,15 +1250,7 @@ class MemoryService:
         if self.dispatch_task is None:
             return None
         try:
-            queue_name = job.get("queue_name")
-            dispatched = await asyncio.to_thread(
-                self.dispatch_task,
-                EXTRACTION_TASK_NAME,
-                args=[_compact_task_payload(job)],
-                queue=queue_name,
-            )
-            if dispatched is not None and hasattr(dispatched, "__await__"):
-                dispatched = await dispatched
+            dispatched = await self._send_extraction_task(job)
             task_id = str(getattr(dispatched, "id", "") or "").strip()
             if task_id:
                 try:
@@ -1232,6 +1274,20 @@ class MemoryService:
             return None
         except Exception:
             return "dispatch_failed"
+
+    async def _send_extraction_task(self, job: dict[str, Any]) -> Any:
+        if self.dispatch_task is None:
+            return None
+        dispatched = await asyncio.to_thread(self.dispatch_task, EXTRACTION_TASK_NAME,
+            args=[_compact_task_payload(job)], queue=job.get("queue_name"))
+        return await dispatched if hasattr(dispatched, "__await__") else dispatched
+
+    async def dispatch_prepared_turn(self, job: dict[str, Any]) -> None:
+        # No request-session access. The existing watchdog recovers unleased queued jobs.
+        try:
+            await self._send_extraction_task(job)
+        except Exception:
+            LOGGER.exception("prepared_turn_dispatch_unavailable job_id=%s", job["job_id"])
 
     async def _embed_content(self, content: str) -> EmbeddingResult:
         try:

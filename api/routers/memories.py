@@ -7,9 +7,10 @@ import time
 import uuid
 from datetime import UTC
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter
+from fastapi import BackgroundTasks
 from fastapi import Depends
 from fastapi import Header
 from fastapi import Query
@@ -45,6 +46,7 @@ from api.schemas.requests import MemoryAddRequest
 from api.schemas.requests import MemoryClarificationAnswerRequest
 from api.schemas.requests import MemorySourceReviewAnswerRequest
 from api.schemas.requests import MemoryRetrieveRequest
+from api.schemas.requests import MemoryPrepareTurnRequest
 from api.schemas.requests import MemoryUpdateRequest
 from api.schemas.requests import RetrievalFeedbackRequest
 from api.schemas.responses import CursorPage
@@ -62,6 +64,7 @@ from api.schemas.responses import MemoryJobStatusResponse
 from api.schemas.responses import MemoryListResponse
 from api.schemas.responses import MemoryMutationResponse
 from api.schemas.responses import MemoryRetrieveResponse
+from api.schemas.responses import MemoryPrepareTurnResponse, MemoryVisibility, TurnAdmission
 from api.schemas.responses import MemorySearchResult
 from api.schemas.responses import MemorySourceReviewAnswerData
 from api.schemas.responses import MemorySourceReviewAnswerResponse
@@ -75,6 +78,8 @@ from api.services.context_builder import ContextBuilder
 from api.services.conflict_resolution_service import apply_conflict_selection
 from api.services.domain_schemas.registry import get_domain_schema
 from api.services.memory_service import MemoryService
+from api.services.runtime_preference_routing import runtime_enabled
+from api.services.preference_intent_admission_service import PreferenceAdmissionUnavailable
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quality_gate import QualityGateService
 from api.services.retriever import RetrieverService
@@ -313,6 +318,10 @@ async def add_memories(
     request.state.proxy_user_id = str(proxy_user.id)
 
     queue_started = time.perf_counter()
+    preference_options: dict[str, Any] = (
+        {"preference_claims": [c.model_dump(mode="json", exclude_none=True) for c in payload.preference_claims]}
+        if payload.preference_claims is not None else {}
+    )
     job = await memory_service.queue_memory_add(
         requested_user_id=None,
         authenticated_user_id=None,
@@ -328,7 +337,7 @@ async def add_memories(
         evidence_mode=payload.evidence_mode,
         conversation_id=payload.conversation_id,
         trusted_submission_kind=trusted_submission_kind,
-        **({"preference_claims": [c.model_dump(mode="json", exclude_none=True) for c in payload.preference_claims]} if payload.preference_claims is not None else {}),
+        **preference_options,
     )
     queue_ms = (time.perf_counter() - queue_started) * 1000
     if job.get("status") != "queued":
@@ -375,6 +384,83 @@ async def add_memories(
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
+
+
+async def _dispatch_turn_usage(gate: QualityGateService, tenant_id: str, estimated_tokens: int) -> None:
+    # Background delivery uses no request DB session and never changes admission/authority.
+    dispatcher = gate.budget_governor.dispatch_task
+    if dispatcher is None:
+        return
+    from api.services.budget_governor import INCREMENT_BUDGET_TASK_NAME
+    try:
+        result = await asyncio.to_thread(dispatcher, INCREMENT_BUDGET_TASK_NAME, [tenant_id, estimated_tokens])
+        if result is not None and hasattr(result, "__await__"):
+            await result
+    except Exception:
+        logger.exception("prepared_turn_usage_dispatch_unavailable tenant_id=%s", tenant_id)
+
+
+@router.post("/prepare-turn", response_model=MemoryPrepareTurnResponse)
+async def prepare_memory_turn(
+    request: Request, payload: MemoryPrepareTurnRequest, background: BackgroundTasks,
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    retriever_service: Annotated[RetrieverService, Depends(get_retriever_service)],
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    quality_gate_service: Annotated[QualityGateService, Depends(get_quality_gate_service)],
+    context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
+    cache_service: Annotated[CacheService, Depends(get_cache_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+) -> MemoryPrepareTurnResponse:
+    if not get_settings().runtime_turn_preparation_enabled or not runtime_enabled(tenant_id):
+        raise APIError(status_code=409, code="TURN_409", error="turn_preparation_unavailable")
+
+    def withheld(admission: TurnAdmission) -> MemoryPrepareTurnResponse:
+        visibility = MemoryVisibility(state="unavailable")
+        context = context_builder.build_guarded([], visibility=visibility,
+            format=payload.format, max_tokens=payload.context_max_tokens)
+        return MemoryPrepareTurnResponse(admission=admission, data=[], cached=False,
+            system_prompt_addition=context.system_prompt_addition, context_token_count=context.token_count,
+            memory_visibility=visibility, is_degraded=True, request_id=get_request_id(request), timestamp=utc_now())
+
+    proxy = await proxy_user_service.resolve(tenant_id=tenant_id, external_user_id=payload.external_user_id)
+    request.state.proxy_user_id = str(proxy.id)
+    messages = payload.transcript()
+    # No quality/semantic filtering: registration of a turn is not a memory-value decision.
+    gate = await quality_gate_service.check(messages, tenant_id, payload.external_user_id,
+        semantic_deduplication=False, turn_admission=True)
+    if not gate.passed:
+        return withheld(TurnAdmission(state="unavailable" if gate.reason == "internal_error" else "rejected",
+                                      reason=gate.reason))
+    try:
+        identity, existing = await memory_service.prepared_turn_identity(tenant_id=tenant_id,
+            proxy_user_id=str(proxy.id), conversation_id=payload.conversation_id,
+            turn_id=payload.turn_id, messages=messages)
+        job = existing or await memory_service.queue_memory_add(requested_user_id=None,
+            authenticated_user_id=None, agent_id=None, messages=messages, metadata={}, idempotency_key=None,
+            tenant_id=tenant_id, external_user_id=payload.external_user_id, proxy_user_id=str(proxy.id),
+            api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
+            conversation_id=payload.conversation_id, turn_preparation=identity)
+    except PreferenceAdmissionUnavailable:
+        await session.rollback()
+        return withheld(TurnAdmission(state="unavailable", reason="turn_catalog_unavailable"))
+    if job.get("job_id") is None:
+        await session.rollback()
+        return withheld(TurnAdmission(state="rejected", reason=job.get("blocked_reason") or job["status"]))
+    replayed = bool(job.get("turn_preparation_replayed"))
+    admission = TurnAdmission(state="replayed" if replayed else "accepted", job_id=job["job_id"])
+    if not replayed:
+        background.add_task(memory_service.dispatch_prepared_turn, job)
+        background.add_task(_dispatch_turn_usage, quality_gate_service, tenant_id, gate.estimated_tokens)
+    # This is the existing read/formatter, after admission's commit. No worker/provider wait.
+    try:
+        result = await retrieve_memories(request, payload.retrieval_request(), retriever_service,
+            proxy_user_service, context_builder, cache_service, session, tenant_id)
+    except Exception:
+        await session.rollback()
+        logger.exception("prepared_turn_context_unavailable tenant_id=%s job_id=%s", tenant_id, job["job_id"])
+        return withheld(admission)
+    return MemoryPrepareTurnResponse(**result.model_dump(), admission=admission)
 
 
 @router.post("/retrieve", response_model=MemoryRetrieveResponse)

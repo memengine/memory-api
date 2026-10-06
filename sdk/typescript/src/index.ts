@@ -300,6 +300,22 @@ export interface GetParams {
   preferenceContext?: PreferenceReadContext;
 }
 
+export interface PrepareTurnParams extends Omit<GetParams, "query" | "asOf" | "agentId"> {
+  message: string;
+  conversationId: string;
+  turnId: string;
+  query?: string;
+  precedingAssistant?: ConversationMessage & { role: "assistant"; sourceKind: "assistant_output" };
+}
+
+export interface TurnAdmission {
+  state: "accepted" | "replayed" | "rejected" | "unavailable";
+  jobId: string | null;
+  reason: string | null;
+}
+
+export interface PrepareTurnResult extends RetrieveResult { admission: TurnAdmission }
+
 export interface UserProfile {
   id: string;
   externalId: string;
@@ -622,6 +638,21 @@ function preferenceScopeFromResponse(value: unknown): PreferenceScopeRequest | n
   });
   if (new Set(availableScopes.map((scope) => JSON.stringify(scope))).size !== availableScopes.length) return invalid();
   return { state: "application_scope_required", propertyKeys: keys, availableScopes };
+}
+
+function turnAdmissionFromResponse(value: unknown): TurnAdmission {
+  const invalid = () => { throw new MemoryOSError("Invalid turn admission response", { code: "SDK_INVALID_RESPONSE" }); };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid();
+  const raw = value as Record<string, unknown>;
+  if (!["accepted", "replayed", "rejected", "unavailable"].includes(String(raw.state))
+    || Object.keys(raw).some((key) => !["state", "job_id", "reason"].includes(key))
+    || (raw.reason != null && typeof raw.reason !== "string")) return invalid();
+  if (raw.state === "accepted" || raw.state === "replayed") {
+    if (typeof raw.job_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.job_id)
+      || raw.reason != null) return invalid();
+  } else if (raw.job_id != null) return invalid();
+  return { state: raw.state as TurnAdmission["state"], jobId: (raw.job_id as string) ?? null,
+           reason: (raw.reason as string) ?? null };
 }
 
 function memoryVisibilityFromResponse(value: unknown): MemoryVisibility | null {
@@ -1085,6 +1116,33 @@ export class MemoryOS {
       body: JSON.stringify(body),
     });
     const payload = (await this.parseJson(response)) as RetrieveEnvelope;
+    return this.retrieveResult(response, payload);
+  }
+
+  async prepareTurn(params: PrepareTurnParams): Promise<PrepareTurnResult> {
+    for (const [name, value, bound] of [["message", params.message, 16000],
+      ["conversationId", params.conversationId, 255], ["turnId", params.turnId, 255]] as const) {
+      if (typeof value !== "string" || !value.trim() || value.length > bound) throw new Error(`Invalid ${name}`);
+    }
+    if ("asOf" in params || "agentId" in params) throw new Error("prepareTurn requires a current non-agent read");
+    if (params.precedingAssistant && (params.precedingAssistant.role !== "assistant"
+      || params.precedingAssistant.sourceKind !== "assistant_output")) throw new Error("Invalid precedingAssistant");
+    const response = await this.requestResponse("POST", "/v1/memories/prepare-turn", { body: JSON.stringify({
+      external_user_id: params.externalUserId, message: params.message, conversation_id: params.conversationId,
+      turn_id: params.turnId, query: params.query ?? params.message, limit: params.limit ?? 10,
+      categories: params.categories ?? [], format: params.format ?? "bullets", context_max_tokens: params.contextMaxTokens ?? 500,
+      ...(params.timeFilterDays !== undefined ? { time_filter_days: params.timeFilterDays } : {}),
+      ...(params.preferenceContext ? { preference_context: {
+        applicability: params.preferenceContext.applicability, property_keys: params.preferenceContext.propertyKeys,
+      } } : {}),
+      ...(params.precedingAssistant ? { preceding_assistant: toApiConversationMessages([params.precedingAssistant])[0] } : {}),
+    }) });
+    const payload = (await this.parseJson(response)) as RetrieveEnvelope & { admission?: unknown };
+    const admission = turnAdmissionFromResponse(payload.admission);
+    return { ...this.retrieveResult(response, payload), admission };
+  }
+
+  private retrieveResult(response: Response, payload: RetrieveEnvelope): RetrieveResult {
     const quotaMode = payload.quota_mode ?? quotaModeFromHeaders(response.headers);
     return {
       retrievalId: payload.retrieval_id ?? null,

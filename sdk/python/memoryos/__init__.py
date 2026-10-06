@@ -12,6 +12,8 @@ from memoryos.types import (
     EvidenceReference,
     MemorySource,
     MemoryVisibility,
+    PrepareTurnResult,
+    TurnAdmission,
     ProposedMemory,
 )
 from memoryos.universal import UniversalMemory
@@ -24,6 +26,8 @@ __all__ = [
     "MemoryOSError",
     "MemorySource",
     "MemoryVisibility",
+    "PrepareTurnResult",
+    "TurnAdmission",
     "NotFoundError",
     "PreferenceApplicability",
     "PreferenceClaimRequest",

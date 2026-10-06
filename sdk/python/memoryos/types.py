@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from memoryos.preferences import (
     PreferenceClaimRequest,
@@ -308,6 +308,47 @@ class RetrieveResult(BaseModel):
         return self.items[index]
 
 
+class TurnAdmission(BaseModel):
+    """Registration before this read, not storage or semantic resolution."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    state: Literal["accepted", "replayed", "rejected", "unavailable"]
+    job_id: str | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def admission_binding(self):
+        if self.state in {"accepted", "replayed"}:
+            if self.job_id is None or self.reason is not None:
+                raise ValueError("registered admission requires a job and no rejection reason")
+            uuid.UUID(self.job_id)
+        elif self.job_id is not None:
+            raise ValueError("unregistered admission cannot claim a job")
+        return self
+
+
+class PrepareTurnResult(RetrieveResult):
+    admission: TurnAdmission
+
+
+def prepare_turn_body(*, message, external_user_id, conversation_id, turn_id, query=None,
+                      preceding_assistant=None, preference_context=None, **options):
+    for name, value, bound in (("message", message, 16_000), ("conversation_id", conversation_id, 255),
+                               ("turn_id", turn_id, 255)):
+        if not isinstance(value, str) or not value.strip() or len(value) > bound:
+            raise ValueError(f"invalid {name}")
+    body = {"message": message, "external_user_id": external_user_id, "conversation_id": conversation_id,
+            "turn_id": turn_id, "query": query if query is not None else message, **options}
+    if preference_context is not None:
+        from memoryos.preferences import PreferenceReadContext
+        body["preference_context"] = PreferenceReadContext.model_validate(preference_context).model_dump(mode="json", exclude_none=True)
+    if preceding_assistant is not None:
+        previous = ConversationMessage.model_validate(preceding_assistant)
+        if previous.role != "assistant" or previous.source_kind != "assistant_output":
+            raise ValueError("preceding_assistant must be assistant output")
+        body["preceding_assistant"] = previous.model_dump(mode="json", exclude_none=True)
+    return body
+
+
 class RetrievalFeedbackRequest(BaseModel):
     retrieval_id: str = Field(min_length=1)
     outcome: RetrievalFeedbackOutcome
@@ -529,6 +570,10 @@ class MemoryClarificationAnswerEnvelope(EnvelopeBase):
 
 class MemorySourceReviewAnswerEnvelope(EnvelopeBase):
     data: MemorySourceReviewAnswerResult
+
+
+class PrepareTurnEnvelope(RetrieveEnvelope):
+    admission: TurnAdmission
 
 
 class MemoryListEnvelope(EnvelopeBase):

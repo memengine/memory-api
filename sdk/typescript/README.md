@@ -4,6 +4,28 @@
 npm install memoryo-sdk
 ```
 
+## Ordered current-turn preparation (default off, source checkout)
+
+`prepareTurn()` registers one incoming user turn before retrieving context in
+one request; it does not poll or synchronously resolve a preference:
+
+```ts
+const context = await mem.prepareTurn({
+  externalUserId: "user_123", conversationId: "chat_456", turnId: "message_789",
+  message: "Python instead",
+});
+// Check context.admission separately from context.memoryVisibility.
+// Accepted registration does not mean processing completed.
+```
+
+Reuse those IDs and the exact transcript on retry; do not also `add()` this
+turn or fall back to an ordinary read after a refusal. Operator rollout gates
+and both read/write permissions are required. This remains disabled by default,
+not a general chat latency/availability solution. See the
+[backend contract](../../docs/turn_preparation.md) for response states,
+withholding, identity, evidence, and release limits. No npm publication or
+version change is implied by this source-checkout API.
+
 ## Start simple: solo builders and small teams
 
 > **For whom:** solo developers, MVPs, small SaaS apps, and single-agent products.

@@ -40,6 +40,28 @@ if context.has_context:
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
 
+### Ordered current-turn preparation (default off, source checkout)
+
+`Memory.prepare_turn()` / `AsyncMemory.prepare_turn()` use one backend request
+to register the incoming user turn before retrieval, without worker polling:
+
+```python
+context = mem.prepare_turn(
+    "Python instead", external_user_id="user_123",
+    conversation_id="chat_456", turn_id="message_789",
+)
+# Check context.admission separately from context.memory_visibility.
+# Accepted registration is not completed processing or a resolved preference.
+```
+
+Reuse these IDs and the exact transcript on retry. Do not also `add()` this
+turn or fall back to an ordinary read after a refusal. The feature requires
+operator rollout gates and both read/write permissions, remains disabled by
+default, and is not yet a general chat latency/availability solution. See the
+[backend contract](../../docs/turn_preparation.md) for response states,
+withholding, identity, evidence, and release limits. No package release is
+implied by this source-checkout API.
+
 ### Read withholding status (source checkout)
 
 `Memory.get()` and `AsyncMemory.get()` preserve `result.memory_visibility`
