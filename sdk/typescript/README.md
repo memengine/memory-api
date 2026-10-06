@@ -38,6 +38,28 @@ const systemPrompt = context.hasContext
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
 
+### Read withholding status (source checkout)
+
+`get()` preserves `result.memoryVisibility` as `MemoryVisibility`, or `null`
+when the server supplies no hold. Its `state` is `processing` or `unavailable`;
+its `scope` is `user_learned_context` or `affected_context`. Older responses
+without `scope` default to the conservative whole learned-context scope.
+Malformed/unknown status values raise `MemoryOSError` with
+`code: "SDK_INVALID_RESPONSE"`; they are not silently discarded.
+
+`isDegraded` preserves the backend flag even when `quotaMode` is `FULL`.
+A healthy circuit and available quota do not establish currentness. For an
+`affected_context` hold, unaffected eligible items may remain. The backend notice
+is preserved and typed status survives a zero prompt budget. `hasContext` only
+means a prompt addition exists; that can be a withholding notice with no memory
+items. It is not a clarification request or confirmation of storage.
+
+This adds transport support, not scope inference: generic reads still exclude
+declared preferences. Continue using explicit `preferenceContext` with
+application-owned scope and property keys. There is no automatic polling, new
+model call, assistant-specific rule, reset, or authority decision. These changes
+are in source, not a claim that a new package has been published.
+
 ## Opt-in scoped preferences (0.1.2 release candidate)
 
 This source checkout exposes an application-declared contract, **not automatic

@@ -178,7 +178,13 @@ export interface RetrieveResult {
   clarification: MemoryClarification | null;
   sourceReviews?: MemorySourceReview[];
   preferenceDecisions?: PreferenceReadDecision[];
+  memoryVisibility?: MemoryVisibility | null;
   readonly hasContext: boolean;
+}
+
+export interface MemoryVisibility {
+  state: "processing" | "unavailable";
+  scope: "user_learned_context" | "affected_context";
 }
 
 export interface MemorySourceReview {
@@ -434,6 +440,8 @@ interface RetrieveEnvelope {
   context_token_count?: number;
   memories_from_hot_tier?: number;
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
+  is_degraded?: boolean;
+  memory_visibility?: { state: MemoryVisibility["state"]; scope?: MemoryVisibility["scope"] } | null;
   clarification_question?: string | null;
   preference_decisions?: Array<{
     property_key: string; applicability: PreferenceApplicability;
@@ -580,6 +588,21 @@ export class MemoryOSError extends Error {
     this.requestId = options.requestId;
     this.details = options.details;
   }
+}
+
+function memoryVisibilityFromResponse(value: unknown): MemoryVisibility | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new MemoryOSError("Invalid memory_visibility response", { code: "SDK_INVALID_RESPONSE" });
+  }
+  const raw = value as Record<string, unknown>;
+  const scope = raw.scope ?? "user_learned_context";
+  if ((raw.state !== "processing" && raw.state !== "unavailable")
+    || (scope !== "user_learned_context" && scope !== "affected_context")
+    || raw.scope === null) {
+    throw new MemoryOSError("Invalid memory_visibility response", { code: "SDK_INVALID_RESPONSE" });
+  }
+  return { state: raw.state, scope };
 }
 
 export class AuthError extends MemoryOSError {
@@ -1038,12 +1061,13 @@ export class MemoryOS {
       memoriesFromHotTier: payload.memories_from_hot_tier ?? 0,
       quotaMode,
       isPassthrough: quotaMode === "PASSTHROUGH",
-      isDegraded: quotaMode === "DEGRADED_RETRIEVE",
+      isDegraded: payload.is_degraded === true || quotaMode === "DEGRADED_RETRIEVE",
       circuitStatus: circuitStatusFromHeaders(response.headers),
       clarificationQuestion: payload.clarification_question ?? null,
       preferenceDecisions: (payload.preference_decisions ?? []).map((decision) => ({
         propertyKey: decision.property_key, applicability: decision.applicability, state: decision.state,
       })),
+      memoryVisibility: memoryVisibilityFromResponse(payload.memory_visibility),
       sourceReviews: (payload.source_reviews ?? []).map((review) => ({
         id: review.id, version: review.version, kind: review.kind, question: review.question,
         targetMemoryId: review.target_memory_id ?? null,

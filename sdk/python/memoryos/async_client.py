@@ -4,7 +4,7 @@ import asyncio
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Self
+from typing import Any, Self, cast
 from urllib.parse import quote
 
 import httpx
@@ -15,6 +15,7 @@ from memoryos.types import (
     AddEnvelope,
     AddRequest,
     AddResult,
+    CircuitStatus,
     ConversationMessage,
     DeleteEnvelope,
     EdTechMemoryProfile,
@@ -30,6 +31,7 @@ from memoryos.types import (
     MemorySource,
     MemorySourceReviewAnswerEnvelope,
     MemorySourceReviewAnswerResult,
+    ProcessingStatus,
     QuotaMode,
     RetrievalFeedbackEnvelope,
     RetrievalFeedbackRequest,
@@ -215,12 +217,13 @@ class AsyncMemory:
             memories_from_hot_tier=parsed.memories_from_hot_tier,
             quota_mode=quota_mode,
             is_passthrough=quota_mode == "PASSTHROUGH",
-            is_degraded=quota_mode == "DEGRADED_RETRIEVE",
+            is_degraded=parsed.is_degraded or quota_mode == "DEGRADED_RETRIEVE",
             circuit_status=self._circuit_status_from_response(response),
             clarification_question=parsed.clarification_question,
             clarification=parsed.clarification,
             source_reviews=parsed.source_reviews,
             preference_decisions=parsed.preference_decisions,
+            memory_visibility=parsed.memory_visibility,
         )
 
     async def get_job_status(self, job_id: str) -> MemoryJobStatus:
@@ -456,15 +459,15 @@ class AsyncMemory:
         return "FULL"
 
     @staticmethod
-    def _circuit_status_from_response(response: httpx.Response) -> str:
+    def _circuit_status_from_response(response: httpx.Response) -> CircuitStatus:
         raw_status = response.headers.get("X-MemoryOS-Circuit-Status", "HEALTHY").upper()
         if raw_status in {"HEALTHY", "DEGRADED", "CRITICAL"}:
-            return raw_status
+            return cast(CircuitStatus, raw_status)
         return "HEALTHY"
 
     @staticmethod
-    def _processing_status_from_response(response: httpx.Response, fallback: str = "normal") -> str:
+    def _processing_status_from_response(response: httpx.Response, fallback: str = "normal") -> ProcessingStatus:
         raw_status = response.headers.get("X-MemoryOS-Processing", fallback).lower()
         if raw_status in {"normal", "delayed"}:
-            return raw_status
+            return cast(ProcessingStatus, raw_status)
         return "normal"

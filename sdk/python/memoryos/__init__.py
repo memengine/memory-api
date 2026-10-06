@@ -7,7 +7,12 @@ from memoryos.preferences import (
     PreferenceReadContext,
     PreferenceReadDecision,
 )
-from memoryos.types import EvidenceReference, MemorySource, ProposedMemory
+from memoryos.types import (
+    EvidenceReference,
+    MemorySource,
+    MemoryVisibility,
+    ProposedMemory,
+)
 from memoryos.universal import UniversalMemory
 
 __all__ = [
@@ -17,6 +22,7 @@ __all__ = [
     "Memory",
     "MemoryOSError",
     "MemorySource",
+    "MemoryVisibility",
     "NotFoundError",
     "PreferenceApplicability",
     "PreferenceClaimRequest",

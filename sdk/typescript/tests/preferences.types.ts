@@ -1,7 +1,15 @@
 // Compile-only consumer contract checks. Never invokes a service.
-import type { PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, RetrieveResult } from "../src/index";
+import type { MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, RetrieveResult } from "../src/index";
 
 const global: PreferenceApplicability = { kind: "global" };
+const visibility: MemoryVisibility = { state: "unavailable", scope: "affected_context" };
+function readVisibility(result: RetrieveResult): MemoryVisibility | null {
+  return result.memoryVisibility ?? null;
+}
+// @ts-expect-error Completion is not a withholding state.
+const completedVisibility: MemoryVisibility = { state: "completed", scope: "affected_context" };
+// @ts-expect-error Unknown scope must not silently authorize context.
+const unknownVisibility: MemoryVisibility = { state: "processing", scope: "global" };
 const project: PreferenceApplicability = { kind: "context", namespace: "project", key: "release-check" };
 const uncertain: PreferenceClaimRequest = {
   propertyKey: "examples.language", value: "Python", applicability: project,
@@ -36,5 +44,6 @@ const scopedGlobal: PreferenceApplicability = { kind: "global", namespace: "proj
 const missingVersion: PreferenceClaimRequest = { propertyKey: "x", value: "Python", applicability: global, turnIndex: 0, quote: "Python", commitment: "replacement", replacesMemoryId: "m" };
 // @ts-expect-error Reads cannot guess unresolved applicability.
 const unresolved: PreferenceReadContext = { applicability: { kind: "unresolved" }, propertyKeys: ["x"] };
-void [replacement, read, held, decision, readDecisions, heldWithoutVersion, assertedHold, unknownHold,
+void [visibility, readVisibility, completedVisibility, unknownVisibility,
+  replacement, read, held, decision, readDecisions, heldWithoutVersion, assertedHold, unknownHold,
   candidateWithTarget, missingKey, scopedGlobal, missingVersion, unresolved];

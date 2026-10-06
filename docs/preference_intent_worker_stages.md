@@ -732,3 +732,25 @@ global-count test affected by concurrent test runs passed in the serial run.
 These results are local and controlled-provider, not production or semantic
 holdout evidence. Provider spend was $0. No deployment, live backfill or flag
 activation occurred.
+
+### SDK delivery of withholding status
+
+Python sync/async clients now preserve typed `memory_visibility`; TypeScript
+preserves `memoryVisibility`. Both retain the backend degradation flag independently
+of quota mode, keep the existing prompt notice, and default older absent status to
+no hold. If a present status omits scope, it defaults to whole learned context,
+matching the backend schema. Malformed status is a schema error, not a silently
+discarded hold. No polling, extraction wait, provider call, assistant-specific
+prompt or authority decision is added. Universal APIs remain frozen and unchanged.
+
+This closes SDK delivery only. Generic preference discovery/scope resolution,
+current-turn admission ordering and whole-context recovery remain open. A query
+is not application scope: silently defaulting a project read to global, or adding
+keyword rules to pick a project, would recreate the correctness failure. Until a
+separate context-discovery contract is approved and implemented, callers must use
+the existing explicit preference read context; generic reads do not activate
+declared preference winners or their scoped review cards.
+
+Local transport verification: 126 Python SDK checks and 42 installed TypeScript
+ESM/CJS checks passed, plus package inventory and Node16/NodeNext/Bundler type
+checks. No package publication, version bump, deployment or flag change occurred.

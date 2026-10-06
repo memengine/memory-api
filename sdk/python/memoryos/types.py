@@ -265,6 +265,13 @@ class MemorySourceReviewAnswerResult(BaseModel):
     next_step: Literal["add_memory"] | None = None
 
 
+class MemoryVisibility(BaseModel):
+    """Backend withholding status, not a clarification or storage confirmation."""
+
+    state: Literal["processing", "unavailable"]
+    scope: Literal["user_learned_context", "affected_context"] = "user_learned_context"
+
+
 class RetrieveResult(BaseModel):
     retrieval_id: str | None = None
     items: list[MemoryResult] = Field(default_factory=list)
@@ -280,6 +287,7 @@ class RetrieveResult(BaseModel):
     clarification: MemoryClarification | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
+    memory_visibility: MemoryVisibility | None = None
 
     @property
     def has_context(self) -> bool:
@@ -501,6 +509,8 @@ class RetrieveEnvelope(EnvelopeBase):
     clarification: MemoryClarification | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
+    memory_visibility: MemoryVisibility | None = None
+    is_degraded: bool = False
 
 
 class RetrievalFeedbackEnvelope(EnvelopeBase):

@@ -3,6 +3,50 @@ import test from "node:test";
 
 import { MemoryOS, MemoryOSError, UniversalMemoryOS } from "../dist/index.js";
 
+test("memory visibility survives ordinary reads and zero prompt budgets without polling", async () => {
+  for (const visibility of [undefined, null, { state: "processing" },
+    { state: "processing", scope: "affected_context" },
+    { state: "unavailable", scope: "user_learned_context" },
+    { state: "unavailable", scope: "affected_context", future_field: "ignored" }]) {
+    for (const prompt of ["", "Backend withholding notice"]) {
+      const calls = [];
+      const data = visibility?.scope === "affected_context" ? [{ id: "unaffected",
+        content: "My city is Pune", category: "fact", importance_score: 5,
+        relevance_score: 1, context_snippet: "My city is Pune" }] : [];
+      const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async (url, init) => {
+        calls.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ data, cached: false, system_prompt_addition: prompt,
+          quota_mode: "FULL", is_degraded: visibility != null, memory_visibility: visibility }));
+      });
+      const result = await client.get("language", "u");
+      assert.deepEqual(result.memoryVisibility, visibility == null ? null
+        : { state: visibility.state, scope: visibility.scope ?? "user_learned_context" });
+      assert.equal(result.isDegraded, visibility != null);
+      assert.equal(result.quotaMode, "FULL");
+      assert.equal(result.systemPromptAddition, prompt);
+      assert.equal(result.hasContext, Boolean(prompt));
+      assert.deepEqual(result.items.map((item) => item.id), data.map((item) => item.id));
+      assert.deepEqual(result.preferenceDecisions, []);
+      assert.deepEqual(result.sourceReviews, []);
+      assert.equal(result.clarification, null);
+      assert.equal(calls.length, 1);
+      assert.ok(calls[0].url.endsWith("/v1/memories/retrieve"));
+      assert.equal("preference_context" in calls[0].body, false);
+    }
+  }
+});
+
+test("invalid visibility cannot silently disappear", async () => {
+  for (const visibility of [{ state: "resolved" }, { state: "processing", scope: "all" },
+    { state: "processing", scope: null }, "processing", []]) {
+    const client = new MemoryOS("test", MemoryOS.DEFAULT_BASE_URL, 30_000, async () =>
+      new Response(JSON.stringify({ data: [], cached: false, system_prompt_addition: "",
+        memory_visibility: visibility })));
+    await assert.rejects(() => client.get("language", "u"), (error) =>
+      error instanceof MemoryOSError && error.code === "SDK_INVALID_RESPONSE");
+  }
+});
+
 test("typed preferences use existing endpoints without implicit polling", async () => {
   const requests = [];
   const applicability = { kind: "context", namespace: "project", key: "release-check" };

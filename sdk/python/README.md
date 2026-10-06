@@ -40,6 +40,30 @@ if context.has_context:
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
 
+### Read withholding status (source checkout)
+
+`Memory.get()` and `AsyncMemory.get()` preserve `result.memory_visibility`
+as an exported `MemoryVisibility` model, or `None` when the server supplies no
+hold. Its `state` is `processing` or `unavailable`; its `scope` is
+`user_learned_context` or `affected_context`. An older response without `scope`
+defaults to the conservative whole learned-context scope. Invalid status values
+raise a validation error rather than silently dropping a hold.
+
+`result.is_degraded` preserves the backend flag even when quota mode is `FULL`.
+A healthy circuit and available quota do not prove that stored context is current.
+With `affected_context`, unaffected eligible items can still be returned. With a
+whole-context hold, learned items are withheld. The backend's prompt-ready notice
+is preserved, and the typed status remains available when the prompt budget is
+zero. `has_context` means a prompt addition exists; a withholding notice can count
+as that addition even with no memory items. It is not proof that a preference is
+current, a request for clarification, or confirmation of storage.
+
+This is additive SDK transport support, not scope inference. Generic reads still
+exclude declared preferences; use the existing explicit `preference_context`
+with application-owned scope and property keys. No new polling, model call,
+assistant instructions, automatic reset or authority decision is introduced.
+These changes are in source, not a claim that a new package has been published.
+
 ## Opt-in scoped preferences (local, unreleased)
 
 This source checkout exposes an application-declared contract, **not automatic
