@@ -54,11 +54,18 @@ is preserved and typed status survives a zero prompt budget. `hasContext` only
 means a prompt addition exists; that can be a withholding notice with no memory
 items. It is not a clarification request or confirmation of storage.
 
-This adds transport support, not scope inference: generic reads still exclude
-declared preferences. Continue using explicit `preferenceContext` with
-application-owned scope and property keys. There is no automatic polling, new
-model call, assistant-specific rule, reset, or authority decision. These changes
-are in source, not a claim that a new package has been published.
+This adds transport support, not scope inference. On an operator-enabled tenant
+(`RUNTIME_PREFERENCE_DISCOVERY_ENABLED`, default false), ordinary current reads
+can discover declared keys from existing search nominations and the tenant catalog.
+A relevant property with scoped bindings and no application scope is withheld:
+`result.preferenceScopeRequest` (`PreferenceScopeRequest`) contains
+`state: "application_scope_required"`, `propertyKeys`, and `availableScopes`.
+Ask this question in your existing chat; send the explicitly selected application
+scope and returned keys in `preferenceContext` on the next read. Never default to
+global or infer scope from query wording. This is not a value write or permission
+change, and the typed question survives zero prompt budget. With discovery off,
+generic reads still exclude declared preferences. No automatic polling or extra
+read-time model call is added. Source changes are not a published package release.
 
 ## Opt-in scoped preferences (0.1.2 release candidate)
 

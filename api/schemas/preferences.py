@@ -87,3 +87,20 @@ class PreferenceReadContext(BaseModel):
         if len(set(self.property_keys)) != len(self.property_keys):
             raise ValueError("property_keys must be unique")
         return self
+
+
+class PreferenceScopeRequest(BaseModel):
+    """Missing application scope, not a proposed value or permission change."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    state: Literal["application_scope_required"] = "application_scope_required"
+    property_keys: tuple[PropertyKey, ...] = Field(min_length=1, max_length=16)
+    available_scopes: tuple[PreferenceApplicability, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def known_unique_scopes(self):
+        if len(set(self.property_keys)) != len(self.property_keys):
+            raise ValueError("scope request keys must be unique")
+        scopes = [scope.model_dump_json() for scope in self.available_scopes]
+        if len(set(scopes)) != len(scopes) or any(scope.kind == "unresolved" for scope in self.available_scopes):
+            raise ValueError("scope request requires unique known application scopes")
+        return self

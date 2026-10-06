@@ -743,8 +743,9 @@ matching the backend schema. Malformed status is a schema error, not a silently
 discarded hold. No polling, extraction wait, provider call, assistant-specific
 prompt or authority decision is added. Universal APIs remain frozen and unchanged.
 
-This closes SDK delivery only. Generic preference discovery/scope resolution,
-current-turn admission ordering and whole-context recovery remain open. A query
+This closes SDK delivery only. Generic preference discovery/scope resolution was
+open at this checkpoint (the next section describes the default-off implementation).
+Current-turn admission ordering and whole-context recovery remain open. A query
 is not application scope: silently defaulting a project read to global, or adding
 keyword rules to pick a project, would recreate the correctness failure. Until a
 separate context-discovery contract is approved and implemented, callers must use
@@ -754,3 +755,69 @@ declared preference winners or their scoped review cards.
 Local transport verification: 126 Python SDK checks and 42 installed TypeScript
 ESM/CJS checks passed, plus package inventory and Node16/NodeNext/Bundler type
 checks. No package publication, version bump, deployment or flag change occurred.
+
+### Default-off ordinary preference discovery and missing-scope questions
+
+`RUNTIME_PREFERENCE_DISCOVERY_ENABLED=false` is a separate read-path switch.
+It also requires `EXPLICIT_PREFERENCE_CLAIMS_ENABLED` and the existing tenant
+allowlist. No live configuration is enabled by this source change. Deploy the
+`preference_discovery_index` migration before an operator enables the read path.
+
+Ordinary current tenant reads can discover relevant declared property keys from
+up to 50 existing vector/cache/hot-tier nominations. Cold-start users use a bounded
+declared SQL page, consistent with the existing small-user all-context behavior.
+Nominations discover keys only: SQL ownership, catalog identity, stored scope,
+currentness and the existing claim selector decide eligible values in one final
+short repeatable-read snapshot. Cached values/scores never establish currentness.
+The new cache namespace retains bounded nomination IDs; old pages without that
+metadata are misses, not proof of absent scoped preferences. Process-local ranking
+cache is bypassed in this path because it cannot preserve these nominations.
+
+For a nominated property, the backend checks all active/disputed owned scopes,
+with 32 identities plus one overflow sentinel and an indexed predicate-key lookup.
+An omitted/removed catalog scope, corrupt binding or overflow fails closed with
+`memory_visibility: unavailable`; there is no global fallback from incomplete
+coverage. Existing archived/effective-time filtering still applies. Unknown legacy
+preferences are excluded for opted-in reads, not relabeled global.
+
+Without application scope, a relevant property with scoped bindings returns no
+preference value and a bounded `preference_scope_request`:
+`state=application_scope_required`, `property_keys`, and `available_scopes`.
+The application surfaces the question in its existing chat and supplies its own
+scope or the user's explicit selection on the next `preference_context` read.
+MemoryOS never infers scope from query wording. Scope selection is a read input,
+not a preference update, attestation, permission grant or authority increase.
+Unambiguous global properties and unrelated eligible facts remain available.
+The existing unresolved-choice selector is reused, with a budgeted context notice
+as well as typed decisions. Pending runtime visibility has priority over any scope
+or choice question; it is not turned into a clarification request.
+
+Python `preference_scope_request` and TypeScript `preferenceScopeRequest` preserve
+this question, independently of the prompt budget. The formatter handles a zero
+budget, but the current public HTTP request minimum remains 50 tokens. No automatic
+polling, extraction wait, read-time classifier, assistant-specific rule or new UI
+is introduced. Explicit reads and default-off, historical, agent-filtered and
+fact-only behavior retain their existing contracts. Universal/MCP are unchanged.
+
+This is bounded storage/read-contract implementation, not evidence of semantic
+recall, deployed behavior or production p99 under load. Search can miss relevant
+keys; that yields no declared preference, never permission to activate a legacy
+default. Current-turn admission ordering, whole-context recovery and integration
+error isolation remain separate launch gates. SDK source is not a package release.
+
+Local verification on 2026-10-06: the tracked unit suite plus the new scope
+contract tests passed 2,381 checks. The serial PostgreSQL/Redis regression passed
+159 checks, including owned scope coverage, cache revalidation, pending holds
+and prepared-query index plans. Fresh migrations and downgrade/re-upgrade passed.
+Installed TypeScript ESM/CJS contracts passed 46 checks, plus package inventory,
+Node16/NodeNext/Bundler types and scoped Python typing/lint checks. A subsequent
+small malformed-cache guard was verified with 55 focused retrieval/context/scope
+tests. These are local controlled checks, not live semantic or load evaluations.
+The broad local run also encountered unrelated uncommitted V4 benchmark modules
+whose sealed preparation does not match current source; those seals and files
+were not changed or included in this commit. Provider spend was $0; no deployment,
+package publication, live backfill or flag activation occurred.
+Python typing checked the five selected source files with imports followed
+silently; traversing imported implementation files also reported 80 errors in
+24 other files. This is not a clean full-repository typing result or a claim
+that the unrelated sealed benchmark checks pass.

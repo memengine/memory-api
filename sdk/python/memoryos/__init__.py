@@ -6,6 +6,7 @@ from memoryos.preferences import (
     PreferenceClaimRequest,
     PreferenceReadContext,
     PreferenceReadDecision,
+    PreferenceScopeRequest,
 )
 from memoryos.types import (
     EvidenceReference,
@@ -28,6 +29,7 @@ __all__ = [
     "PreferenceClaimRequest",
     "PreferenceReadContext",
     "PreferenceReadDecision",
+    "PreferenceScopeRequest",
     "ProposedMemory",
     "RateLimitError",
     "UniversalMemory",

@@ -1,5 +1,15 @@
 // Compile-only consumer contract checks. Never invokes a service.
-import type { MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, RetrieveResult } from "../src/index";
+import type { MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, PreferenceScopeRequest, RetrieveResult } from "../src/index";
+
+const scopeQuestion: PreferenceScopeRequest = { state: "application_scope_required",
+  propertyKeys: ["examples.language"], availableScopes: [{ kind: "global" }] };
+function readScope(result: RetrieveResult): PreferenceScopeRequest | null {
+  return result.preferenceScopeRequest ?? null;
+}
+// @ts-expect-error A scope question cannot resolve a value.
+const resolvedScope: PreferenceScopeRequest["state"] = "resolved";
+// @ts-expect-error Offered application scopes must be known.
+const guessedScope: PreferenceScopeRequest["availableScopes"] = [{ kind: "unresolved" }];
 
 const global: PreferenceApplicability = { kind: "global" };
 const visibility: MemoryVisibility = { state: "unavailable", scope: "affected_context" };

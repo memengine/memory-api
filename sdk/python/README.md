@@ -58,11 +58,19 @@ zero. `has_context` means a prompt addition exists; a withholding notice can cou
 as that addition even with no memory items. It is not proof that a preference is
 current, a request for clarification, or confirmation of storage.
 
-This is additive SDK transport support, not scope inference. Generic reads still
-exclude declared preferences; use the existing explicit `preference_context`
-with application-owned scope and property keys. No new polling, model call,
-assistant instructions, automatic reset or authority decision is introduced.
-These changes are in source, not a claim that a new package has been published.
+This is additive SDK transport support, not scope inference. On an operator-enabled
+tenant (`RUNTIME_PREFERENCE_DISCOVERY_ENABLED`, default false), ordinary current
+reads can discover declared property keys from existing search nominations and
+the tenant catalog. Without application scope, a relevant property with scoped
+bindings is withheld and returned as `result.preference_scope_request` (exported
+`PreferenceScopeRequest`), with `state="application_scope_required"`, `property_keys`
+and `available_scopes`. Ask the scope question in your existing chat, then send the
+explicitly selected scope and returned keys in `preference_context` on a subsequent
+read. Do not default to global, infer scope from query wording, or treat this as a
+preference write or permission change. Typed status survives zero prompt budget.
+With discovery off, generic reads still exclude declared preferences. No automatic
+polling or additional read-time model call is added. This source change is not a
+claim that a new package has been published.
 
 ## Opt-in scoped preferences (local, unreleased)
 

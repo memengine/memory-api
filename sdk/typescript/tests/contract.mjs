@@ -3,6 +3,41 @@ import test from "node:test";
 
 import { MemoryOS, MemoryOSError, UniversalMemoryOS } from "../dist/index.js";
 
+test("scope request survives zero budget; next read uses only explicitly supplied scope", async () => {
+  const wire = { state: "application_scope_required", property_keys: ["examples.language"],
+    available_scopes: [{ kind: "global" }, { kind: "context", namespace: "project", key: "Cedar" }] };
+  const calls = [];
+  const client = new MemoryOS("test", undefined, 30_000, async (url, init) => {
+    calls.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ data: [], cached: false, system_prompt_addition: "",
+      preference_scope_request: wire, clarification_question: "Which project applies?" }));
+  });
+  const result = await client.get({ query: "language", externalUserId: "u", contextMaxTokens: 0 });
+  assert.deepEqual(result.preferenceScopeRequest, { state: wire.state, propertyKeys: wire.property_keys,
+    availableScopes: wire.available_scopes });
+  assert.equal(result.hasContext, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].preference_context, undefined);
+  await client.get({ query: "language", externalUserId: "u",
+    preferenceContext: { propertyKeys: result.preferenceScopeRequest.propertyKeys,
+      applicability: result.preferenceScopeRequest.availableScopes[1] } });
+  assert.deepEqual(calls[1].preference_context, { property_keys: ["examples.language"],
+    applicability: { kind: "context", namespace: "project", key: "Cedar" } });
+});
+
+test("malformed scope request is rejected, never silently replaced by a default", async () => {
+  const base = { state: "application_scope_required", property_keys: ["x"], available_scopes: [{ kind: "global" }] };
+  for (const raw of [[], "global", { ...base, state: "resolved" }, { ...base, property_keys: [] },
+    { ...base, property_keys: ["x", "x"] }, { ...base, property_keys: ["X"] },
+    { ...base, available_scopes: [{ kind: "unresolved" }] }, { ...base, available_scopes: [] },
+    { ...base, available_scopes: [{ kind: "global" }, { kind: "global" }] },
+    { ...base, available_scopes: [{ kind: "context", namespace: "project", key: " " }] }]) {
+    const client = new MemoryOS("test", undefined, 30_000, async () => new Response(JSON.stringify({
+      data: [], cached: false, system_prompt_addition: "", preference_scope_request: raw })));
+    await assert.rejects(() => client.get("q", "u"), (err) => err instanceof MemoryOSError && err.code === "SDK_INVALID_RESPONSE");
+  }
+});
+
 test("memory visibility survives ordinary reads and zero prompt budgets without polling", async () => {
   for (const visibility of [undefined, null, { state: "processing" },
     { state: "processing", scope: "affected_context" },

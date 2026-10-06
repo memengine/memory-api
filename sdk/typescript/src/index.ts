@@ -93,6 +93,13 @@ export interface PreferenceReadContext {
   propertyKeys: string[];
 }
 
+/** Ask in the existing chat; application/user supplies scope, never the SDK. */
+export interface PreferenceScopeRequest {
+  state: "application_scope_required";
+  propertyKeys: string[];
+  availableScopes: KnownPreferenceApplicability[];
+}
+
 export interface AddRequest {
   externalUserId: string;
   agentId?: string;
@@ -179,6 +186,7 @@ export interface RetrieveResult {
   sourceReviews?: MemorySourceReview[];
   preferenceDecisions?: PreferenceReadDecision[];
   memoryVisibility?: MemoryVisibility | null;
+  preferenceScopeRequest?: PreferenceScopeRequest | null;
   readonly hasContext: boolean;
 }
 
@@ -442,6 +450,7 @@ interface RetrieveEnvelope {
   quota_mode?: "FULL" | "PASSTHROUGH" | "DEGRADED_RETRIEVE" | "BLOCKED";
   is_degraded?: boolean;
   memory_visibility?: { state: MemoryVisibility["state"]; scope?: MemoryVisibility["scope"] } | null;
+  preference_scope_request?: unknown;
   clarification_question?: string | null;
   preference_decisions?: Array<{
     property_key: string; applicability: PreferenceApplicability;
@@ -588,6 +597,31 @@ export class MemoryOSError extends Error {
     this.requestId = options.requestId;
     this.details = options.details;
   }
+}
+
+function preferenceScopeFromResponse(value: unknown): PreferenceScopeRequest | null {
+  if (value === undefined || value === null) return null;
+  const invalid = () => { throw new MemoryOSError("Invalid preference_scope_request response", { code: "SDK_INVALID_RESPONSE" }); };
+  if (typeof value !== "object" || Array.isArray(value)) return invalid();
+  const raw = value as Record<string, unknown>;
+  const keys = raw.property_keys;
+  const scopes = raw.available_scopes;
+  if (raw.state !== "application_scope_required" || !Array.isArray(keys) || keys.length < 1 || keys.length > 16
+    || keys.some((key) => typeof key !== "string" || key.length > 120 || !/^[a-z][a-z0-9._-]*$/.test(key))
+    || new Set(keys).size !== keys.length || !Array.isArray(scopes) || scopes.length < 1 || scopes.length > 32) return invalid();
+  const availableScopes: KnownPreferenceApplicability[] = scopes.map((scope: unknown) => {
+    if (scope === null || typeof scope !== "object" || Array.isArray(scope)) return invalid();
+    const s = scope as Record<string, unknown>;
+    if (s.kind === "global" && s.namespace == null && s.key == null) return { kind: "global" };
+    if (s.kind === "context" && typeof s.namespace === "string" && s.namespace.length <= 120
+      && /^[a-z][a-z0-9._-]*$/.test(s.namespace) && typeof s.key === "string"
+      && s.key.trim().length >= 1 && s.key.trim().length <= 128) {
+      return { kind: "context", namespace: s.namespace, key: s.key.trim() };
+    }
+    return invalid();
+  });
+  if (new Set(availableScopes.map((scope) => JSON.stringify(scope))).size !== availableScopes.length) return invalid();
+  return { state: "application_scope_required", propertyKeys: keys, availableScopes };
 }
 
 function memoryVisibilityFromResponse(value: unknown): MemoryVisibility | null {
@@ -1068,6 +1102,7 @@ export class MemoryOS {
         propertyKey: decision.property_key, applicability: decision.applicability, state: decision.state,
       })),
       memoryVisibility: memoryVisibilityFromResponse(payload.memory_visibility),
+      preferenceScopeRequest: preferenceScopeFromResponse(payload.preference_scope_request),
       sourceReviews: (payload.source_reviews ?? []).map((review) => ({
         id: review.id, version: review.version, kind: review.kind, question: review.question,
         targetMemoryId: review.target_memory_id ?? null,

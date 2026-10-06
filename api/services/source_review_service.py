@@ -188,7 +188,7 @@ def view_review(
     )
 
 
-def source_review_query(*, tenant_id: str, proxy_user_id: str, preference_context=None, now=None):
+def source_review_query(*, tenant_id: str, proxy_user_id: str, preference_context=None, include_unscoped=False, now=None):
     from api.services.preference_choice_service import CHOICE_OPERATION_MARKER
     from api.services.preference_claim_service import (
         PREFERENCE_MARKER,
@@ -196,18 +196,21 @@ def source_review_query(*, tenant_id: str, proxy_user_id: str, preference_contex
     )
     evidence = PendingExtractionCandidate.metadata_json["extraction_evidence"]
     fingerprint_column = literal_column("(pending_extraction_candidates.metadata['extraction_evidence'] ->> 'preference_fingerprint')")
-    if preference_context is None:
-        applicability_filter = (
+    unscoped = (
             evidence[PREFERENCE_MARKER].astext.is_(None)
             & evidence[CHOICE_OPERATION_MARKER].astext.is_(None)
             & fingerprint_column.is_(None)
         )
+    if preference_context is None:
+        applicability_filter = unscoped
     else:
         fingerprints = {
             preference_fingerprint(key, preference_context.applicability)
             for key in preference_context.property_keys
         }
         applicability_filter = fingerprint_column.in_(fingerprints)
+        if include_unscoped:
+            applicability_filter = applicability_filter | unscoped
     return select(PendingExtractionCandidate).where(
         PendingExtractionCandidate.tenant_id == uuid.UUID(tenant_id),
         PendingExtractionCandidate.proxy_user_id == uuid.UUID(proxy_user_id),
@@ -221,9 +224,11 @@ def source_review_query(*, tenant_id: str, proxy_user_id: str, preference_contex
 async def list_source_reviews(
     session: Any, *, tenant_id: str, proxy_user_id: str,
     preference_context=None,
+    include_unscoped=False,
 ) -> list[MemorySourceReview]:
     rows = (await session.execute(source_review_query(
         tenant_id=tenant_id, proxy_user_id=proxy_user_id, preference_context=preference_context,
+        include_unscoped=include_unscoped,
     ))).scalars().all()
     target_ids = [uuid.UUID(intent["target_memory_id"]) for row in rows
                   if (intent := intent_for(row)) and intent.get("target_memory_id")]

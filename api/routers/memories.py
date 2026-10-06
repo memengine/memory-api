@@ -438,8 +438,16 @@ async def retrieve_memories(
         for result in results
     ]
     memory_visibility = getattr(retriever_service, "last_memory_visibility", None)
+    scope_request = getattr(retriever_service, "last_preference_scope_request", None)
+    read_context = payload.preference_context or getattr(retriever_service, "last_discovered_preference_context", None)
+    preference_decisions = (list(getattr(retriever_service, "last_preference_decisions", []) or [])
+                           if read_context is not None else [])
     context = (context_builder.build_guarded(results, visibility=memory_visibility,
         format=payload.format, max_tokens=payload.context_max_tokens) if memory_visibility is not None
+        else context_builder.build_scope_required(results, request=scope_request,
+            format=payload.format, max_tokens=payload.context_max_tokens) if scope_request is not None
+        else context_builder.build_choice_unresolved(results, decisions=preference_decisions,
+            format=payload.format, max_tokens=payload.context_max_tokens) if preference_decisions
         else context_builder.build(results, format=payload.format, max_tokens=payload.context_max_tokens))
     system_prompt_addition = context.system_prompt_addition
     context_token_count = context.token_count
@@ -453,7 +461,7 @@ async def retrieve_memories(
     domain_started = time.perf_counter()
     domain_schema_name = await _tenant_domain_schema(session, tenant_id)
     domain_schema = get_domain_schema(domain_schema_name)
-    if domain_schema is not None and payload.preference_context is None and memory_visibility is None:
+    if domain_schema is not None and read_context is None and scope_request is None and memory_visibility is None:
         domain_prompt, domain_token_count = await domain_schema.build_retrieve_context(
             session=session,
             cache_service=cache_service,
@@ -473,18 +481,18 @@ async def retrieve_memories(
     clarification = await _pop_next_clarification(
         session=session,
         proxy_user_id=str(proxy_user.id),
-    ) if payload.preference_context is None and memory_visibility is None else None
+    ) if read_context is None and scope_request is None and memory_visibility is None else None
     clarification_question = clarification.question if clarification is not None else None
-    preference_decisions = (
-        list(getattr(retriever_service, "last_preference_decisions", []) or [])
-        if payload.preference_context is not None else []
-    )
     if preference_decisions:
         clarification_question = "A current preference choice is unresolved. Please state which value should be current and where it applies."
+    if scope_request is not None:
+        clarification_question = "Which application/project scope applies to these preferences? Please choose a supplied scope; no default has been selected."
     clarification_ms = (time.perf_counter() - clarification_started) * 1000
     source_reviews = await list_source_reviews(
         session, tenant_id=tenant_id, proxy_user_id=str(proxy_user.id),
-        **({"preference_context": payload.preference_context} if payload.preference_context is not None else {}),
+        **({"preference_context": read_context,
+            **({"include_unscoped": True} if payload.preference_context is None else {})}
+           if read_context is not None else {}),
     ) if payload.as_of is None and memory_visibility is None else []
     retrieval_id = None
     feedback_started = time.perf_counter()
@@ -536,6 +544,7 @@ async def retrieve_memories(
         source_reviews=source_reviews,
         preference_decisions=preference_decisions,
         memory_visibility=memory_visibility,
+        preference_scope_request=scope_request,
         quota_mode=getattr(retriever_service, "last_quota_mode", None),
         is_degraded=bool(getattr(retriever_service, "last_is_degraded", False)),
         is_passthrough=getattr(retriever_service, "last_quota_mode", None) == "passthrough",

@@ -222,6 +222,7 @@ class Memory:
             clarification=parsed.clarification,
             source_reviews=parsed.source_reviews,
             preference_decisions=parsed.preference_decisions,
+            preference_scope_request=parsed.preference_scope_request,
             memory_visibility=parsed.memory_visibility,
         )
 

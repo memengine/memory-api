@@ -140,7 +140,7 @@ No read-time model call or full-profile scan is needed for preference selection.
 There is no measured production p99/high-load capacity claim yet; the batch/SQL
 bounds and concurrent regression tests are not a load benchmark.
 
-Reads without `preference_context` exclude declared preferences in current,
+By default, reads without `preference_context` exclude declared preferences in current,
 cached hydration, cold-start, PostgreSQL fallback, and historical candidate paths.
 They retain legacy behavior for legacy records. Explicit reads exclude unknown
 legacy preferences instead of relabeling them global. Scope-aware `as_of` reads
@@ -154,6 +154,52 @@ applicability is persisted pending but not auto-delivered into a guessed context
 Review buttons do not activate declarations; restating does not infer their scope.
 A matching unresolved-choice review can explicitly reaffirm the already stored
 value under the conditions below; it never activates its candidate text.
+
+### Ordinary discovery reads (default-off, source checkout)
+
+An operator may separately enable `RUNTIME_PREFERENCE_DISCOVERY_ENABLED` for an
+existing allowlisted tenant with explicit preference claims and a valid operator
+catalog. Ordinary current reads then discover keys from bounded existing search
+nominations and check current owned SQL claim bindings. No query wording or model
+is used to choose application scope. Unknown legacy preferences are withheld in
+this mode; unambiguous declared globals can be returned using the existing selector.
+
+If a nominated property has current scoped bindings, a request lacking application
+scope withholds its value and returns this additive read response:
+
+```json
+{
+  "preference_scope_request": {
+    "state": "application_scope_required",
+    "property_keys": ["examples.language"],
+    "available_scopes": [
+      {"kind": "global"},
+      {"kind": "context", "namespace": "project", "key": "Cedar"}
+    ]
+  },
+  "clarification_question": "Which application/project scope applies to these preferences? Please choose a supplied scope; no default has been selected."
+}
+```
+
+Global may be offered as an explicit choice; it is never silently selected when
+scoped bindings exist. Surface the question in the customer's existing chat and
+send the application-owned or explicitly user-selected scope and returned keys as
+`preference_context` on the next read. Scope selection itself does not write a
+preference, increase authority, or grant access. It does not have a separate answer
+endpoint or authorize mutation. The existing unresolved-choice policy still applies
+after a scope is supplied. Unaffected global properties and eligible facts can remain
+in the response. Typed scope requests and decisions are independent of context budget;
+budgeted notices accompany them when room exists. Held runtime processing takes
+priority over questions and is not a request for user clarification.
+
+Bounds: 50 nominations, 16 property keys, 32 owned scope bindings plus one overflow
+sentinel, 32 offered known scopes. Removed catalog identities, corrupt bindings and
+overflow yield unavailable context, not guessed global fallback. The new online
+`preference_discovery_index` migration supports prepared predicate-key probes; it
+must be deployed before activation. Search misses remain a recall limitation.
+Neither this bounded read contract nor local query-plan checks prove semantic
+accuracy, production p99, or launch readiness. There is no read-time classifier,
+automatic polling, worker wait, new UI, or MCP/universal contract change.
 
 ## Durable unresolved current choice — local, unreleased extension
 

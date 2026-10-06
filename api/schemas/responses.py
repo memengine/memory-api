@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
 
-from api.schemas.preferences import PreferenceReadDecision
+from api.schemas.preferences import PreferenceReadDecision, PreferenceScopeRequest
 
 
 MemoryCategory = Literal[
@@ -207,6 +207,7 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
     memory_visibility: MemoryVisibility | None = None
+    preference_scope_request: PreferenceScopeRequest | None = None
     quota_mode: str | None = None
     is_degraded: bool = False
     is_passthrough: bool = False

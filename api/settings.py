@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     phase3a_confirmation_enabled: bool = Field(default=False, alias="PHASE3A_CONFIRMATION_ENABLED")
     explicit_preference_claims_enabled: bool = Field(default=False, alias="EXPLICIT_PREFERENCE_CLAIMS_ENABLED")
     runtime_preference_enabled: bool = Field(default=False, alias="RUNTIME_PREFERENCE_ENABLED")
+    runtime_preference_discovery_enabled: bool = Field(default=False, alias="RUNTIME_PREFERENCE_DISCOVERY_ENABLED")
     runtime_target_withholding_enabled: bool = Field(default=False, alias="RUNTIME_TARGET_WITHHOLDING_ENABLED")
     runtime_target_release_enabled: bool = Field(default=False, alias="RUNTIME_TARGET_RELEASE_ENABLED")
     runtime_preference_tenant_ids: str = Field(default="", alias="RUNTIME_PREFERENCE_TENANT_IDS")

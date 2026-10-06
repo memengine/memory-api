@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from html import escape
 
+from api.schemas.preferences import PreferenceReadDecision, PreferenceScopeRequest
 from api.schemas.responses import MemoryVisibility
 from api.services.retriever import MemoryResult
 
@@ -53,19 +54,45 @@ class ContextBuilder:
         if format not in SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported context format: {format}")
         partial = visibility.scope == "affected_context"
-        selected, dropped = self._prepare_memories(memories if partial else [])
         notice = ("MemoryOS has withheld " + ("affected context" if partial else "learned context")
             + " while a user update is "
             + ("processing." if visibility.state == "processing" else "not yet resolved safely.")
             + " Do not present a withheld stored value as current. "
             "This status is not a request for user clarification.")
+        return self._build_noticed(memories if partial else [], key="memory_visibility",
+            status=visibility.model_dump(), notice=notice, format=format, max_tokens=max_tokens)
+
+    def build_scope_required(self, memories, *, request: PreferenceScopeRequest,
+                             format="bullets", max_tokens=DEFAULT_MAX_TOKENS):
+        notice = ("MemoryOS has withheld preferences whose application scope is unknown. "
+            "Ask which application/project scope applies; do not choose a global or scoped default. "
+            "This is a scope question, not a new preference value or permission change. "
+            + json.dumps(request.model_dump(mode="json")))
+        return self._build_noticed(memories, key="preference_scope_request",
+            status=request.model_dump(mode="json"), notice=notice, format=format, max_tokens=max_tokens)
+
+    def build_choice_unresolved(self, memories, *, decisions: list[PreferenceReadDecision],
+                                format="bullets", max_tokens=DEFAULT_MAX_TOKENS):
+        status = {"state": "current_choice_unresolved",
+                  "decisions": [decision.model_dump(mode="json") for decision in decisions]}
+        notice = ("MemoryOS has withheld unresolved current preference choices. "
+            "Do not choose a prior or candidate value as current. Ask which value should remain current "
+            "and where it applies. " + json.dumps(status))
+        return self._build_noticed(memories, key="preference_decisions", status=status,
+            notice=notice, format=format, max_tokens=max_tokens)
+
+    def _build_noticed(self, memories, *, key, status, notice, format, max_tokens):
+        if format not in SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported context format: {format}")
+        selected, dropped = self._prepare_memories(memories)
         def render():
             base = self._render(selected, format) if selected else ""
             if format == "json":
                 return json.dumps({"memories": json.loads(base)["memories"] if base else {},
-                    "memory_visibility": visibility.model_dump(), "notice": notice})
-            element = (f'<memory_visibility state="{visibility.state}" scope="{visibility.scope}">'
-                       f'{escape(notice)}</memory_visibility>')
+                    key: status, "notice": notice})
+            scope_attribute = f' scope="{status["scope"]}"' if "scope" in status else ""
+            element = (f'<{key} state="{status["state"]}"{scope_attribute}>'
+                       f'{escape(notice)}</{key}>')
             if format == "xml":
                 return f"<governed_memory_context>{element}{base}</governed_memory_context>" if base else element
             return notice + ("\n\n" + base if base else "")
@@ -221,7 +248,7 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _group_by_category(self, memories: list[MemoryResult]) -> dict[str, list[MemoryResult]]:
-        grouped = {category: [] for category in CATEGORY_ORDER}
+        grouped: dict[str, list[MemoryResult]] = {category: [] for category in CATEGORY_ORDER}
         for memory in memories:
             category = str(memory.category)
             if category in grouped:

@@ -20,7 +20,6 @@ from api.db.models import (
     ExtractionJob,
     ExtractionJobStatus,
     Memory,
-    MemoryClaim,
     ProxyUser,
     QuotaMode,
 )
@@ -31,6 +30,7 @@ from api.schemas.preferences import (
     PreferenceApplicability,
     PreferenceReadContext,
     PreferenceReadDecision,
+    PreferenceScopeRequest,
 )
 from api.schemas.responses import MemoryVisibility
 from api.services.embedding_service import EmbeddingResult, EmbeddingService
@@ -39,6 +39,14 @@ from api.services.preference_claim_service import (
     legacy_memory_predicate,
     preference_declaration,
     preference_fingerprint,
+)
+from api.services.preference_discovery import (
+    discover_preferences,
+    discovery_enabled,
+    preference_rows,
+)
+from api.services.preference_intent_admission_service import (
+    PreferenceAdmissionUnavailable,
 )
 from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaManager
@@ -134,6 +142,11 @@ class RetrieverService:
         self.last_quota_mode = QuotaMode.full.value
         self.last_is_degraded = False
         self.last_memory_visibility: MemoryVisibility | None = None
+        self.last_preference_scope_request: PreferenceScopeRequest | None = None
+        self.last_discovered_preference_context: PreferenceReadContext | None = None
+        self._preference_discovery_active = False
+        self._preference_nominee_ids: list[uuid.UUID] = []
+        self._preference_cold_start = False
         self.region_id = region_id
         self.embedding_service = embedding_service or EmbeddingService(
             async_session=session,
@@ -158,6 +171,12 @@ class RetrieverService:
         quota_mode: str | QuotaMode | None = None, preference_context: PreferenceReadContext | None = None,
     ) -> list[MemoryResult]:
         self.last_memory_visibility = None
+        self.last_preference_scope_request = None
+        self.last_discovered_preference_context = None
+        self._preference_nominee_ids = []
+        self._preference_cold_start = False
+        self._preference_discovery_active = (discovery_enabled(tenant_id) and preference_context is None
+            and as_of is None and agent_id is None and (not categories or "preference" in categories))
         self._resolved_read_proxy_id: str | None = None
         args: dict[str, Any] = {"query": query, "external_user_id": external_user_id, "proxy_user_id": proxy_user_id,
                 "user_id": user_id, "limit": limit, "categories": categories, "agent_id": agent_id,
@@ -210,31 +229,53 @@ class RetrieverService:
                 else:
                     hold = RuntimeHold(broad=False)
                     self.last_memory_visibility = None
-                if not row[2]:
+                discovery = None
+                if self._preference_discovery_active and discovery_enabled(args["tenant_id"]):
+                    try:
+                        discovery = await discover_preferences(self.session,
+                            tenant_id=self._as_uuid(args["tenant_id"]), owner=self._as_uuid(owner),
+                            nominee_ids=self._preference_nominee_ids or self._bounded_memory_ids(m.id for m in candidates),
+                            cold_start=self._preference_cold_start, is_current=self._memory_is_current,
+                            created_after=self._created_after(args["time_filter_days"]),
+                            withheld_fingerprints=hold.preference_fingerprints)
+                    except PreferenceAdmissionUnavailable as exc:
+                        logger.warning("Preference discovery unavailable. tenant_id=%s proxy_user_id=%s reason=%s",
+                                       args["tenant_id"], owner, exc)
+                        self.last_memory_visibility = MemoryVisibility(state="unavailable")
+                        self.last_is_degraded, self.last_cache_hit = True, False
+                        self.last_preference_decisions = []
+                        return []  # Incomplete coverage/configuration is not a global fallback.
+                    self.last_discovered_preference_context = discovery.context
+                    self.last_preference_scope_request = discovery.scope_request
+                if not row[2] and discovery is None:
                     return candidates  # No server-selected runtime job for this owner.
                 categories = [c.lower() for c in args["categories"] or []]
                 fresh = await self._hydrate_current_results(
-                    [m for m in candidates if args["preference_context"] is None or m.category != "preference"],
+                    [m for m in candidates if (args["preference_context"] is None
+                        and discovery is None) or m.category != "preference"],
                     proxy_user_id=owner, user_id=None, tenant_id=args["tenant_id"],
                     categories=categories, agent_id=args["agent_id"],
                     created_after=self._created_after(args["time_filter_days"]),
                 )
                 fresh = [m for m in fresh if m.id not in hold.fact_ids and m.previous_version_id not in hold.fact_ids
                          and not (hold.preference_fingerprints and m.category == "preference")]
-                if args["preference_context"] is not None and (not categories or "preference" in categories):
+                context = args["preference_context"] or (discovery.context if discovery is not None else None)
+                if context is not None and (not categories or "preference" in categories):
                     preferences = await self._retrieve_declared_preferences(
-                        context=args["preference_context"], query=args["query"],
+                        context=context, query=args["query"],
                         identity=args["external_user_id"] or args["user_id"], proxy_user_id=owner,
                         tenant_id=args["tenant_id"], limit=args["limit"], categories=["preference"],
                         agent_id=args["agent_id"], time_filter_days=args["time_filter_days"],
                         quota_mode=self.last_quota_mode, include_other=False,
                         withheld_fingerprints=hold.preference_fingerprints,
+                        rows=discovery.rows if discovery is not None else None,
                     )
                     fresh = preferences + fresh
                 if row[0]:
                     # While any update is held, do not turn old choice cards into
                     # a new clarification request through a partial response.
                     self.last_preference_decisions = []
+                    self.last_preference_scope_request = None
                     self.last_is_degraded = True
                 self.last_cache_hit = False
                 return fresh[:args["limit"]]
@@ -292,6 +333,8 @@ class RetrieverService:
         normalized_categories = [category.lower() for category in categories or []]
         created_after = self._created_after(time_filter_days)
         cache_context = self._cache_context(query, normalized_categories, agent_id, limit, time_filter_days, as_of)
+        if self._preference_discovery_active:
+            cache_context += "|preference-discovery-v1"
 
         self.last_is_degraded = False
 
@@ -406,6 +449,7 @@ class RetrieverService:
             scoped_identity = identity
             user_memory_count = await self._count_user_memories(user_id=scoped_identity)
         if user_memory_count < COLD_START_THRESHOLD:
+            self._preference_cold_start = self._preference_discovery_active
             if proxy_user is not None:
                 cold_start_results = await self._retrieve_cold_start_memories(
                     proxy_user_id=scoped_identity,
@@ -641,7 +685,7 @@ class RetrieverService:
         l1_key = self._l1_cache_key(user_id, cache_context)
         l1_cached = self._l1_cache.get(l1_key)
         now = datetime.now(UTC).timestamp()
-        if l1_cached is not None:
+        if l1_cached is not None and not self._preference_discovery_active:
             expires_at, results = l1_cached
             if expires_at > now:
                 return list(results)
@@ -652,6 +696,15 @@ class RetrieverService:
         cached_memories = await self._read_retrieval_cache(user_id, cache_context)
         if not cached_memories:
             return None
+
+        if self._preference_discovery_active:
+            if not isinstance(cached_memories[0], dict):
+                return None  # Malformed cache pages are misses, not discovery evidence.
+            nominees = cached_memories[0].get("_preference_nominee_ids")
+            if not isinstance(nominees, list):
+                return None  # Old cache pages cannot prove their preference nominations.
+            self._preference_nominee_ids = self._bounded_memory_ids(nominees)
+            self._preference_cold_start = cached_memories[0].get("_preference_cold_start") is True
 
         try:
             results = [self._memory_result_from_cache(item) for item in cached_memories[:50]]
@@ -670,6 +723,9 @@ class RetrieverService:
         payload = []
         for result in results:
             payload.append(asdict(result))
+        if payload and self._preference_discovery_active:
+            payload[0]["_preference_nominee_ids"] = [str(mid) for mid in self._preference_nominee_ids]
+            payload[0]["_preference_cold_start"] = self._preference_cold_start
         self._set_l1_cache(self._l1_cache_key(user_id, cache_context), results)
         self._schedule_cache_write(user_id, cache_context, payload)
 
@@ -1219,6 +1275,9 @@ class RetrieverService:
         if not normalized_ids:
             return {}
 
+        if self._preference_discovery_active:
+            self._preference_nominee_ids = list(dict.fromkeys((*self._preference_nominee_ids, *normalized_ids)))[:50]
+
         query = select(Memory).where(
             Memory.id.in_(normalized_ids),
             Memory.proxy_user_id == self._as_uuid(proxy_user_id),
@@ -1486,7 +1545,7 @@ class RetrieverService:
 
     async def _retrieve_declared_preferences(
         self, *, context, query, identity, proxy_user_id, tenant_id, limit,
-        categories, agent_id, time_filter_days, quota_mode, include_other=True, withheld_fingerprints=(),
+        categories, agent_id, time_filter_days, quota_mode, include_other=True, withheld_fingerprints=(), rows=None,
     ) -> list[MemoryResult]:
         # <=32 indexed identities, one SQL round-trip. A vector page is not a
         # complete property set, so it cannot decide which scope wins.
@@ -1498,14 +1557,9 @@ class RetrieverService:
         preferences = []
         decisions = []
         if not categories or "preference" in categories:
-            rows = (await self.session.execute(select(MemoryClaim, Memory).outerjoin(
-                Memory, MemoryClaim.active_memory_id == Memory.id,
-            ).join(ProxyUser, MemoryClaim.proxy_user_id == ProxyUser.id).where(
-                MemoryClaim.tenant_id == self._as_uuid(tenant_id),
-                MemoryClaim.proxy_user_id == self._as_uuid(proxy_user_id),
-                MemoryClaim.claim_fingerprint.in_(fingerprints),
-                ProxyUser.tenant_id == self._as_uuid(tenant_id), ProxyUser.is_blocked.is_(False),
-            ).execution_options(populate_existing=True))).all()
+            if rows is None:
+                rows = await preference_rows(self.session, tenant_id=self._as_uuid(tenant_id),
+                    owner=self._as_uuid(proxy_user_id), fingerprints=fingerprints)
             by_fingerprint = {claim.claim_fingerprint: (claim, memory) for claim, memory in rows}
             created_after = self._created_after(time_filter_days)
             for key in context.property_keys:

@@ -884,6 +884,8 @@ class MemoryClaim(Base):
         ),
         Index("ix_memory_claims_tenant_category", "tenant_id", "category"),
         Index("ix_memory_claims_active_memory", "active_memory_id"),
+        Index("ix_memory_claims_preference_scopes", "tenant_id", "proxy_user_id", "predicate_key",
+              postgresql_where=text("category = 'preference' AND status IN ('active','disputed')")),
         ForeignKeyConstraint(
             ["winning_revision_id"],
             ["memory_claim_revisions.id"],
