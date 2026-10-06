@@ -28,6 +28,7 @@ from api.db.models import (
 from api.routers.memories import answer_memory_clarification
 from api.schemas.requests import MemoryClarificationAnswerRequest
 from api.services.proxy_user_service import ProxyUserService
+from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID, EmbeddingModelRecord
 from api.services.retriever import RetrieverService
 from tests.integration.test_source_decision_postgres import (
     _Embedding,
@@ -367,11 +368,19 @@ def test_complete_vector_payload_cannot_bypass_sql_scope_or_provenance(
         engine = create_async_engine(os.environ["DATABASE_URL"])
         try:
             async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-                results = await _retriever(session, _cache(), search=Search()).retrieve(
+                service = _retriever(session, _cache(), search=Search())
+                embedding = service.embedding_service
+                embedding.get_model = AsyncMock(wraps=embedding.get_model)
+                embedding.embed = AsyncMock(wraps=embedding.embed)
+                results = await service.retrieve(
                     **_args(
                         sql_scope.tenant_id, sql_scope.proxy_id, sql_scope.external_id
                     )
                 )
+                embedding.get_model.assert_awaited_once_with(DEFAULT_ACTIVE_MODEL_ID)
+                embedding.embed.assert_awaited_once()
+                model = embedding.embed.await_args.kwargs["model_record"]
+                assert isinstance(model, EmbeddingModelRecord) and model.id == DEFAULT_ACTIVE_MODEL_ID
                 assert [row.id for row in results] == [str(memory_id)]
                 assert "C++" in results[0].content
                 assert results[0].provenance.get("authority") != 100

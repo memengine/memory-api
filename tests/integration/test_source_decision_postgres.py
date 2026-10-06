@@ -45,7 +45,7 @@ from api.schemas.requests import MemoryClarificationAnswerRequest, MemorySourceR
 from api.services.source_review_service import list_source_reviews, review_intent, view_review
 from api.services.source_review_service import target_version
 from api.services.conflict_resolver import ConflictResolver
-from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID, EmbeddingResult
+from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID, EmbeddingModelRecord, EmbeddingResult
 from api.services.extraction_service import ExtractionService
 from api.services.llm_service import LLMResponse
 from api.services.memory_service import MemoryService
@@ -61,6 +61,15 @@ def _embedding(_text, **_kwargs):
 class _Embedding:
     def __init__(self, **_kwargs):
         pass
+
+    async def get_model(self, model_id):
+        # Retrieval resolves a detached model before releasing its SQL transaction.
+        assert model_id == DEFAULT_ACTIVE_MODEL_ID
+        return EmbeddingModelRecord(
+            id=model_id, provider="openai", model_name="text-embedding-3-small",
+            dimensions=1536, qdrant_collection="memories", is_active=True,
+            deprecated_at=None, created_at="2026-10-06T00:00:00+00:00",
+        )
 
     embed_sync = staticmethod(_embedding)
     embed = AsyncMock(side_effect=_embedding)
