@@ -160,6 +160,18 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
 
     record_model = RuntimePreferenceRecord
 
+    def _prepare_target_releases(self, session, job, record):
+        from api.services.runtime_target_release import prepare_target_releases
+        return prepare_target_releases(session, job, record)
+
+    def _can_reaffirm_runtime_target(self, context, operation):
+        from api.services.runtime_target_release import can_reaffirm_runtime_target
+        return can_reaffirm_runtime_target(context, operation)
+
+    def _commit_target_releases(self, session, job, record, context, batch, stored, reaffirmations):
+        from api.services.runtime_target_release import commit_target_releases
+        return commit_target_releases(session, job, record, context, batch, stored, reaffirmations)
+
     @staticmethod
     def _write(job, record):
         check_footprint(job, record)

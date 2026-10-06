@@ -116,6 +116,15 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
     def _configure_write_transaction(self, session):
         pass
 
+    def _prepare_target_releases(self, session, job, record):
+        return None  # Only the separately gated runtime subclass can discharge holds.
+
+    def _can_reaffirm_runtime_target(self, context, operation):
+        return False
+
+    def _commit_target_releases(self, session, job, record, context, batch, stored, reaffirmations):
+        return 0
+
     def _check(self, session, job, messages, record, catalog, *, capture_id=None):
         result = super()._check(session, job, messages, record, catalog, capture_id=capture_id)
         if record.external_conversation_id != self._external_id(job):
@@ -211,7 +220,9 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
             if job.status in {ExtractionJobStatus.completed, ExtractionJobStatus.dead}:
                 raise PreferenceAdmissionUnavailable("admission_job_closed")
             batch = bind_preference_intents(record.reply, snapshot=record.snapshot, messages=messages,
-                source_conversation_id=record.source_conversation_id)
+                                           source_conversation_id=record.source_conversation_id)
+            release_context = self._prepare_target_releases(session, job, record)
+            runtime_reaffirmations = []
             # A callback cannot sneak provider execution into this transaction.
             if embeddings is not None and type(embeddings) is not dict:
                 raise TypeError("precomputed embedding mapping required, not a callback")
@@ -246,6 +257,8 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
                     if reason in {"WITHHOLD", "REAFFIRM", "DEDUP"}:
                         requests.append(PreferenceChoiceRequest.model_validate({k: getattr(operation, k)
                             for k in PreferenceChoiceRequest.model_fields}))
+                    elif reason == "preference_choice_not_held" and self._can_reaffirm_runtime_target(release_context, operation):
+                        runtime_reaffirmations.append(operation)
                     else:
                         rejected[reason] = rejected.get(reason, 0) + 1
                     continue
@@ -292,6 +305,8 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
             fact_stored, fact_counts = self._store_nonpreferences(
                 resolver, batch, record, fact_context, writer_args, pending, defer)
             stored.extend(fact_stored)
+            reaffirmed += self._commit_target_releases(session, job, record, release_context,
+                batch, stored, runtime_reaffirmations)
             diagnostics = {}
             buffered = _persist_pending_extraction_candidates(session, candidates=pending,
                 tenant_id=str(job.tenant_id), proxy_user_id=str(job.proxy_user_id), extraction_job_id=str(job.id),

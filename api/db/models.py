@@ -2827,6 +2827,8 @@ class ExtractionJob(Base):
     runtime_route: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Indexed projection of the private receipt, set in its memory-write transaction.
     runtime_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A discharged hold is not a successfully applied extraction job.
+    runtime_hold_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Minimal frozen target projection, retained independently of raw evidence.
     # Never interpreted as an applied receipt or read-release permission.
     runtime_withholding_footprint: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
@@ -3118,7 +3120,9 @@ class RuntimeJobReconciliation(Base):
     __tablename__ = "runtime_job_reconciliations"
     __table_args__ = (CheckConstraint(
         "jsonb_typeof(record_json) = 'object' AND octet_length(record_json::text) <= 4096",
-        name="ck_runtime_reconciliation_bound"),)
+        name="ck_runtime_reconciliation_bound"), CheckConstraint(
+        "release_json IS NULL OR (jsonb_typeof(release_json) = 'object' AND octet_length(release_json::text) <= 32768)",
+        name="ck_runtime_release_bound"),)
 
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
         ForeignKey("extraction_jobs.id", ondelete="CASCADE"), primary_key=True)
@@ -3126,6 +3130,7 @@ class RuntimeJobReconciliation(Base):
     proxy_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
         ForeignKey("proxy_users.id", ondelete="CASCADE"), nullable=False)
     record_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    release_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     audit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True),
         ForeignKey("audit_logs.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -3293,6 +3298,9 @@ Index("ix_extraction_jobs_runtime_owner", ExtractionJob.tenant_id, ExtractionJob
 Index("ix_extraction_jobs_runtime_pending", ExtractionJob.tenant_id, ExtractionJob.proxy_user_id,
       postgresql_where=text("(runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256') "
                             "AND runtime_applied_at IS NULL"))
+Index("ix_extraction_jobs_runtime_unreleased", ExtractionJob.tenant_id, ExtractionJob.proxy_user_id,
+      postgresql_where=text("(runtime_route IS NOT NULL OR preference_intent_admission ? 'runtime_source_sha256') "
+                            "AND runtime_applied_at IS NULL AND runtime_hold_released_at IS NULL"))
 Index("ix_extraction_jobs_payload_retention", ExtractionJob.raw_payload_expires_at)
 Index(
     "ix_extraction_jobs_status_stale_after",

@@ -5,8 +5,16 @@ from sqlalchemy import select
 
 from api.db.models import ExtractionJob, Memory, RuntimeJobReconciliation
 from api.schemas.runtime_reconciliation import RuntimeReconciliationRecord
+from api.schemas.runtime_target_release import (
+    fact_key,
+    preference_key,
+    read_target_releases,
+)
 from api.services.runtime_preference_footprint import RuntimePreferenceFootprint
-from api.services.runtime_preference_routing import RUNTIME_ROUTE
+from api.services.runtime_preference_routing import (
+    RUNTIME_ROUTE,
+    target_release_enabled,
+)
 from api.services.source_review_service import target_version
 from api.settings import get_settings
 
@@ -28,16 +36,18 @@ async def read_runtime_hold(session, *, owner, tenant_id, predicate, unavailable
         return RuntimeHold(unavailable=unavailable)
     rows = (await session.execute(select(ExtractionJob.id, ExtractionJob.runtime_route,
         ExtractionJob.runtime_withholding_footprint, RuntimeJobReconciliation.record_json,
-        RuntimeJobReconciliation.tenant_id, RuntimeJobReconciliation.proxy_user_id).outerjoin(
+        RuntimeJobReconciliation.tenant_id, RuntimeJobReconciliation.proxy_user_id,
+        RuntimeJobReconciliation.release_json).outerjoin(
         RuntimeJobReconciliation, RuntimeJobReconciliation.job_id == ExtractionJob.id).where(
         ExtractionJob.tenant_id == tenant_id, ExtractionJob.proxy_user_id == owner,
         predicate, ExtractionJob.runtime_applied_at.is_(None),
+        *([ExtractionJob.runtime_hold_released_at.is_(None)] if target_release_enabled(tenant_id) else []),
     ).limit(MAX_PENDING_FOOTPRINTS + 1))).all()
     # A page cannot prove coverage when more jobs exist. Unknown stays broad.
     if not rows or len(rows) > MAX_PENDING_FOOTPRINTS:
         return RuntimeHold(unavailable=unavailable)
     prefs, facts = set(), {}
-    for job_id, route, raw, reconciled, reconciled_tenant, reconciled_owner in rows:
+    for job_id, route, raw, reconciled, reconciled_tenant, reconciled_owner, release_json in rows:
         if route != RUNTIME_ROUTE or raw is None:
             return RuntimeHold(unavailable=unavailable)
         try:
@@ -58,8 +68,18 @@ async def read_runtime_hold(session, *, owner, tenant_id, predicate, unavailable
                 return RuntimeHold(unavailable=True)
         if footprint.coverage != "targets":
             return RuntimeHold(unavailable=unavailable)
-        prefs.update(footprint.preference_fingerprints)
+        try:
+            released = ({t.key for t in read_target_releases(release_json, footprint)}
+                if target_release_enabled(tenant_id) and reconciled is not None else set())
+        except (TypeError, ValueError):
+            return RuntimeHold(unavailable=True)
+        # A complete release and its indexed timestamp must commit together.
+        if release_json is not None and released and len(released) == len(footprint.preference_fingerprints) + len(footprint.fact_targets):
+            return RuntimeHold(unavailable=True)
+        prefs.update(fp for fp in footprint.preference_fingerprints if preference_key(fp) not in released)
         for target in footprint.fact_targets:
+            if fact_key(target.memory_id, target.version) in released:
+                continue
             if target.memory_id in facts and facts[target.memory_id] != target.version:
                 return RuntimeHold(unavailable=True)
             facts[target.memory_id] = target.version

@@ -526,8 +526,8 @@ no new scheduler, provider call, trust tier, cancellation/reset or authority cha
 
 **Quarantine is an operational diagnosis, not recovery of current context.** It
 does not clear the guard, set an applied receipt, activate old values, or treat an
-unrelated successful job as covering lost evidence. Evidence-backed hold discharge
-using new authoritative covering input is not implemented in this stage. Unknown
+unrelated successful job as covering lost evidence. This initial stage did not
+implement evidence-backed hold discharge; the next section adds it for known targets. Unknown
 coverage can therefore remain user-wide indefinitely; do not enable a customer
 canary until that availability policy is explicitly settled and tested. Independent
 semantic evaluation and measured latency/load/provider resilience gates also remain.
@@ -548,3 +548,100 @@ the existing 35 router errors and one context-builder annotation error, rather
 than hiding them or claiming the whole repository type-checks cleanly. All
 providers were controlled/forbidden; no live traffic, paid semantic evaluation,
 holdout, production activation or load/SLO validation was performed.
+
+### Sparse target-release proofs (default-off)
+
+`RUNTIME_TARGET_RELEASE_ENABLED=false` separately gates release and use of its
+read projections. It also requires target withholding and the existing tenant
+allowlist. Runtime writes still require their original write/explicit-preference
+gates. No configuration, tenant enrollment, SDK/MCP/assistant or UI is changed.
+
+A newly accepted, source-bound runtime job can discharge exact targets of an
+older quarantined job only after the normal writer accepts the outcome. Both
+the older job and its quarantine must predate acceptance of the new source.
+Finishing an already-accepted earlier job is not evidence-backed recovery.
+Uncaptured/historical jobs without a verified runtime source binding cannot
+discharge holds. No public metadata, model response, confidence, admin explanation,
+timeout or aggregate `status=applied` can supply a release proof.
+
+The writer reuses its owned ledger/target locks, source checks, exact versions and
+authority limits. Successful preference creation/replacement must select the
+matching identity's current owned memory and activated revision, produced by this
+source. A successful reaffirmation must bind the exact current memory/version
+and its operation marker. For a runtime-only hold on an already-current value,
+the existing choice-lock helper independently checks identity/version/authority;
+the runtime subclass may record reaffirmation without inventing a new value or
+raising authority. This exception is unavailable without a matching quarantined
+target. A fact requires an actual accepted UPDATE, the exact captured old ID/version,
+an archived predecessor, and this source's current owned replacement. KEEP_BOTH,
+rejection, deferred/uncertain/unrepresentable findings and unrelated writes do not
+release affected targets. Generic legacy preference inference is unchanged.
+
+Sparse `RuntimeJobReconciliation.release_json` stores only proven outcomes for
+that quarantined job: target fingerprints or fact IDs/versions, source job/capture
+and binding/decision digests, resulting memory/version and preference revision,
+outcome and release-audit ID. It is closed, digest-bound to the original footprint,
+bounded to 16 unique targets and 32 KiB. No quotes, values, scope labels, confidence
+or new authority enter it. It is not a signature or independent semantic evaluation.
+The original quarantine diagnosis, footprint, failed status and private record
+are unchanged. Older NULL release records mean no recovery proof, not success.
+
+The proof, `event=runtime_targets_released` audit, resulting memory/ledger/outbox
+writes and source job's applied receipt share one SQL transaction. Audit/receipt
+failure rolls them all back. The audit identifies credential class `runtime_writer`,
+not a named human reviewer. Target proofs append without replacing prior proofs.
+An applied source replay returns its fixed receipt without fresh release coverage,
+new provider calls or duplicate audits.
+
+Each source write locks at most eight quarantined jobs with NOWAIT, then uses the
+existing stable preference-identity lock order. A busy guard or serialization
+failure aborts the transaction; normal task recovery retries the same fixed
+decision. The page can release only its jobs' proved targets; unseen jobs remain
+guarded. It never treats a bounded write page as complete whole-user coverage.
+There is no separate scheduler, read-time classifier, or extraction-worker wait.
+
+Partial releases subtract only proved keys from read withholding. Remaining fact
+targets still need exact unchanged versions; corrupt partial proof/binding fails
+closed. When and only when every target in a known footprint has a proof, the
+same transaction projects `ExtractionJob.runtime_hold_released_at`. This is a
+server-only, indexed historical discharge marker, **not** `runtime_applied_at`:
+the failed job stays dead/unapplied and retry/discard remain forbidden. Ordinary
+reads then use normal current SQL/ledger eligibility, not old proof values. Later
+valid replacements or source retention do not resurrect the historical hold.
+As with the applied-receipt projection, direct SQL tampering with these server-only
+fields is outside the API trust boundary; never set them manually to unblock reads.
+
+Deploy additive `runtime_target_releases` and online `runtime_release_indexes`
+before API/worker code, while flags remain off. The nullable columns have no default
+or backfill; the proof constraint is NOT VALID to avoid scanning historical rows.
+The concurrent owner index excludes fully discharged jobs so pending probes need
+not scan a growing discharged backlog. Interrupted invalid builds repair only
+this exact managed index. Do not downgrade while new instances are running.
+Disabling release/withholding or removing allowlist membership restores conservative
+holds rather than silently authorizing old context.
+
+Unknown-coverage jobs still cannot be discharged by restating one preference or
+fact. An explicit whole-context recovery policy remains unresolved; this stage
+does not create a destructive reset or weaken that boundary. Independent semantic
+accuracy, provider resilience and measured latency/load gates remain required
+before a separately approved customer canary.
+
+Controlled checks (isolated PostgreSQL/Redis, no paid providers):
+
+```powershell
+python -m pytest tests/integration/test_runtime_target_release.py tests/unit/test_runtime_target_release_schema.py tests/integration/test_runtime_target_withholding.py tests/integration/test_runtime_quarantine.py tests/integration/test_runtime_recovery.py -q
+```
+
+Local verification on 2026-10-06: all 2,615 local unit tests passed (three dependency
+warnings and an existing async cancellation warning). The broader controlled
+regression run passed 225 cases; one new lock test initially used the async driver's
+`sqlstate` attribute against psycopg2's `pgcode`. Correcting that assertion required
+no production change. Final release/schema checks passed 36 cases, and the remaining
+index check passed separately with 2,000 synthetic discharged jobs after an empty
+fixture had allowed the planner to prefer an older index. Tests cover mixed partial
+release, rejected/uncertain/scoped/higher-authority input, stale capture, same-record
+concurrent writers, lock contention, audit rollback, retention, replay, flag rollback,
+proof corruption, backlog progress and index compatibility. Fresh migration and
+downgrade/re-upgrade passed; scoped Ruff and Mypy checks passed. These are local
+controlled-provider results, not GitHub CI, production load measurements or semantic
+holdout accuracy. No paid provider calls, deployment or flag activation occurred.

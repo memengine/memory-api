@@ -27,6 +27,12 @@ def runtime_enabled(tenant_id):
             and str(tenant_id) in settings.runtime_preference_tenant_ids.split(","))
 
 
+def target_release_enabled(tenant_id):
+    settings = get_settings()
+    return (settings.runtime_target_release_enabled and settings.runtime_target_withholding_enabled
+        and str(tenant_id) in settings.runtime_preference_tenant_ids.split(","))
+
+
 def runtime_catalog(tenant):
     if tenant is None or not tenant.is_active:
         raise PreferenceAdmissionUnavailable("intent_tenant_unavailable")
