@@ -1,0 +1,29 @@
+{
+  "version": "recall-operations-v2-development-v1",
+  "split": "development",
+  "label_source": "AI-authored diagnostic expectations; not independent semantic gold",
+  "initial_state": {"property_key": "examples.language", "scope_ref": "global", "current_value": "C++", "authority": 20},
+  "cases": [
+    {"id":"recall-en","family":"recall","language":"en","text":"Remind me which language I chose for my usual programming examples.","expected_actions":[],"expected_nonpreferences":0,"empty_reply_allowed":true},
+    {"id":"recall-hi","family":"recall","language":"hi","text":"मुझे याद दिलाओ कि सामान्य प्रोग्रामिंग उदाहरणों के लिए मैंने कौन सी भाषा चुनी थी।","expected_actions":[],"expected_nonpreferences":0,"empty_reply_allowed":true},
+    {"id":"recall-hinglish","family":"recall","language":"hinglish","text":"Yaad dilao ki usual programming examples ke liye maine kaunsi language choose ki thi.","expected_actions":[],"expected_nonpreferences":0,"empty_reply_allowed":true},
+    {"id":"keep-en","family":"reaffirmation","language":"en","text":"Keep C++ as my usual language for all programming examples.","expected_actions":["reaffirm"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"keep-hi","family":"reaffirmation","language":"hi","text":"सभी प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा C++ ही बनाए रखो।","expected_actions":["reaffirm"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"keep-hinglish","family":"reaffirmation","language":"hinglish","text":"Saare programming examples ke liye C++ hi meri usual language rehne do.","expected_actions":["reaffirm"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"change-en","family":"correction","language":"en","text":"Use Python rather than C++ as my usual language for programming examples from now on.","expected_actions":["set_current"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"change-hi","family":"correction","language":"hi","text":"अब से प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा C++ की जगह Python रखो।","expected_actions":["set_current"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"change-hinglish","family":"correction","language":"hinglish","text":"Ab se programming examples ke liye C++ ki jagah Python meri usual language rakho.","expected_actions":["set_current"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"unsure-en","family":"uncertainty","language":"en","text":"I have not settled whether C++ or Python should remain my usual language for programming examples.","expected_actions":["withhold"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"unsure-hi","family":"uncertainty","language":"hi","text":"अभी तय नहीं किया है कि प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा C++ रहे या Python।","expected_actions":["withhold"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"unsure-hinglish","family":"uncertainty","language":"hinglish","text":"Abhi decide nahi hua ki programming examples ki meri usual language C++ rahe ya Python.","expected_actions":["withhold"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"mixed-en","family":"mixed","language":"en","text":"Which language did I previously choose? Make Python my usual language for programming examples, and my exam moved to October 18.","expected_actions":["set_current"],"expected_nonpreferences":1,"empty_reply_allowed":false},
+    {"id":"mixed-hi","family":"mixed","language":"hi","text":"मैंने पहले कौन सी भाषा चुनी थी? प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा Python रखो, और मेरी परीक्षा अब 18 अक्टूबर को है।","expected_actions":["set_current"],"expected_nonpreferences":1,"empty_reply_allowed":false},
+    {"id":"mixed-hinglish","family":"mixed","language":"hinglish","text":"Maine pehle kaunsi language choose ki thi? Programming examples ki meri usual language Python rakho, aur mera exam ab October 18 ko hai.","expected_actions":["set_current"],"expected_nonpreferences":1,"empty_reply_allowed":false},
+    {"id":"once-en","family":"one_off","language":"en","text":"For this one answer only, show a Python programming example.","expected_actions":["contextual"],"expected_nonpreferences":0,"empty_reply_allowed":true},
+    {"id":"once-hi","family":"one_off","language":"hi","text":"सिर्फ इस एक उत्तर के लिए Python का प्रोग्रामिंग उदाहरण दिखाओ।","expected_actions":["contextual"],"expected_nonpreferences":0,"empty_reply_allowed":true},
+    {"id":"once-hinglish","family":"one_off","language":"hinglish","text":"Sirf is ek answer ke liye Python ka programming example dikhao.","expected_actions":["contextual"],"expected_nonpreferences":0,"empty_reply_allowed":true},
+    {"id":"question-update-en","family":"question_shaped_update","language":"en","text":"Could you make Python my default language for every future programming example?","expected_actions":["set_current"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"question-update-hi","family":"question_shaped_update","language":"hi","text":"क्या आगे के हर प्रोग्रामिंग उदाहरण के लिए मेरी डिफ़ॉल्ट भाषा Python कर सकते हो?","expected_actions":["set_current"],"expected_nonpreferences":0,"empty_reply_allowed":false},
+    {"id":"question-update-hinglish","family":"question_shaped_update","language":"hinglish","text":"Kya aage ke har programming example ke liye Python meri default language kar sakte ho?","expected_actions":["set_current"],"expected_nonpreferences":0,"empty_reply_allowed":false}
+  ]
+}

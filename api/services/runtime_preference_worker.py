@@ -10,6 +10,7 @@ import json
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -36,6 +37,7 @@ from api.services.preference_intent_admission_service import (
 from api.services.preference_intent_contract import (
     PreferenceIntentReply,
     bind_preference_intents,
+    candidate_generation_schema_v2,
 )
 from api.services.provenance_service import conversation_ingestion_sha256
 from api.services.retriever import RetrieverService
@@ -83,11 +85,32 @@ confidence, permissions, authority, attestation, tenant identity or target IDs.
 """
 
 
+INTENT_PROMPT_V2 = """Prepare user-expressed memory operations, not answers about stored context.
+Determine whether each user clause requests remembered information or expresses
+a memory-relevant assertion, change, explicit reaffirmation or uncertainty.
+Merely asking what is stored does not reaffirm it. Do not answer recall requests
+inside preference/nonpreference findings, or copy stored values into user evidence.
+An explicit request to adopt a persistent default can be worded as a question;
+do not decide read-versus-change from punctuation or a question's opening words.
+In mixed turns, omit recall clauses but preserve separately expressed updates.
+Stored identities help bind an operation; they do not prove the user expressed it.
+\n""" + INTENT_PROMPT + """
+For recall-only input without a separate memory-relevant clause, return both
+arrays empty. Explicit reaffirmation requires the user's expressed instruction
+to keep a current preference, not the mere presence of that value in storage.
+Never fill a value-free action from stored context: withhold, reaffirm and abstain
+must emit null value. A structurally valid reply is still subject to backend
+source, identity, scope, authority and transactional checks.
+"""
+
+
 _enabled = runtime_enabled
 
 
-def classify_intents(record, messages, llm_service):
-    """One bounded primary call, then closed schema + independent source binding."""
+def classify_intents(record, messages, llm_service, *, contract_version: Literal[1, 2] = 1):
+    """One bounded call. V2 is internal evaluation opt-in, never job/client selected."""
+    if type(contract_version) is not int or contract_version not in (1, 2):
+        raise ValueError("unsupported intent classifier contract")
     prompt = json.dumps({
         "catalog": record.snapshot.catalog.model_dump(mode="json"),
         "identities": [asdict(item) for item in record.snapshot.identities],
@@ -96,9 +119,11 @@ def classify_intents(record, messages, llm_service):
     }, ensure_ascii=False, default=str, separators=(",", ":"))
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise PreferenceAdmissionUnavailable("intent_prompt_oversized")
-    response = llm_service.complete_sync(system_prompt=INTENT_PROMPT, user_message=prompt,
+    response = llm_service.complete_sync(system_prompt=INTENT_PROMPT if contract_version == 1 else INTENT_PROMPT_V2,
+        user_message=prompt,
         temperature=0, max_tokens=8192, response_format=JSONSchemaResponseFormat(
-            "memory_preference_intent_v1", PreferenceIntentReply.model_json_schema()))
+            f"memory_preference_intent_v{contract_version}",
+            PreferenceIntentReply.model_json_schema() if contract_version == 1 else candidate_generation_schema_v2()))
     content = response.content
     if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_REPLY_BYTES:
         raise PreferenceAdmissionUnavailable("intent_response_oversized")

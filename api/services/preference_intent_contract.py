@@ -7,8 +7,9 @@ before the existing writers can apply it. Queue use is default-off and tenant-ga
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -85,6 +86,35 @@ class PreferenceIntentReply(_Closed):
                    for p in self.preferences):
                 raise ValueError("preference text cannot also enter the fact lane")
         return self
+
+
+def candidate_generation_schema_v2() -> dict[str, Any]:
+    """Provider-only structural constraints; persisted parser/evidence gates stay v1.
+
+    All branches derive their common fields/bounds from the canonical model.
+    This does not prove that a user expressed the proposed operation.
+    """
+    schema = PreferenceIntentReply.model_json_schema()
+    base = schema["$defs"]["PreferenceIntent"]
+    branches = []
+    for actions, value_type, identity_type in (
+        (["assert", "set_current"], "string", "string"),
+        (["withhold", "reaffirm"], "null", "string"),
+        (["tentative", "contextual"], None, "string"),
+        (["abstain"], "null", "string"),
+        (["abstain"], "null", "null"),
+    ):
+        branch = deepcopy(base)
+        properties = branch["properties"]
+        properties["action"]["enum"] = actions
+        for name, required_type in (("value", value_type), ("property_key", identity_type),
+                                    ("scope_ref", identity_type)):
+            if required_type is not None:
+                properties[name] = next(deepcopy(option) for option in properties[name]["anyOf"]
+                                        if option["type"] == required_type)
+        branches.append(branch)
+    schema["$defs"]["PreferenceIntent"] = {"anyOf": branches}
+    return schema
 
 
 @dataclass(frozen=True, slots=True)

@@ -55,6 +55,7 @@ dev = [
     "httpx>=0.27.0",
     "fakeredis>=2.23.0",
     "ruff>=0.4.0",
+    "jsonschema>=4.20,<5", # independent provider-schema contract tests, dev only
 ]
 
 [tool.setuptools.packages.find]
