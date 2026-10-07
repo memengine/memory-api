@@ -1,8 +1,10 @@
 # Runtime recall/operation candidate v2: evaluation only
 
 Status: implemented internal candidate, NOT promoted to the queue worker and
-NOT a production repair/acceptance pass. No paid provider evaluation performed
-for this implementation slice. The latency NO-GO remains unchanged.
+NOT a production repair/acceptance pass. The later explicitly approved 21-case
+development run at `9a42514` matched 7/21 diagnostics; see the
+[NO-GO report](runtime_intent_v2_development_20261007.md). This was not a blind
+holdout or pilot acceptance pass. The latency NO-GO remains unchanged.
 
 ## What changes
 
