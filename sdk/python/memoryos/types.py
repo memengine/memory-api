@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from memoryos.preferences import (
+    PreferenceApplicability,
     PreferenceClaimRequest,
     PreferenceReadDecision,
     PreferenceScopeRequest,
@@ -269,6 +270,33 @@ class MemorySourceReviewAnswerResult(BaseModel):
     next_step: Literal["add_memory"] | None = None
 
 
+class PreferenceConfirmationReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(pattern=r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$")
+    version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    property_key: str = Field(min_length=1, max_length=120)
+    applicability: PreferenceApplicability
+    current_value: str | None
+    proposed_value: str = Field(min_length=1, max_length=256)
+    question: str
+    actions: list[Literal["confirm", "keep_current", "dismiss"]]
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def known_confirmation_scope(self):
+        if self.applicability.kind == "unresolved" or not self.actions or len(set(self.actions)) != len(self.actions):
+            raise ValueError("invalid preference confirmation scope or actions")
+        return self
+
+
+class PreferenceReviewAnswerResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    review_id: str
+    action: Literal["confirm", "keep_current", "dismiss"]
+    replayed: bool = False
+    memory_id: str | None = None
+
+
 class MemoryVisibility(BaseModel):
     """Backend withholding status, not a clarification or storage confirmation."""
 
@@ -290,6 +318,7 @@ class RetrieveResult(BaseModel):
     clarification_question: str | None = None
     clarification: MemoryClarification | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
+    preference_reviews: list[PreferenceConfirmationReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
     memory_visibility: MemoryVisibility | None = None
     preference_scope_request: PreferenceScopeRequest | None = None
@@ -554,6 +583,7 @@ class RetrieveEnvelope(EnvelopeBase):
     clarification_question: str | None = None
     clarification: MemoryClarification | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
+    preference_reviews: list[PreferenceConfirmationReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
     memory_visibility: MemoryVisibility | None = None
     preference_scope_request: PreferenceScopeRequest | None = None
@@ -570,6 +600,14 @@ class MemoryClarificationAnswerEnvelope(EnvelopeBase):
 
 class MemorySourceReviewAnswerEnvelope(EnvelopeBase):
     data: MemorySourceReviewAnswerResult
+
+
+class PreferenceReviewListEnvelope(EnvelopeBase):
+    data: list[PreferenceConfirmationReview]
+
+
+class PreferenceReviewAnswerEnvelope(EnvelopeBase):
+    data: PreferenceReviewAnswerResult
 
 
 class PrepareTurnEnvelope(RetrieveEnvelope):

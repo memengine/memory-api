@@ -63,7 +63,7 @@ async def test_read_exposes_policy_without_putting_withheld_value_into_context(m
         **({"preference_context": {"applicability": {"kind": "global"},
             "property_keys": ["examples.language"]}} if explicit else {}))
     response = await retrieve_memories(_request(), payload, service, proxies, ContextBuilder(),
-        AsyncMock(), AsyncMock(), str(uuid.uuid4()))
+        AsyncMock(), AsyncMock(run_sync=AsyncMock(return_value=[])), str(uuid.uuid4()))
     assert response.data == [] and "C++" not in (response.system_prompt_addition or "")
     assert response.preference_decisions == ([decision] if explicit else [])
     assert bool(response.clarification_question) is explicit
@@ -94,7 +94,7 @@ async def test_pending_visibility_cannot_leak_overlays_or_stale_review_cards(mon
     proxies = SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())))
     payload = MemoryRetrieveRequest(external_user_id="u", query="current?", format=format)
     response = await retrieve_memories(_request(), payload, service, proxies, ContextBuilder(),
-        AsyncMock(), AsyncMock(), str(uuid.uuid4()))
+        AsyncMock(), AsyncMock(run_sync=AsyncMock(return_value=[])), str(uuid.uuid4()))
     assert bool(response.data) is partial and response.memory_visibility == visibility
     assert ("Unrelated exam" in response.system_prompt_addition) is partial
     assert response.source_reviews == [] and response.clarification is None and response.clarification_question is None

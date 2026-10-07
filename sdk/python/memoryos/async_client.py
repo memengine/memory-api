@@ -41,6 +41,8 @@ from memoryos.types import (
     PrepareTurnResult,
     PrepareTurnEnvelope,
     prepare_turn_body,
+    PreferenceConfirmationReview, PreferenceReviewAnswerResult,
+    PreferenceReviewListEnvelope, PreferenceReviewAnswerEnvelope,
 )
 
 
@@ -228,6 +230,7 @@ class AsyncMemory:
             clarification_question=parsed.clarification_question,
             clarification=parsed.clarification,
             source_reviews=parsed.source_reviews,
+            preference_reviews=parsed.preference_reviews,
             preference_decisions=parsed.preference_decisions,
             preference_scope_request=parsed.preference_scope_request,
             memory_visibility=parsed.memory_visibility,
@@ -307,6 +310,18 @@ class AsyncMemory:
         )
         parsed = RetrievalFeedbackEnvelope.model_validate(self._parse_json(response))
         return parsed.data
+
+    async def list_preference_reviews(self, external_user_id: str) -> list[PreferenceConfirmationReview]:
+        response = await self._request_response("GET", "/v1/memories/preference-reviews", params={"external_user_id": external_user_id})
+        return PreferenceReviewListEnvelope.model_validate(self._parse_json(response)).data
+
+    async def answer_preference_review(self, review_id: str, *, external_user_id: str, version: str, action: str) -> PreferenceReviewAnswerResult:
+        """Explicit authenticated application-user action; never an autonomous model tool."""
+        if action not in {"confirm", "keep_current", "dismiss"}:
+            raise ValueError("invalid preference review action")
+        response = await self._request_response("POST", f"/v1/memories/preference-reviews/{quote(review_id, safe='')}/answer",
+            json={"external_user_id": external_user_id, "version": version, "action": action})
+        return PreferenceReviewAnswerEnvelope.model_validate(self._parse_json(response)).data
 
     async def answer_source_review(
         self, review_id: str, *, external_user_id: str, version: str, action: str,

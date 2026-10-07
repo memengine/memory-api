@@ -43,6 +43,8 @@ from api.db.models import PendingExtractionCandidate
 from api.db.models import Tenant
 from api.db.cache import CacheService
 from api.schemas.requests import MemoryAddRequest
+from api.schemas.requests import PreferenceReviewAnswerRequest
+from api.schemas.responses import PreferenceReviewAnswerResponse, PreferenceReviewListResponse
 from api.schemas.requests import MemoryClarificationAnswerRequest
 from api.schemas.requests import MemorySourceReviewAnswerRequest
 from api.schemas.requests import MemoryRetrieveRequest
@@ -463,6 +465,91 @@ async def prepare_memory_turn(
     return MemoryPrepareTurnResponse(**result.model_dump(), admission=admission)
 
 
+@router.get("/preference-reviews", response_model=PreferenceReviewListResponse)
+async def get_preference_reviews(
+    request: Request, external_user_id: str,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+):
+    from api.services.preference_confirmation_service import list_reviews
+    proxy = await proxy_user_service.find_existing(tenant_id=tenant_id, external_user_id=external_user_id)
+    if proxy is not None and proxy.is_blocked:
+        raise APIError(status_code=404, code="PCR_404", error="preference_review_not_found")
+    data = [] if proxy is None else await session.run_sync(lambda s: list_reviews(s,
+        tenant_id=tenant_id, proxy_user_id=str(proxy.id)))
+    return PreferenceReviewListResponse(data=data, request_id=get_request_id(request), timestamp=utc_now())
+
+
+@router.post("/preference-reviews/{review_id}/answer", response_model=PreferenceReviewAnswerResponse)
+async def answer_preference_review(
+    request: Request, review_id: str, payload: PreferenceReviewAnswerRequest, background: BackgroundTasks,
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    quality_gate_service: Annotated[QualityGateService, Depends(get_quality_gate_service)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    tenant_id: str = Depends(get_authenticated_tenant_id),
+):
+    from sqlalchemy.exc import DBAPIError
+    from api.services.preference_confirmation_service import answer, confirmation_content
+    try:
+        uuid.UUID(review_id)
+    except ValueError as exc:
+        raise APIError(status_code=404, code="PCR_404", error="preference_review_not_found") from exc
+    proxy = await proxy_user_service.find_existing(tenant_id=tenant_id, external_user_id=payload.external_user_id)
+    if proxy is None or proxy.is_blocked:
+        raise APIError(status_code=404, code="PCR_404", error="preference_review_not_found")
+    owner = str(proxy.id)
+    estimated_tokens = 0
+    try:
+        embedding = None
+        if payload.action == "confirm":
+            from api.services.runtime_preference_routing import runtime_enabled
+            if not runtime_enabled(tenant_id):
+                raise APIError(status_code=409, code="PCR_409", error="preference_confirmation_disabled")
+            content = await session.run_sync(lambda s: confirmation_content(s, tenant_id=tenant_id,
+                proxy_user_id=owner, review_id=review_id, version=payload.version))
+            if content is not None:
+                gate = await quality_gate_service.check([{"role":"user", "content":content, "source_kind":"client_assertion"}],
+                    tenant_id, payload.external_user_id, semantic_deduplication=False, turn_admission=True)
+                if not gate.passed:
+                    raise APIError(status_code=409, code="PCR_409", error="preference_confirmation_admission_rejected")
+                estimated_tokens = gate.estimated_tokens
+                envelope = await memory_service.quota_manager.get_quota_envelope(tenant_id)
+                if envelope.mode.value in {"BLOCKED", "PASSTHROUGH"}:
+                    raise APIError(status_code=409, code="PCR_409", error="preference_confirmation_budget_unavailable")
+                model = await memory_service.embedding_service.get_active_model()
+                await session.rollback()  # Detached configuration; no lock/connection across provider I/O.
+                embedding = await memory_service.embedding_service.embed(content, tenant_id=tenant_id, model_record=model)
+        result = await session.run_sync(lambda s: answer(s, tenant_id=tenant_id, proxy_user_id=owner,
+            review_id=review_id, version=payload.version, action=payload.action, embedding=embedding,
+            api_key_id=getattr(request.state, "api_key_id", None)))
+        await session.commit()
+        if not result.replayed:
+            RetrieverService.invalidate_local_user_cache(owner)
+            background.add_task(_invalidate_preference_review_cache, memory_service, owner)
+            if result.action == "confirm":
+                background.add_task(_dispatch_turn_usage, quality_gate_service, tenant_id, estimated_tokens)
+    except DBAPIError as exc:
+        await session.rollback()
+        if (getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)) in {"55P03", "40001", "40P01"}:
+            raise APIError(status_code=409, code="PCR_409", error="preference_review_busy_retry") from exc
+        raise
+    except (ValueError, APIError) as exc:
+        await session.rollback()
+        if isinstance(exc, APIError):
+            raise
+        raise APIError(status_code=409, code="PCR_409", error="preference_review_source_or_target_changed") from exc
+    return PreferenceReviewAnswerResponse(data=result, request_id=get_request_id(request), timestamp=utc_now())
+
+
+async def _invalidate_preference_review_cache(service, owner):
+    try:
+        await service._invalidate_retrieval_caches(owner)
+    except Exception:
+        logger.warning("preference_confirmation_cache_delivery_unavailable owner=%s", owner)
+
+
 @router.post("/retrieve", response_model=MemoryRetrieveResponse)
 async def retrieve_memories(
     request: Request,
@@ -581,6 +668,13 @@ async def retrieve_memories(
            if read_context is not None else {}),
     ) if payload.as_of is None and memory_visibility is None else []
     retrieval_id = None
+    preference_reviews = []
+    if payload.as_of is None:
+        from api.services.preference_confirmation_service import list_reviews
+        preference_reviews = await session.run_sync(lambda s: list_reviews(s, tenant_id=tenant_id,
+            proxy_user_id=str(proxy_user.id), context=read_context))
+        if preference_reviews:
+            clarification_question = preference_reviews[0].question
     feedback_started = time.perf_counter()
     try:
         retrieval_event = await RetrievalFeedbackService(session=session).log_retrieval(
@@ -628,6 +722,7 @@ async def retrieve_memories(
         clarification_question=clarification_question,
         clarification=clarification,
         source_reviews=source_reviews,
+        preference_reviews=preference_reviews,
         preference_decisions=preference_decisions,
         memory_visibility=memory_visibility,
         preference_scope_request=scope_request,

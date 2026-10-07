@@ -191,6 +191,34 @@ class MemorySourceReviewAnswerResponse(ResponseEnvelope):
     data: MemorySourceReviewAnswerData
 
 
+class PreferenceConfirmationReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str
+    version: str
+    property_key: str
+    applicability: dict[str, str]
+    current_value: str | None
+    proposed_value: str
+    question: str
+    actions: list[Literal["confirm", "keep_current", "dismiss"]]
+    expires_at: datetime
+
+
+class PreferenceReviewAnswerData(BaseModel):
+    review_id: str
+    action: Literal["confirm", "keep_current", "dismiss"]
+    replayed: bool = False
+    memory_id: str | None = None
+
+
+class PreferenceReviewAnswerResponse(ResponseEnvelope):
+    data: PreferenceReviewAnswerData
+
+
+class PreferenceReviewListResponse(ResponseEnvelope):
+    data: list[PreferenceConfirmationReview]
+
+
 class MemoryVisibility(BaseModel):
     """Processing is not a clarification, authority decision or provider promise."""
 
@@ -207,6 +235,7 @@ class MemoryRetrieveResponse(ResponseEnvelope):
     clarification_question: str | None = None
     clarification: MemoryClarificationData | None = None
     source_reviews: list[MemorySourceReview] = Field(default_factory=list)
+    preference_reviews: list[PreferenceConfirmationReview] = Field(default_factory=list)
     preference_decisions: list[PreferenceReadDecision] = Field(default_factory=list, max_length=16)
     memory_visibility: MemoryVisibility | None = None
     preference_scope_request: PreferenceScopeRequest | None = None

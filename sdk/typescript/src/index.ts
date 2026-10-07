@@ -184,6 +184,7 @@ export interface RetrieveResult {
   clarificationQuestion: string | null;
   clarification: MemoryClarification | null;
   sourceReviews?: MemorySourceReview[];
+  preferenceReviews?: PreferenceConfirmationReview[];
   preferenceDecisions?: PreferenceReadDecision[];
   memoryVisibility?: MemoryVisibility | null;
   preferenceScopeRequest?: PreferenceScopeRequest | null;
@@ -211,6 +212,61 @@ export interface MemorySourceReviewAnswerResult {
   resolved: boolean;
   action: "keep_current" | "restate" | "dismiss";
   nextStep: "add_memory" | null;
+}
+
+export interface PreferenceConfirmationReview {
+  id: string;
+  version: string;
+  propertyKey: string;
+  applicability: KnownPreferenceApplicability;
+  currentValue: string | null;
+  proposedValue: string;
+  question: string;
+  actions: Array<"confirm" | "keep_current" | "dismiss">;
+  expiresAt: string;
+}
+
+export interface PreferenceReviewAnswerResult {
+  reviewId: string;
+  action: "confirm" | "keep_current" | "dismiss";
+  replayed: boolean;
+  memoryId: string | null;
+}
+
+export interface PreferenceReviewAnswerParams {
+  reviewId: string;
+  externalUserId: string;
+  version: string;
+  action: "confirm" | "keep_current" | "dismiss";
+}
+
+interface PreferenceReviewWire {
+  id: string; version: string; property_key: string; applicability: KnownPreferenceApplicability;
+  current_value: string | null; proposed_value: string; question: string;
+  actions: Array<"confirm" | "keep_current" | "dismiss">; expires_at: string;
+}
+
+function preferenceReviewFromWire(review: PreferenceReviewWire): PreferenceConfirmationReview {
+  const invalid = () => { throw new MemoryOSError("Invalid preference confirmation review", { code: "SDK_INVALID_RESPONSE" }); };
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const scope = review?.applicability;
+  if (!review || typeof review.id !== "string" || !uuid.test(review.id)
+    || typeof review.version !== "string" || !/^[a-f0-9]{64}$/.test(review.version)
+    || typeof review.property_key !== "string" || !/^[a-z][a-z0-9._-]{0,119}$/.test(review.property_key)
+    || typeof review.proposed_value !== "string" || !review.proposed_value || review.proposed_value.length > 256
+    || review.current_value !== null && typeof review.current_value !== "string"
+    || typeof review.question !== "string" || !review.question
+    || typeof review.expires_at !== "string" || Number.isNaN(Date.parse(review.expires_at))
+    || !Array.isArray(review.actions) || !review.actions.length || review.actions.length > 3
+    || new Set(review.actions).size !== review.actions.length
+    || review.actions.some(a => !["confirm", "keep_current", "dismiss"].includes(a))) return invalid();
+  if (!scope || (scope.kind !== "global" && scope.kind !== "context")) return invalid();
+  if (scope.kind === "global" && (scope.namespace !== undefined || scope.key !== undefined)) return invalid();
+  if (scope.kind === "context" && (typeof scope.namespace !== "string" || !scope.namespace || scope.namespace.length > 120
+    || typeof scope.key !== "string" || !scope.key || scope.key.length > 120)) return invalid();
+  return { id: review.id, version: review.version, propertyKey: review.property_key,
+    applicability: review.applicability, currentValue: review.current_value, proposedValue: review.proposed_value,
+    question: review.question, actions: review.actions, expiresAt: review.expires_at };
 }
 
 export interface MemoryClarificationOption {
@@ -443,6 +499,7 @@ interface MemoryJobStatusEnvelope {
 }
 
 interface RetrieveEnvelope {
+  preference_reviews?: PreferenceReviewWire[];
   retrieval_id?: string | null;
   data: Array<{
     id: string;
@@ -1167,6 +1224,7 @@ export class MemoryOS {
         currentMemoryContent: review.current_memory_content ?? null,
         actions: review.actions, expiresAt: review.expires_at,
       })),
+      preferenceReviews: (payload.preference_reviews ?? []).map(preferenceReviewFromWire),
       clarification: payload.clarification
         ? {
             id: payload.clarification.id,
@@ -1184,6 +1242,26 @@ export class MemoryOS {
         return Boolean(payload.system_prompt_addition) && quotaMode !== "PASSTHROUGH";
       },
     };
+  }
+
+  async listPreferenceReviews(externalUserId: string): Promise<PreferenceConfirmationReview[]> {
+    const response = await this.requestResponse("GET", `/v1/memories/preference-reviews?external_user_id=${encodeURIComponent(externalUserId)}`);
+    const payload = await this.parseJson(response) as { data: PreferenceReviewWire[] };
+    return payload.data.map(preferenceReviewFromWire);
+  }
+
+  /** Call only from an authenticated application-user action handler, never an autonomous model tool. */
+  async answerPreferenceReview(params: PreferenceReviewAnswerParams): Promise<PreferenceReviewAnswerResult> {
+    if (!["confirm", "keep_current", "dismiss"].includes(params.action)) throw new Error("Invalid preference review action");
+    const response = await this.requestResponse("POST", `/v1/memories/preference-reviews/${encodeURIComponent(params.reviewId)}/answer`,
+      { body: JSON.stringify({ external_user_id: params.externalUserId, version: params.version, action: params.action }) });
+    const payload = await this.parseJson(response) as { data: { review_id: string; action: PreferenceReviewAnswerResult["action"];
+      replayed?: boolean; memory_id?: string | null } };
+    if (payload.data?.review_id !== params.reviewId || payload.data?.action !== params.action) {
+      throw new MemoryOSError("Invalid preference confirmation result", { code: "SDK_INVALID_RESPONSE" });
+    }
+    return { reviewId: payload.data.review_id, action: payload.data.action, replayed: payload.data.replayed === true,
+      memoryId: payload.data.memory_id ?? null };
   }
 
   async answerSourceReview(params: {

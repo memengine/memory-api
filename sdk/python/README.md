@@ -4,6 +4,23 @@
 pip install memoryo-sdk
 ```
 
+## Preference confirmations (internal v2, source checkout)
+
+Retrieval preserves `result.preference_reviews`; alternatively call
+`mem.list_preference_reviews(external_user_id)`. Display the returned known scope,
+proposal and allowed actions in your existing authenticated chat. Only after an
+explicit user action, your server can call
+`mem.answer_preference_review(review.id, external_user_id=user_id,
+version=review.version, action="confirm")`. Async methods have the same contract.
+Derive `user_id` from your authenticated session, not a model-generated argument.
+Do not expose confirmation as an autonomous agent tool. Keep the API key server-only.
+
+The backend rechecks source, target/version, ownership, permissions and authority;
+this application assertion stays authority 20, not independently verified human
+authority. Source-review actions never activate text. V1 remains the runtime
+default; these methods do not enable v2 or imply publication. See the
+[full contract](../../docs/preference_confirmation_contract.md).
+
 ## Start simple: solo builders and small teams
 
 > **For whom:** solo developers, MVPs, small SaaS apps, and single-agent products.

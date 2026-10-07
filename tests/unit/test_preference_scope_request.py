@@ -93,7 +93,7 @@ async def test_actual_route_preserves_missing_scope_and_does_not_pop_legacy_clar
     response = await memories.retrieve_memories(_request(), MemoryRetrieveRequest(
         external_user_id="u", query="language", context_max_tokens=budget), service,
         SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))),
-        ContextBuilder(), AsyncMock(), AsyncMock(), str(uuid.uuid4()))
+        ContextBuilder(), AsyncMock(), AsyncMock(run_sync=AsyncMock(return_value=[])), str(uuid.uuid4()))
     assert response.preference_scope_request == scope_request and response.clarification is None
     assert response.memory_visibility is None and "no default" in response.clarification_question
     assert bool(response.system_prompt_addition) == (budget == 500)

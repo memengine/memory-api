@@ -8,9 +8,11 @@ for this implementation slice. The latency NO-GO remains unchanged.
 
 The existing `classify_intents` function accepts an internal keyword-only
 `contract_version=2`. Its default is still `1`, and
-`RuntimePreferenceWorker.process()` still calls it without an override.
-There is no public request selector, job/metadata selector, live flag, SDK
-method, migration or second classification pipeline in this slice.
+runtime capture and worker constructors still default to v1. The later approved
+review-first slice persists this internal selection with the capture and reuses
+it during retries. There is no public request/job-metadata selector or second
+classification pipeline. Its API/SDK and index migration are described in the
+[preference confirmation contract](preference_confirmation_contract.md).
 
 V2 uses the same transcript/catalog/snapshot construction, provider adapter,
 one primary call, output bounds, `PreferenceIntentReply` parser and evidence
@@ -62,17 +64,20 @@ runtime provider call or SDK dependency. A power interruption corrupted its
 initial local installation; the affected dependencies were reinstalled at the
 same installed versions before testing.
 
-## Known semantic gate limit: do not hide it behind passing tests
+## Original semantic gate limit and approved review-first follow-up
 
 The correct candidate finding for a persistent request such as:
 
 > Could you make Python my default for every programming example?
 
 is structurally representable as `set_current` with exact user evidence. The
-unchanged backend's existing question-only evidence heuristic nevertheless
-rejects that form. A controlled contract test explicitly reproduces the rejection.
-That test passing verifies the known limit; it does NOT mean the user request
-works. No phrase-specific exception or evidence-gate weakening was implemented.
+v1 backend's existing question-only evidence heuristic rejects that form. The
+original controlled tests reproduced that limit, not a working user request.
+The separately approved v2 follow-up now permits a verified proposal to be
+persisted for review only. It never treats the classifier label as permission to
+write. Activation needs the separate explicit application-user-action endpoint;
+ordinary source reviews stay non-activating. No phrase-specific exception was
+added, and the legacy general-purpose evidence gate remains strict.
 
 Therefore a prompt/schema improvement alone cannot establish complete P1-P9
 pilot readiness. Do not spend credits rerunning the whole failed batch or
@@ -128,6 +133,6 @@ opt-in; do not build another generic runner or add hidden retries/fallbacks.
 - No paid provider calls, holdout runs, package publication, push, deployment,
   assistant/MCP changes or production activation occurred.
 
-These passing checks do not remove the known question-shaped-update rejection
+These historical checks did not remove the question-shaped-update rejection
 or measure candidate semantic accuracy, model availability, calibration, latency
 or production load capacity. The frozen pilot checklist remains the release gate.

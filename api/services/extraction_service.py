@@ -2422,6 +2422,7 @@ class ExtractionService:
         active_proposals: list[dict[str, Any]] | None = None,
         structured_proposal_decision: bool = False,
         evidence_spans: Any = _UNSET_SOURCE_SPANS,
+        question_review_only: bool = False,
     ) -> tuple[dict[str, Any], str | None]:
         """Require conversational memories to be grounded in a user's own turn.
 
@@ -2429,6 +2430,8 @@ class ExtractionService:
         result and server-observed model metadata. It never trusts a model's
         assertion of authority or a caller-supplied provenance payload.
         """
+        if question_review_only and (candidate.category != "preference" or evidence_spans is _UNSET_SOURCE_SPANS):
+            return {}, "question_review_requires_preference_spans"
         # Legacy extractors did not return evidence_turns. Preserve direct-user
         # extraction by validating every canonical turn, but never infer a
         # proposal binding through this compatibility path.
@@ -2518,7 +2521,7 @@ class ExtractionService:
 
         else:
             supported = any(
-                not cls._is_question_only(content)
+                (not cls._is_question_only(content) or question_review_only)
                 and (
                     verified_spans is not None
                     or bool(candidate_tokens & cls._significant_tokens(content))
@@ -2534,6 +2537,7 @@ class ExtractionService:
             if value is not None
         }
         return {
+            **({"requires_preference_confirmation": True} if question_review_only else {}),
             "schema_version": 2 if verified_spans is not None else 1,
             **({"source_spans": verified_spans} if verified_spans is not None else {}),
             "grounding_mode": (

@@ -111,14 +111,37 @@ def test_v2_keeps_mixed_update_while_not_fabricating_recall_findings():
     assert parsed.preferences[0].value == "Python" and len(parsed.nonpreferences) == 1
 
 
-def test_question_shaped_durable_request_remains_an_explicit_known_binding_limit():
+def test_question_shaped_durable_request_can_only_prepare_a_review():
     text = "Could you make Python my default for every programming example?"
     raw = reply([intent(quote=text)])
     assert Draft202012Validator(candidate_generation_schema_v2()).is_valid(raw)
-    # Semantic validity cannot be claimed from this structural pass. The
-    # existing question-only evidence gate still rejects this real update form.
+    # V1 still rejects. V2 may only produce a review, never an active declaration.
     with pytest.raises(PreferenceAdmissionUnavailable, match="intent_response_invalid"):
-        classify_intents(record(), [{"role": "user", "content": text}], Model(json.dumps(raw)), contract_version=2)
+        classify_intents(record(), [{"role": "user", "content": text}], Model(json.dumps(raw)))
+    result = classify_intents(record(), [{"role": "user", "content": text}], Model(json.dumps(raw)), contract_version=2)
+    from api.services.preference_intent_contract import bind_preference_intents
+    data = record()
+    batch = bind_preference_intents(result, snapshot=data.snapshot, messages=[{"role":"user","content":text}],
+        source_conversation_id=data.source_conversation_id, review_first=True)
+    assert len(batch.question_reviews) == 1 and not batch.declarations and not batch.choices
+
+
+@pytest.mark.parametrize("role,kind", [("assistant", "assistant_output"), ("user", "tool_output"),
+    ("user", "fetched_document"), ("tool", "tool_output")])
+def test_question_review_does_not_repair_untrusted_evidence(role, kind):
+    text = "Could you make Python my default for every programming example?"
+    with pytest.raises(PreferenceAdmissionUnavailable, match="intent_response_invalid"):
+        classify_intents(record(), [{"role":role,"source_kind":kind,"content":text}],
+            Model(json.dumps(reply([intent(quote=text)]))), contract_version=2)
+
+
+def test_question_review_cannot_forge_quote_or_known_identity():
+    text = "Could you make Python my default for every programming example?"
+    for raw, actual in [(reply([intent(quote=text)]), "Please show a C++ example."),
+        (reply([intent(quote=text, scope_ref="invented")]), text)]:
+        with pytest.raises(PreferenceAdmissionUnavailable, match="intent_response_invalid"):
+            classify_intents(record(), [{"role":"user","content":actual}],
+                Model(json.dumps(raw)), contract_version=2)
 
 
 @pytest.mark.parametrize("version", [True, False, 0, 3, "2", None])
@@ -134,7 +157,8 @@ def test_normal_worker_and_implicit_classifier_continue_using_v1():
     tree = ast.parse(inspect.getsource(RuntimePreferenceWorker))
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
              and n.func.id == "classify_intents"]
-    assert len(calls) == 1 and calls[0].keywords == []
+    assert len(calls) == 1
+    assert inspect.signature(RuntimePreferenceWorker).parameters["contract_version"].default == 1
     source = deepcopy(reply())
     classify_intents(record(), [{"role": "user", "content": intent()["quote"]}], Model(json.dumps(source)))
     assert source == reply()

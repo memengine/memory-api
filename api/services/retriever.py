@@ -229,6 +229,19 @@ class RetrieverService:
                 else:
                     hold = RuntimeHold(broad=False)
                     self.last_memory_visibility = None
+                from api.services.preference_confirmation_service import pending_fingerprints
+                confirmation_holds = await self.session.run_sync(lambda s: pending_fingerprints(s,
+                    tenant_id=args["tenant_id"], proxy_user_id=owner))
+                if confirmation_holds is None:
+                    self.last_memory_visibility = MemoryVisibility(state="unavailable")
+                    self.last_is_degraded, self.last_cache_hit = True, False
+                    return []
+                if confirmation_holds:
+                    hold = RuntimeHold(broad=hold.broad, unavailable=hold.unavailable,
+                        preference_fingerprints=hold.preference_fingerprints | frozenset(confirmation_holds),
+                        fact_ids=hold.fact_ids)
+                    self.last_memory_visibility = MemoryVisibility(state="unavailable", scope="affected_context")
+                    self.last_is_degraded = True
                 discovery = None
                 if self._preference_discovery_active and discovery_enabled(args["tenant_id"]):
                     try:
@@ -271,7 +284,7 @@ class RetrieverService:
                         rows=discovery.rows if discovery is not None else None,
                     )
                     fresh = preferences + fresh
-                if row[0]:
+                if row[0] or confirmation_holds:
                     # While any update is held, do not turn old choice cards into
                     # a new clarification request through a partial response.
                     self.last_preference_decisions = []

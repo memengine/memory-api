@@ -130,7 +130,7 @@ def classify_intents(record, messages, llm_service, *, contract_version: Literal
     try:
         reply = PreferenceIntentReply.model_validate_json(content)
         bind_preference_intents(reply, snapshot=record.snapshot, messages=messages,
-                                source_conversation_id=record.source_conversation_id)
+                                source_conversation_id=record.source_conversation_id, review_first=contract_version == 2)
     except (ValueError, ValidationError) as exc:
         raise PreferenceAdmissionUnavailable("intent_response_invalid") from exc
     return reply
@@ -178,12 +178,24 @@ def _conversation_source_binding(session, job, *, lock=False):
 class RuntimePreferenceRecord(FactTransactionRecord):
     # Optional only for already-captured jobs without a source event.
     runtime_source_sha256: Version | None = None
+    preference_confirmation_policy: Literal[1, 2] = 1
 
 
 class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
     """Reuse v3 mutations; check operator/tenant gates at each transactional step."""
 
     record_model = RuntimePreferenceRecord
+
+    def __init__(self, session_factory, *, contract_version=1):
+        super().__init__(session_factory)
+        if type(contract_version) is not int or contract_version not in (1, 2):
+            raise ValueError("unsupported intent classifier contract")
+        self.contract_version = contract_version
+
+    def _bind(self, record, messages):
+        return bind_preference_intents(record.reply, snapshot=record.snapshot, messages=messages,
+            source_conversation_id=record.source_conversation_id,
+            review_first=record.preference_confirmation_policy == 2)
 
     def _prepare_target_releases(self, session, job, record):
         from api.services.runtime_target_release import prepare_target_releases
@@ -218,6 +230,7 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
 
     def _capture_fields(self, job, *, session):
         return {**super()._capture_fields(job, session=session),
+                "preference_confirmation_policy": self.contract_version,
                 "runtime_source_sha256": _conversation_source_binding(session, job)}
 
     def _check(self, session, job, messages, record, catalog, *, capture_id=None):
@@ -290,9 +303,9 @@ class RuntimePreferenceTransactionService(PreferenceFactTransactionService):
 
 
 class RuntimePreferenceWorker:
-    def __init__(self, session_factory, *, llm_service=None, embedding_service=None, cache_service=None):
+    def __init__(self, session_factory, *, llm_service=None, embedding_service=None, cache_service=None, contract_version=1):
         self.session_factory = session_factory
-        self.transactions = RuntimePreferenceTransactionService(session_factory)
+        self.transactions = RuntimePreferenceTransactionService(session_factory, contract_version=contract_version)
         self.llm_service = llm_service
         self.embedding_service = embedding_service
         self.cache_service = cache_service
@@ -346,11 +359,10 @@ class RuntimePreferenceWorker:
         fixed_args = {**args, "catalog": record.snapshot.catalog, "capture_id": record.capture_id}
         if record.state == "captured":
             model = self.llm_service if self.llm_service is not None else LLMService()
-            reply = classify_intents(record, messages, model)
+            reply = classify_intents(record, messages, model, contract_version=record.preference_confirmation_policy)
             record = self.transactions.admit(reply, llm_service=model, **fixed_args)
         if record.state == "validated":
-            batch = bind_preference_intents(record.reply, snapshot=record.snapshot, messages=messages,
-                                           source_conversation_id=record.source_conversation_id)
+            batch = self.transactions._bind(record, messages)
             texts = dict.fromkeys(m.content for m in self.transactions._embedding_memories(batch, record))
             embeddings = {}
             if texts:

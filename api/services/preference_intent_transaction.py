@@ -116,6 +116,10 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
     def _configure_write_transaction(self, session):
         pass
 
+    def _bind(self, record, messages):
+        return bind_preference_intents(record.reply, snapshot=record.snapshot, messages=messages,
+            source_conversation_id=record.source_conversation_id)
+
     def _prepare_target_releases(self, session, job, record):
         return None  # Only the separately gated runtime subclass can discharge holds.
 
@@ -163,8 +167,8 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
                 return record
             if job.status in {ExtractionJobStatus.completed, ExtractionJobStatus.dead}:
                 raise PreferenceAdmissionUnavailable("admission_job_closed")
-            bind_preference_intents(parsed, snapshot=record.snapshot, messages=messages,
-                source_conversation_id=record.source_conversation_id)
+            # Use a detached proposed record; existing snapshot/source checks remain above.
+            self._bind(record.model_copy(update={"reply": parsed}), messages)
             admitted = IntentTransactionRecord.model_validate_json(_json({**record.model_dump(mode="json"),
                 "state": "validated", "reply": parsed.model_dump(mode="json"), "decision_sha256": decision_hash}))
             self._write(job, admitted)
@@ -219,8 +223,7 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
                 raise PreferenceAdmissionUnavailable("admission_decision_missing")
             if job.status in {ExtractionJobStatus.completed, ExtractionJobStatus.dead}:
                 raise PreferenceAdmissionUnavailable("admission_job_closed")
-            batch = bind_preference_intents(record.reply, snapshot=record.snapshot, messages=messages,
-                                           source_conversation_id=record.source_conversation_id)
+            batch = self._bind(record, messages)
             release_context = self._prepare_target_releases(session, job, record)
             runtime_reaffirmations = []
             # A callback cannot sneak provider execution into this transaction.
@@ -308,7 +311,11 @@ class PreferenceIntentTransactionService(PreferenceIntentAdmissionService):
             reaffirmed += self._commit_target_releases(session, job, record, release_context,
                 batch, stored, runtime_reaffirmations)
             diagnostics = {}
-            buffered = _persist_pending_extraction_candidates(session, candidates=pending,
+            question_buffered = 0
+            if batch.question_reviews:
+                from api.services.preference_confirmation_service import persist_question_reviews
+                question_buffered = persist_question_reviews(session, job=job, record=record, reviews=batch.question_reviews)
+            buffered = question_buffered + _persist_pending_extraction_candidates(session, candidates=pending,
                 tenant_id=str(job.tenant_id), proxy_user_id=str(job.proxy_user_id), extraction_job_id=str(job.id),
                 source_event_id=str(job.source_event_id) if job.source_event_id else None, diagnostics=diagnostics)
             receipt = self.receipt_model(created_memory_ids=tuple(uuid.UUID(m.id) for m in stored),

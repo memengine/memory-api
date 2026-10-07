@@ -31,7 +31,6 @@ from api.services.preference_intent_admission_service import (
 )
 from api.services.preference_intent_contract import (
     PreferenceIntentReply,
-    bind_preference_intents,
 )
 from api.services.preference_intent_transaction import (
     IntentTransactionReceipt,
@@ -230,8 +229,7 @@ class PreferenceFactTransactionService(PreferenceIntentTransactionService):
                 return record
             if job.status in {ExtractionJobStatus.completed, ExtractionJobStatus.dead}:
                 raise PreferenceAdmissionUnavailable("admission_job_closed")
-            batch = bind_preference_intents(parsed, snapshot=record.snapshot, messages=messages,
-                                           source_conversation_id=record.source_conversation_id)
+            batch = self._bind(record.model_copy(update={"reply": parsed}), messages)
             rows, complete = _targets(session, record)
             safe = complete and record.fact_context_complete and _bindings(rows) == record.fact_context
             # Detach before session exit, including expire_on_commit=True factories.

@@ -649,6 +649,7 @@ class ConflictResolver:
         default_source_conversation_id: uuid.UUID | None = None,
         default_source_event_id: uuid.UUID | None = None,
         provenance_snapshot: dict[str, Any] | None = None,
+        confirmed_preference_command: Any | None = None,
         llm_router: LLMRouter | None = None,
         llm_service: LLMService | None = None,
         domain_schema: str | None = None,
@@ -665,6 +666,7 @@ class ConflictResolver:
         self.default_source_conversation_id = default_source_conversation_id
         self.default_source_event_id = default_source_event_id
         self.provenance_snapshot = provenance_snapshot
+        self._confirmed_preference_command = confirmed_preference_command
         self.llm_router = llm_router
         self.llm_service = llm_service or LLMService(
             provider_clients=None,
@@ -1502,6 +1504,8 @@ class ConflictResolver:
         prepared = []
         identities = set()
         for memory in memories:
+            if memory.validated_evidence.get("requires_preference_confirmation"):
+                raise ValueError("pending preference confirmation cannot become memory")
             declaration = (PreferenceChoiceOperation.model_validate(memory.validated_evidence[CHOICE_OPERATION_MARKER])
                 if choice_operations else PreferenceClaimRequest.model_validate(memory.validated_evidence[PREFERENCE_MARKER]))
             if choice_operations and (
@@ -1512,7 +1516,12 @@ class ConflictResolver:
                 raise ValueError("choice representation mismatch")
             if memory.category != "preference" or memory.content != declaration.quote:
                 raise ValueError("explicit preference representation mismatch")
-            if GovernedExtractionService.verified_source_turns(memory, self.source_messages) is None:
+            from api.services.preference_confirmation_service import ConfirmedPreferenceCommand
+            command = self._confirmed_preference_command
+            confirmed = (type(command) is ConfirmedPreferenceCommand and command.matches(memory=memory,
+                tenant_id=tenant_id, proxy_user_id=proxy_user_id, conversation_id=source_conversation_id,
+                event_id=self.default_source_event_id))
+            if not confirmed and GovernedExtractionService.verified_source_turns(memory, self.source_messages) is None:
                 raise ValueError("explicit preference evidence invalid")
             fingerprint = declaration.fingerprint if choice_operations else preference_identity(declaration).fingerprint
             if fingerprint in identities:

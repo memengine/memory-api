@@ -3,6 +3,37 @@ import test from "node:test";
 
 import { MemoryOS, MemoryOSError, UniversalMemoryOS } from "../dist/index.js";
 
+test("preference confirmation is a separate explicit user-action command, never a read side effect", async () => {
+  const calls = [];
+  const id = "00000000-0000-4000-8000-000000000101";
+  const wire = { id, version: "a".repeat(64), property_key: "examples.language", applicability: { kind: "global" },
+    current_value: "C++", proposed_value: "Python", question: "Confirm the displayed change?",
+    actions: ["confirm", "keep_current", "dismiss"], expires_at: "2026-10-10T00:00:00Z" };
+  const client = new MemoryOS("test", undefined, 30_000, async (url, init) => {
+    calls.push({ url, body: init.body ? JSON.parse(init.body) : null });
+    if (url.includes("/answer")) return new Response(JSON.stringify({ data: { review_id: id, action: "confirm", replayed: false, memory_id: id } }));
+    if (init.method === "GET") return new Response(JSON.stringify({ data: [wire] }));
+    return new Response(JSON.stringify({ data: [], cached: false, system_prompt_addition: "", source_reviews: [],
+      preference_reviews: [wire], memory_visibility: { state: "unavailable", scope: "affected_context" } }));
+  });
+  const result = await client.get("current preference?", "u");
+  assert.equal(result.sourceReviews.length, 0);
+  assert.equal(result.preferenceReviews[0].proposedValue, "Python");
+  assert.equal(calls.length, 1);
+  assert.equal((await client.listPreferenceReviews("u"))[0].version, wire.version);
+  assert.equal(calls.length, 2);
+  const confirmed = await client.answerPreferenceReview({ reviewId: id, externalUserId: "u", version: wire.version, action: "confirm" });
+  assert.equal(confirmed.replayed, false);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2].body, { external_user_id: "u", version: wire.version, action: "confirm" });
+});
+
+test("malformed preference-confirmation metadata is not silently treated as a safe review", async () => {
+  const client = new MemoryOS("test", undefined, 30_000, async () => new Response(JSON.stringify({ data: [],
+    cached: false, system_prompt_addition: "", preference_reviews: [{ id: "bad", actions: ["promote"] }] })));
+  await assert.rejects(client.get("q", "u"), e => e.code === "SDK_INVALID_RESPONSE");
+});
+
 test("prepareTurn is one ordered request with typed admission, not polling or a fallback read", async () => {
   for (const state of ["accepted", "replayed", "rejected", "unavailable"]) {
     const calls = [];

@@ -26,6 +26,23 @@ not a general chat latency/availability solution. See the
 withholding, identity, evidence, and release limits. No npm publication or
 version change is implied by this source-checkout API.
 
+## Preference confirmations (internal v2, source checkout)
+
+Retrieval preserves `result.preferenceReviews`; alternatively call
+`mem.listPreferenceReviews(externalUserId)`. Display the returned scope, proposal
+and allowed actions in the existing authenticated chat. Only after an explicit
+user action, your server can call
+`mem.answerPreferenceReview({reviewId: review.id, externalUserId,
+version: review.version, action: "confirm"})`.
+Derive the external user ID from your authenticated session, not the model. Keep
+the API key server-only; never expose confirmation as an autonomous agent tool.
+
+The backend rechecks ownership, source, target/version, permissions and authority.
+Confirmation remains an application assertion at authority 20, not independently
+verified human authority. Source reviews never activate text. V1 remains the
+runtime default; these methods do not enable v2 or imply npm publication. See the
+[full contract](../../docs/preference_confirmation_contract.md).
+
 ## Start simple: solo builders and small teams
 
 > **For whom:** solo developers, MVPs, small SaaS apps, and single-agent products.

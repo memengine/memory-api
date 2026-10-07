@@ -3032,6 +3032,8 @@ class PendingExtractionCandidate(Base):
             "status",
         ),
         Index("ix_pending_extraction_candidates_job", "extraction_job_id"),
+        Index("ix_preference_confirmation_owner", "tenant_id", "proxy_user_id", "status",
+            text("created_at DESC"), "id", postgresql_where=text("candidate_reason = 'preference_confirmation_pending'")),
         Index(
             "ix_source_review_owner", "tenant_id", "proxy_user_id", "status",
             text("(metadata['extraction_evidence'] ->> 'preference_fingerprint')"),

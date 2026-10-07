@@ -14,6 +14,8 @@ from memoryos.types import (
     MemoryVisibility,
     PrepareTurnResult,
     TurnAdmission,
+    PreferenceConfirmationReview,
+    PreferenceReviewAnswerResult,
     ProposedMemory,
 )
 from memoryos.universal import UniversalMemory
@@ -28,6 +30,8 @@ __all__ = [
     "MemoryVisibility",
     "PrepareTurnResult",
     "TurnAdmission",
+    "PreferenceConfirmationReview",
+    "PreferenceReviewAnswerResult",
     "NotFoundError",
     "PreferenceApplicability",
     "PreferenceClaimRequest",

@@ -182,6 +182,13 @@ class MemorySourceReviewAnswerRequest(BaseModel):
     action: Literal["keep_current", "restate", "dismiss"]
 
 
+class PreferenceReviewAnswerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    external_user_id: str = Field(min_length=1)
+    version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    action: Literal["confirm", "keep_current", "dismiss"]
+
+
 class MemoryClarificationAnswerRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     answer: Literal["A", "B", "both", "neither"]

@@ -48,7 +48,7 @@ def turn_http(sql_scope, monkeypatch):
             key_prefix=api_key_prefix(raw_key), name="isolated turn test", permissions=["read", "write"]))
 
     @asynccontextmanager
-    async def serve(*, queue_full=False, broker_failed=False, read_failed=False, before_commit=None):
+    async def serve(*, queue_full=False, broker_failed=False, read_failed=False, before_commit=None, embeddings=None):
         engine = create_async_engine(os.environ["DATABASE_URL"])
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         cache = CacheService(redis_url=os.environ["REDIS_URL"], use_direct_breaker=True)
@@ -65,7 +65,7 @@ def turn_http(sql_scope, monkeypatch):
             return ProxyUserService(session=session, cache_service=cache)
         async def service(session: DbSession):
             instance = MemoryService(session=session, cache_service=cache, qdrant_service=SimpleNamespace(),
-                quota_manager=quota, dispatch_task=dispatch, embedding_service=SimpleNamespace())
+                quota_manager=quota, dispatch_task=dispatch, embedding_service=embeddings or SimpleNamespace())
             if queue_full:
                 instance.queue_router.reserve_extraction_slot = AsyncMock(return_value=None)
             if before_commit is not None:

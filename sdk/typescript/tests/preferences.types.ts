@@ -1,5 +1,11 @@
 // Compile-only consumer contract checks. Never invokes a service.
-import type { PrepareTurnParams, PrepareTurnResult, MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, PreferenceScopeRequest, RetrieveResult } from "../src/index";
+import type { PreferenceReviewAnswerParams, PrepareTurnParams, PrepareTurnResult, MemoryVisibility, PreferenceApplicability, PreferenceClaimRequest, PreferenceReadContext, PreferenceReadDecision, PreferenceScopeRequest, RetrieveResult } from "../src/index";
+const confirmChoice: PreferenceReviewAnswerParams = { reviewId: "server-id", externalUserId: "u", version: "server-version", action: "confirm" };
+// @ts-expect-error The customer confirms an offered version; it cannot replace the proposed value.
+const forgedValue: PreferenceReviewAnswerParams = { ...confirmChoice, proposedValue: "Rust" };
+// @ts-expect-error Existing source review restatement is not a preference confirmation action.
+const unrelatedAction: PreferenceReviewAnswerParams = { ...confirmChoice, action: "restate" };
+void forgedValue; void unrelatedAction;
 const turn: PrepareTurnParams = { message: "No", externalUserId: "u", conversationId: "c", turnId: "t" };
 function registeredTurn(result: PrepareTurnResult): string | null { return result.admission.jobId; }
 // @ts-expect-error An ordered current turn cannot be a historical read.
