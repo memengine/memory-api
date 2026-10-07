@@ -73,9 +73,12 @@ The correct candidate finding for a persistent request such as:
 is structurally representable as `set_current` with exact user evidence. The
 v1 backend's existing question-only evidence heuristic rejects that form. The
 original controlled tests reproduced that limit, not a working user request.
-The separately approved v2 follow-up now permits a verified proposal to be
-persisted for review only. It never treats the classifier label as permission to
-write. Activation needs the separate explicit application-user-action endpoint;
+The original v2 review follow-up depended on that heuristic rejecting a finding;
+a later provider-free preflight found Hindi/Hinglish equivalents could still
+become declarations. The approved correction routes every V2 `assert`/`set_current`
+finding to review only, irrespective of question detection or phrasing. Direct
+statements also need confirmation. It never treats the classifier label as
+permission to write. Activation needs the separate explicit application-user-action endpoint;
 ordinary source reviews stay non-activating. No phrase-specific exception was
 added, and the legacy general-purpose evidence gate remains strict.
 

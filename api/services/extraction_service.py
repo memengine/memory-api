@@ -2521,7 +2521,7 @@ class ExtractionService:
 
         else:
             supported = any(
-                (not cls._is_question_only(content) or question_review_only)
+                (question_review_only or not cls._is_question_only(content))
                 and (
                     verified_spans is not None
                     or bool(candidate_tokens & cls._significant_tokens(content))

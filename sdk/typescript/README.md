@@ -40,7 +40,9 @@ the API key server-only; never expose confirmation as an autonomous agent tool.
 The backend rechecks ownership, source, target/version, permissions and authority.
 Confirmation remains an application assertion at authority 20, not independently
 verified human authority. Source reviews never activate text. V1 remains the
-runtime default; these methods do not enable v2 or imply npm publication. See the
+runtime default. All V2 preference creations/replacements require confirmation,
+including direct statements; the SDK never auto-confirms them. These methods do
+not enable v2 or imply npm publication. See the
 [full contract](../../docs/preference_confirmation_contract.md).
 
 ## Start simple: solo builders and small teams

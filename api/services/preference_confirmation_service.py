@@ -1,4 +1,4 @@
-"""Review-only question proposals and explicit application-user-action commands.
+"""Review-only V2 preference proposals and explicit application-user-action commands.
 
 Never promote source-review text. Confirmation stays authority 20 and reuses
 the normal preference writer/outbox. The caller owns the SQL transaction.
@@ -93,6 +93,8 @@ class QuestionReviewSpec(BaseModel):
 
 
 def prepare_question_review(intent, *, snapshot, messages, source_conversation_id):
+    # Retain the existing private spec/name for saved reviews. This preparation
+    # now covers every V2 value-write proposal, not just question-shaped text.
     identity = next(i for i in snapshot.identities if (i.property_key, i.scope_ref) == (intent.property_key, intent.scope_ref))
     scope = next(s for s in snapshot.catalog.scopes if s.ref == intent.scope_ref)
     memory = ExtractedMemory(content=intent.quote, category="preference", importance_score=5,
@@ -101,7 +103,7 @@ def prepare_question_review(intent, *, snapshot, messages, source_conversation_i
         "direct_user_statement", evidence_spans=[{"turn_index": intent.turn_index, "quote": intent.quote}],
         question_review_only=True)
     if reason:
-        raise ValueError(f"question review evidence rejected: {reason}")
+        raise ValueError(f"preference review evidence rejected: {reason}")
     target = identity.target
     return QuestionReviewSpec(tenant_id=snapshot.tenant_id, proxy_user_id=snapshot.proxy_user_id,
         source_conversation_id=source_conversation_id, property_key=intent.property_key, scope_ref=intent.scope_ref,

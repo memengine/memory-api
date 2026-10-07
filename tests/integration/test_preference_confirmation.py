@@ -41,12 +41,20 @@ async def stage(scope, client, *, message=TEXT, value="Python", scope_ref="globa
     return listed.json()["data"][0]
 
 
-def test_question_is_pending_then_explicit_confirmation_updates_atomically(sql_scope, turn_http, monkeypatch):
+@pytest.mark.parametrize("message", [
+    TEXT,
+    "क्या आगे के हर प्रोग्रामिंग उदाहरण के लिए मेरी डिफ़ॉल्ट भाषा Python कर सकते हो?",
+    "Kya aage ke har programming example ke liye Python meri default language kar sakte ho?",
+    "Use Python instead of C++ as my default for every programming example.",
+    "अब से प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा C++ की जगह Python रखो।",
+    "Ab se programming examples ke liye C++ ki jagah Python meri usual language rakho.",
+])
+def test_question_is_pending_then_explicit_confirmation_updates_atomically(sql_scope, turn_http, monkeypatch, message):
     embeddings = SimpleNamespace(get_active_model=AsyncMock(return_value=SimpleNamespace(id="test-model")),
         embed=AsyncMock(side_effect=lambda text, **kw: _embedding(text)))
     async def exercise():
         async with turn_http(embeddings=embeddings) as (client, _, sessions, _):
-            row = await stage(sql_scope, client)
+            row = await stage(sql_scope, client, message=message)
             assert row["proposed_value"] == "Python" and row["current_value"] == "C++"
             assert identity(snapshot_read(sql_scope)).target.value == "C++"
             before, visibility, _ = await asyncio.to_thread(read, sql_scope,
@@ -359,3 +367,40 @@ def test_confirmation_partial_index_bounds_owner_read(sql_scope):
         assert plan["Plan"]["Actual Rows"] == 9
         assert "confirmation_plan_owner" in json.dumps(plan["Plan"])
         assert "Seq Scan" not in json.dumps(plan["Plan"])
+
+
+def test_v2_mixed_turn_updates_fact_but_keeps_preference_pending(sql_scope, turn_http):
+    from tests.integration.test_preference_fact_transaction import fact
+    from tests.integration.test_source_decision_postgres import _decision
+    fact_quote = "my exam moved to October 18"
+    preference_quote = "Use Python instead of C++"
+    message = f"{preference_quote}, and {fact_quote}."
+    async def exercise():
+        async with turn_http() as (client, _, sessions, _):
+            old_fact_id = fact(sql_scope)
+            old_preference_id = identity(snapshot_read(sql_scope)).target.memory_id
+            accepted = await client.post("/v1/memories/prepare-turn", json=body(sql_scope, message=message))
+            assert accepted.status_code == 200, accepted.text
+            model = Model([reply([intent(quote=preference_quote)], nonpreferences=[
+                {"category":"fact","content":fact_quote,"quote":fact_quote,"turn_index":0}]),
+                _decision(old_fact_id, relation="supersedes")])
+            embeddings = Embeddings()
+            worker = RuntimePreferenceWorker(sql_scope.factory, llm_service=model, embedding_service=embeddings,
+                cache_service=Cache(), contract_version=2)
+            result = await asyncio.to_thread(worker.process, uuid.UUID(accepted.json()["admission"]["job_id"]))
+            assert result["memories_created"] == 1  # The unrelated fact, not the preference.
+            assert embeddings.calls == [fact_quote]
+            assert identity(snapshot_read(sql_scope)).target.memory_id == old_preference_id
+            async with sessions() as session:
+                assert (await session.get(Memory, old_fact_id)).is_archived
+                created = await session.get(Memory, uuid.UUID(result["stored_memories"][0]["id"]))
+                assert created.content == fact_quote and created.category.value == "fact"
+                current_fact_id = created.id
+            rows, visibility, _ = await asyncio.to_thread(read, sql_scope,
+                [old_preference_id, current_fact_id], context=preference_context())
+            assert [row.content for row in rows] == [fact_quote]
+            assert visibility.scope == "affected_context"
+            listed = await client.get("/v1/memories/preference-reviews", params={"external_user_id":sql_scope.external_id})
+            assert listed.status_code == 200 and len(listed.json()["data"]) == 1
+            assert listed.json()["data"][0]["current_value"] == "C++"
+    asyncio.run(exercise())

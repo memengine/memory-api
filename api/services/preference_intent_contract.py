@@ -156,17 +156,16 @@ def bind_preference_intents(reply, *, snapshot, messages, source_conversation_id
             if (i.property_key, i.scope_ref) == (intent.property_key, intent.scope_ref)), None)
         if intent.property_key is not None and identity is None:
             raise ValueError("intent identity was not offered")
-        try:
-            memory = _verified_memory(content=intent.quote, category="preference",
-                turn_index=intent.turn_index, quote=intent.quote, messages=messages)
-        except ValueError as exc:
-            if not (review_first and intent.action in {"assert", "set_current"}
-                    and "unsupported_user_evidence" in str(exc) and identity is not None):
-                raise
+        if review_first and intent.action in {"assert", "set_current"}:
+            # V2 never grants value-write permission from a model label or a
+            # language-specific question heuristic. The same source/span and
+            # identity checks bind every proposal to explicit confirmation.
             from api.services.preference_confirmation_service import prepare_question_review
             question_reviews.append(prepare_question_review(intent, snapshot=snapshot,
                 messages=messages, source_conversation_id=conversation_id))
             continue  # Review evidence never becomes a declaration or value-free choice.
+        memory = _verified_memory(content=intent.quote, category="preference",
+            turn_index=intent.turn_index, quote=intent.quote, messages=messages)
         if intent.action in {"withhold", "reaffirm"}:
             if identity.target is None:
                 pending.append(memory)  # Never invent a value to target an absent preference.

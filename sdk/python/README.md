@@ -18,7 +18,9 @@ Do not expose confirmation as an autonomous agent tool. Keep the API key server-
 The backend rechecks source, target/version, ownership, permissions and authority;
 this application assertion stays authority 20, not independently verified human
 authority. Source-review actions never activate text. V1 remains the runtime
-default; these methods do not enable v2 or imply publication. See the
+default. All V2 preference creations/replacements require explicit confirmation,
+including direct statements; the SDK never auto-confirms them. These methods do
+not enable v2 or imply publication. See the
 [full contract](../../docs/preference_confirmation_contract.md).
 
 ## Start simple: solo builders and small teams

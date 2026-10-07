@@ -16,7 +16,7 @@ from api.services.runtime_preference_worker import (
     INTENT_PROMPT, INTENT_PROMPT_V2, RuntimePreferenceWorker, classify_intents,
 )
 from tests.unit.test_runtime_preference_classifier import Model, record
-from tests.unit.test_preference_intent_contract import intent, reply
+from tests.unit.test_preference_intent_contract import intent, offered, reply
 
 
 def test_generation_branches_are_valid_closed_and_preserve_canonical_schema():
@@ -142,6 +142,73 @@ def test_question_review_cannot_forge_quote_or_known_identity():
         with pytest.raises(PreferenceAdmissionUnavailable, match="intent_response_invalid"):
             classify_intents(record(), [{"role":"user","content":actual}],
                 Model(json.dumps(raw)), contract_version=2)
+
+
+@pytest.mark.parametrize("text", [
+    "Could you make Python my default for every programming example?",
+    "क्या आगे के हर प्रोग्रामिंग उदाहरण के लिए मेरी डिफ़ॉल्ट भाषा Python कर सकते हो?",
+    "Kya aage ke har programming example ke liye Python meri default language kar sakte ho?",
+    "Use Python instead of C++ as my default for every programming example.",
+    "अब से प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा C++ की जगह Python रखो।",
+    "Ab se programming examples ke liye C++ ki jagah Python meri usual language rakho.",
+])
+@pytest.mark.parametrize("action", ["assert", "set_current"])
+@pytest.mark.parametrize("absent", [False, True])
+def test_all_v2_value_writes_are_review_only_independent_of_language(text, action, absent, monkeypatch):
+    from api.services.preference_intent_contract import bind_preference_intents
+    # This heuristic must not choose whether V2 can activate a proposed value.
+    monkeypatch.setattr("api.services.extraction_service.ExtractionService._is_question_only",
+        lambda *_: pytest.fail("V2 value proposal consulted legacy question heuristic"))
+    data = record()
+    data.snapshot = offered(absent=absent)
+    messages = [{"role":"user","source_kind":"client_assertion","content":text}]
+    batch = bind_preference_intents(reply([intent(action=action, quote=text)]), snapshot=data.snapshot,
+        messages=messages, source_conversation_id=data.source_conversation_id, review_first=True)
+    assert not batch.declarations and not batch.choices and len(batch.question_reviews) == 1
+    review = batch.question_reviews[0]
+    assert review["proposed_value"] == "Python" and review["quote"] == text
+    assert review["source_evidence"]["requires_preference_confirmation"] is True
+    assert (review["target_memory_id"] is None) is absent
+
+
+@pytest.mark.parametrize("action", ["assert", "set_current"])
+def test_v1_value_write_still_uses_original_declaration_path(action):
+    from api.services.preference_intent_contract import bind_preference_intents
+    data = record()
+    batch = bind_preference_intents(reply([intent(action=action)]), snapshot=data.snapshot,
+        messages=[{"role":"user","content":intent()["quote"]}], source_conversation_id=data.source_conversation_id)
+    assert len(batch.declarations) == 1 and not batch.question_reviews
+
+
+def test_frozen_development_inventory_is_representable_without_value_activation():
+    from api.services.preference_intent_contract import bind_preference_intents
+    path = Path(__file__).resolve().parents[2] / "benchmarks/internal/datasets/governed_memory/development/recall_operations_v2_v1.json"
+    cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
+    mixed = {
+        "en": ("Make Python my usual language for programming examples", "my exam moved to October 18"),
+        "hi": ("प्रोग्रामिंग उदाहरणों की मेरी सामान्य भाषा Python रखो", "मेरी परीक्षा अब 18 अक्टूबर को है।"),
+        "hinglish": ("Programming examples ki meri usual language Python rakho", "mera exam ab October 18 ko hai."),
+    }
+    # Controlled diagnostic expectations, not evidence of provider understanding.
+    for case in cases:
+        prefs, facts = [], []
+        if case["family"] not in {"recall", "one_off"}:
+            action, quote = case["expected_actions"][0], case["text"]
+            if case["family"] == "mixed":
+                quote, fact = mixed[case["language"]]
+                facts = [{"category":"fact","content":fact,"quote":fact,"turn_index":0}]
+            prefs = [intent(action=action, quote=quote, value="Python" if action == "set_current" else None)]
+        data = record()
+        messages = [{"role":"user","source_kind":"client_assertion","content":case["text"]}]
+        model = Model(json.dumps(reply(prefs, facts), ensure_ascii=False))
+        parsed = classify_intents(data, messages, model, contract_version=2)
+        batch = bind_preference_intents(parsed, snapshot=data.snapshot, messages=messages,
+            source_conversation_id=data.source_conversation_id, review_first=True)
+        assert not batch.declarations, case["id"]
+        assert len(batch.question_reviews) == int(case["family"] in {"correction","mixed","question_shaped_update"}), case["id"]
+        assert len(batch.choices) == int(case["family"] in {"reaffirmation","uncertainty"}), case["id"]
+        assert len(batch.nonpreferences) == case["expected_nonpreferences"], case["id"]
+        assert len(model.calls) == 1
 
 
 @pytest.mark.parametrize("version", [True, False, 0, 3, "2", None])

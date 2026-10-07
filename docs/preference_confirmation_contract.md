@@ -10,11 +10,20 @@ No assistant, MCP or tenant UI change is included.
 
 For a v2 finding such as “Could you make Python my default for every programming
 example?”, the backend verifies the actual user role, eligible source, exact
-quote, offered property and known scope. If the legacy question-only semantic
-gate rejects an otherwise eligible `assert`/`set_current`, v2 can create a pending
-review. It does not create a declaration, change the ledger, or activate Python.
+quote, offered property and known scope. Every V2 `assert`/`set_current` finding
+creates a pending review, including direct statements and replacements. Language,
+punctuation and the legacy question heuristic never decide whether the proposed
+value can activate. It does not create a declaration, change the ledger, or
+activate Python without the separate explicit confirmation.
 Unsupported roles, fabricated spans and unknown identities are not repaired.
-V1 and all ordinary writes retain their original evidence checks.
+V1 and non-V2 public write paths retain their original evidence checks.
+
+This is a deliberate V2 interaction tradeoff: every new/replacement preference
+requires confirmation in the customer's existing chat, not just questions.
+Value-free choices and unrelated facts retain their existing paths. This adds no
+classifier call and does not claim the model correctly understood every proposal.
+The private `question_reviews`/`preference_question_confirmation_v1` names remain
+for saved-record compatibility; they no longer imply English question detection.
 
 The pending record uses the existing candidate store. Confirming uses the existing
 preference writer, version/archive rules and durable vector outbox. There is no
@@ -142,3 +151,35 @@ The frozen pilot acceptance checklist and prior latency NO-GO remain in force.
   No customer database, live flags, packages, assistant, MCP or tenant UI changed.
 
 These tests use controlled provider outputs, not live semantic accuracy evidence.
+
+## V2 policy correction (2026-10-07)
+
+A provider-free preflight of the frozen development inventory found the original
+review branch was inconsistent: an English question-shaped request became a
+review, while equivalent Hindi/Hinglish requests became declarations. The branch
+had depended on rejection by the legacy English-oriented question heuristic.
+
+The approved correction selects review-only preparation for **every** V2 `assert`
+and `set_current` before that heuristic. Exact user/source/span, offered identity,
+known scope and value-in-quote checks still apply. Unsupported evidence never
+gets repaired into a writable declaration. Final activation still needs the same
+explicit confirmation API and its owner/version/authority transaction checks.
+Private saved-review names/format, public API/SDK shapes, model prompt/schema,
+default V1 policy and the frozen development dataset remain unchanged. Already
+applied historical receipts are not rewritten; no backfill or rollout occurs.
+
+Regression coverage includes questions and direct statements in English, Hindi
+and Hinglish, both creation/replacement actions and present/absent targets. It
+forces the question heuristic to fail if review preparation consults it. The
+21-case development preflight uses controlled diagnostic replies and verifies
+that all value writes are pending, choices retain their path and mixed-turn facts
+remain representable. It is not human gold or a provider accuracy score.
+
+An isolated mixed-turn HTTP/worker/SQL test additionally verifies an exam-date
+correction remains stored/retrievable while the proposed language stays pending.
+There is no new classifier call, alternate writer, UI or production flag.
+
+Verification of this correction: 2,486 unit tests, 173 selected PostgreSQL
+regressions plus the additional mixed-turn database case, and FAST 9/9 passed.
+Scoped typing and fatal/undefined-name lint passed. Provider spend was $0; no
+paid semantic evaluation, holdout, publication, deployment or activation occurred.
