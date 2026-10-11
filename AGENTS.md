@@ -135,8 +135,8 @@ These are release work items, not new semantic phases or architecture.
 | 1g | Specify bounded same-job dispatch recovery | DONE | Owner approved specification and then exact implementation scope: existing rows/delivery ID/worker claim, independent publication and distinct 5 s task in existing Beat. No new table/migration; watchdog 60/120 unchanged. |
 | 1h | Implement and verify pre-worker dispatch recovery | DONE; full P8 still BLOCKED | 61 unit + 18 admission + 19 non-scheduled recovery + 1 scheduled local check PASS. Real Beat/Redis/controlled worker completed one API-killed receipt in 1.250 s; duplicate broker delivery ignored, one mutation. Original failed diagnostic preserved; first timing harness invalid, second valid. `benchmarks/internal/reports/dispatch-recovery-repair-20261011.md`. Owner approved commit and source repin. No worker-started crash/deployed qualification. |
 | Parallel | Validate initial use case with relevant agent teams | PENDING | Owner conducts or expressly authorizes outreach. Three interviews and named partner gate above; no invented contacts or unsolicited messages. |
-| 2 | Establish a usable controlled local vertical slice | BLOCKED | Item 1 and scoped execution approval. API/worker/database/queue/application identities verified; embeddings controlled without paid calls; V2 off; typed path settings consistent. Verify actual applied/rejected state and reopened-session reads. This is development evidence, not acceptance. |
-| 3 | Close only evaluation-interface gaps needed by frozen contract | BLOCKED | A working slice and approved bounded observer changes. Correct retryable-failure handling, total deadlines, after-state evidence on errors and requirement coverage; supply required P8 job/admission/outbox/guard observations and application timing. Reuse current observer; no new framework. |
+| 2 | Establish a usable controlled local vertical slice | DONE for approved store/read/replay slice | Owner approved scoped execution. Pinned `076e0ed` export; real HTTP auth/routes/asyncpg/Redis/worker, controlled embedding. One explicit C++ store committed; fresh HTTP client with stable application owner/scoped read selected same memory; replay unchanged, queue slot released. Read 542.532 ms (one sample). Global applicability in provenance, not rendered prompt. Replacement/choice, SDK, production startup and broader qualification not established. `benchmarks/internal/reports/explicit-local-slice-20261011.md`. |
+| 3 | Close only evaluation-interface gaps needed by frozen contract | DONE for approved observer v2 patch; qualification pending | Existing observer extended: history/reviews, fresh clients, receipt/source/outbox/guard projections, true deadlines, declared transient GET polling, after-state/uncertainty stops, bound operator evidence/runtime hashes/schema. 26 unit + 1 real SQL projection PASS; 3 schemas exported. No backend/dataset/evaluation changes. Report: `benchmarks/internal/reports/explicit-observer-repair-20261011.md`. Owner approved commit/source-observer freeze; runtime proofs/data NOT ESTABLISHED. |
 | 4 | Freeze candidate and run one independent acceptance evaluation | BLOCKED | Items 1-3, partner scope acceptance, private unused human-adjudicated data and separate execution approval. Receive only hashes, coverage and aggregate results; every frozen row accounted for. |
 | 5 | Decide and release the bounded pilot | BLOCKED | Frozen outcome: ship eligible pilot, narrow to independently evidenced useful subset, or stop. No ordinary patch-and-rerun. Deployment remains a separately approved action. |
 
@@ -231,12 +231,34 @@ in 1.250 s; the same-ID broker duplicate added no mutation. Original failure
 evidence remains immutable; first timing attempt was invalid because Beat failed
 at harness startup, separately preserved. See
 `benchmarks/internal/reports/dispatch-recovery-repair-20261011.md` and the approved
-spec. Owner approved commit and continuation to source repin. Next deliverable:
-bounded controlled local vertical-slice plan using the reviewed commit; identify
-API/worker/application target and approved controlled dependencies before execution.
+spec. Owner approved commit/source repin and then scoped local-slice execution.
+The bounded store/reconnect/scoped-read/replay slice passed through real HTTP
+authentication and worker storage. Next proposed deliverable: bounded read-only
+observer/interface readiness review against this demonstrated path and the
+existing frozen contract. Owner approved the review and observer-only patch, now
+complete with 27 focused checks. Owner approved observer commit/source freeze.
+Observer raw SHA-256 `1820497f88b1758279b299f40283f58e738f23985011e43e51c71ebb2ba0c87f`;
+source candidate commit recorded in the candidate document after commit. Runtime
+artifact/settings verification and unused independent data remain pending; no
+private cases/labels inspected, no acceptance execution or deployment authorized.
 No further repair, fault injection, dataset or acceptance run authorized. Original
 watchdog 60/120 and worker processing limits unchanged. Full runtime/application
 freeze, worker-started crash behavior and full P8 remain unqualified.
+
+Slice evidence: `benchmarks/internal/reports/explicit-local-slice-20261011-run3.json`
+and `explicit-local-slice-20261011-review.json`. First two attempts failed bootstrap
+prerequisites (no child DATABASE_URL; missing synthetic ADMIN_SECRET), before
+authenticated writes; preserved, not candidate failures. Third passed with real
+bcrypt-backed synthetic key, queued/processing/completed API observations,
+correlated created memory/source/provenance, fresh-client scoped read and original
+job replay. One job/source/memory/revision/outbox and two audit rows after reads;
+replay counts unchanged; reservation depth zero/member absent. Export matches
+commit text with CRLF-only conversion. SQL uses pinned metadata, not historical
+migration chain. Test bootstrap replaces production lifespan/region wiring;
+child-only connection/admin settings and in-memory flags. No backend changes,
+provider calls/private evaluation/new acceptance cases. Disposable runtime removed.
+Global scope visible in structured provenance but absent from prompt annotation;
+full P5/application label consumption remains unqualified. Dataset NOT ESTABLISHED.
 
 Historical inconclusive execution record:
 `benchmarks/internal/reports/replay-safety-reproduction-20261011.json`.

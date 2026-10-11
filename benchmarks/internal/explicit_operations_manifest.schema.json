@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "RuntimePin": {
+      "additionalProperties": false,
+      "properties": {
+        "source_head": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Source Head",
+          "type": "string"
+        },
+        "api_artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Api Artifact Sha256",
+          "type": "string"
+        },
+        "worker_artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Worker Artifact Sha256",
+          "type": "string"
+        },
+        "application_artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Application Artifact Sha256",
+          "type": "string"
+        },
+        "dependencies_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Dependencies Sha256",
+          "type": "string"
+        },
+        "effective_settings_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Effective Settings Sha256",
+          "type": "string"
+        },
+        "owner_verified_running_artifacts": {
+          "const": true,
+          "title": "Owner Verified Running Artifacts",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_head",
+        "api_artifact_sha256",
+        "worker_artifact_sha256",
+        "application_artifact_sha256",
+        "dependencies_sha256",
+        "effective_settings_sha256",
+        "owner_verified_running_artifacts"
+      ],
+      "title": "RuntimePin",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "explicit-operations-observer-2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "run_id": {
+      "format": "uuid",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "observer_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Observer Sha256",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimePin"
+    },
+    "source_head": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Head",
+      "type": "string"
+    },
+    "base_url": {
+      "title": "Base Url",
+      "type": "string"
+    },
+    "database_env": {
+      "pattern": "^[A-Z][A-Z0-9_]*$",
+      "title": "Database Env",
+      "type": "string"
+    },
+    "database_schema": {
+      "default": "public",
+      "pattern": "^[a-z][a-z0-9_]{0,62}$",
+      "title": "Database Schema",
+      "type": "string"
+    },
+    "isolated_synthetic_environment": {
+      "const": true,
+      "title": "Isolated Synthetic Environment",
+      "type": "boolean"
+    },
+    "explicit_preferences_enabled": {
+      "const": true,
+      "title": "Explicit Preferences Enabled",
+      "type": "boolean"
+    },
+    "automatic_interpretation_disabled": {
+      "const": true,
+      "title": "Automatic Interpretation Disabled",
+      "type": "boolean"
+    },
+    "v2_disabled": {
+      "const": true,
+      "title": "V2 Disabled",
+      "type": "boolean"
+    },
+    "external_provider_network_blocked": {
+      "const": true,
+      "title": "External Provider Network Blocked",
+      "type": "boolean"
+    },
+    "controlled_embeddings": {
+      "const": true,
+      "title": "Controlled Embeddings",
+      "type": "boolean"
+    },
+    "owner_attested_effective_settings": {
+      "const": true,
+      "title": "Owner Attested Effective Settings",
+      "type": "boolean"
+    },
+    "owners": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Owners",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "observer_sha256",
+    "runtime",
+    "source_head",
+    "base_url",
+    "database_env",
+    "isolated_synthetic_environment",
+    "explicit_preferences_enabled",
+    "automatic_interpretation_disabled",
+    "v2_disabled",
+    "external_provider_network_blocked",
+    "controlled_embeddings",
+    "owner_attested_effective_settings",
+    "owners"
+  ],
+  "title": "LocalManifest",
+  "type": "object"
+}

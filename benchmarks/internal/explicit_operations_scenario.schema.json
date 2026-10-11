@@ -1,0 +1,340 @@
+{
+  "$defs": {
+    "Check": {
+      "additionalProperties": false,
+      "properties": {
+        "pointer": {
+          "pattern": "^(/.*)?$",
+          "title": "Pointer",
+          "type": "string"
+        },
+        "operator": {
+          "default": "equals",
+          "enum": [
+            "equals",
+            "count",
+            "contains",
+            "absent"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "expected": {
+          "default": null,
+          "title": "Expected"
+        },
+        "safety": {
+          "default": true,
+          "title": "Safety",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pointer"
+      ],
+      "title": "Check",
+      "type": "object"
+    },
+    "Reference": {
+      "additionalProperties": false,
+      "properties": {
+        "reference": {
+          "pattern": "^[a-z][a-z0-9_]*#(/.*)?$",
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "title": "Reference",
+      "type": "object"
+    },
+    "Step": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "add",
+            "read",
+            "memory",
+            "history",
+            "reviews",
+            "job",
+            "poll_job",
+            "sql",
+            "external"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "principal_env": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Principal Env"
+        },
+        "auth_scheme": {
+          "default": "ApiKey",
+          "enum": [
+            "ApiKey",
+            "Bearer"
+          ],
+          "title": "Auth Scheme",
+          "type": "string"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Payload"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/Reference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idempotency Key"
+        },
+        "attempts": {
+          "default": 1,
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Attempts",
+          "type": "integer"
+        },
+        "concurrent": {
+          "default": false,
+          "title": "Concurrent",
+          "type": "boolean"
+        },
+        "fresh_client": {
+          "default": false,
+          "title": "Fresh Client",
+          "type": "boolean"
+        },
+        "retryable_http_statuses": {
+          "items": {
+            "enum": [
+              429,
+              502,
+              503,
+              504
+            ],
+            "type": "integer"
+          },
+          "maxItems": 4,
+          "title": "Retryable Http Statuses",
+          "type": "array"
+        },
+        "external_env": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Env"
+        },
+        "external_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "fault_injection",
+                "browser_identity",
+                "customer_rendering",
+                "queue_accounting"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Kind"
+        },
+        "invalid_input_control": {
+          "default": false,
+          "title": "Invalid Input Control",
+          "type": "boolean"
+        },
+        "expected_http_status": {
+          "anyOf": [
+            {
+              "maximum": 599,
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Http Status"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "minItems": 1,
+          "title": "Checks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "operation",
+        "checks"
+      ],
+      "title": "Step",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "explicit-operations-observer-2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "case_id": {
+      "pattern": "^[A-Za-z0-9_-]{1,80}$",
+      "title": "Case Id",
+      "type": "string"
+    },
+    "requirement": {
+      "enum": [
+        "P2",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8",
+        "P1_P9"
+      ],
+      "title": "Requirement",
+      "type": "string"
+    },
+    "coverage_group": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Coverage Group",
+      "type": "string"
+    },
+    "language": {
+      "enum": [
+        "en",
+        "hi",
+        "hinglish",
+        "not_applicable"
+      ],
+      "title": "Language",
+      "type": "string"
+    },
+    "human_adjudicated": {
+      "const": true,
+      "title": "Human Adjudicated",
+      "type": "boolean"
+    },
+    "owners": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Owners",
+      "type": "array"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/Step"
+      },
+      "maxItems": 30,
+      "minItems": 1,
+      "title": "Steps",
+      "type": "array"
+    },
+    "external_requirements": {
+      "items": {
+        "enum": [
+          "fault_injection",
+          "browser_identity",
+          "customer_rendering",
+          "queue_accounting"
+        ],
+        "type": "string"
+      },
+      "title": "External Requirements",
+      "type": "array"
+    },
+    "recovery_clock_step": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Recovery Clock Step"
+    }
+  },
+  "required": [
+    "schema_version",
+    "case_id",
+    "requirement",
+    "coverage_group",
+    "language",
+    "human_adjudicated",
+    "owners",
+    "steps"
+  ],
+  "title": "Scenario",
+  "type": "object"
+}

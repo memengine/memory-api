@@ -1,0 +1,119 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {
+      "format": "uuid",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "source_head": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Head",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "fault_injection",
+        "browser_identity",
+        "customer_rendering",
+        "queue_accounting"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "artifact_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Artifact Sha256",
+      "type": "string"
+    },
+    "owner_adjudicated": {
+      "const": true,
+      "title": "Owner Adjudicated",
+      "type": "boolean"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "fault_removed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fault Removed At"
+    },
+    "first_rendered_elapsed_ms": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "First Rendered Elapsed Ms"
+    },
+    "browser_identity_checked": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Browser Identity Checked"
+    },
+    "queue_depth": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Queue Depth"
+    },
+    "reserved_job_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reserved Job Count"
+    }
+  },
+  "required": [
+    "run_id",
+    "case_id",
+    "source_head",
+    "kind",
+    "artifact_sha256",
+    "owner_adjudicated",
+    "recorded_at"
+  ],
+  "title": "OperatorEvidence",
+  "type": "object"
+}
