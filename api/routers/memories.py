@@ -77,6 +77,7 @@ from api.schemas.edtech_schemas import EdTechProfileResponse
 from api.errors import APIError
 from api.settings import get_settings
 from api.services.context_builder import ContextBuilder
+from api.services.memory_add_replay import memory_add_replay_binding, durable_add_eligible
 from api.services.conflict_resolution_service import apply_conflict_selection
 from api.services.domain_schemas.registry import get_domain_schema
 from api.services.memory_service import MemoryService
@@ -255,6 +256,21 @@ async def add_memories(
         cached_job = await memory_service.get_idempotent_memory_add(
             tenant_id=tenant_id,
             idempotency_key=idempotency_key,
+            api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
+            durable=durable_add_eligible(tenant_id=tenant_id, source=payload.source,
+                agent_id=payload.agent_id, trusted_submission_kind=trusted_submission_kind),
+            replay_binding=memory_add_replay_binding(
+                tenant_id=tenant_id, owner_id=payload.external_user_id,
+                messages=[message.model_dump(mode="json") for message in payload.messages],
+                metadata=payload.metadata, agent_id=payload.agent_id,
+                source=payload.source.model_dump(mode="json") if payload.source else None,
+                evidence_mode=payload.evidence_mode, conversation_id=payload.conversation_id,
+                preference_claims=[c.model_dump(mode="json", exclude_none=True)
+                                   for c in payload.preference_claims]
+                                  if payload.preference_claims is not None else None,
+                api_key_id=str(getattr(request.state, "api_key_id", "") or "") or None,
+                trusted_submission_kind=trusted_submission_kind,
+            ),
         )
         if cached_job is not None:
             return MemoryAddResponse(

@@ -2786,6 +2786,14 @@ class BackfillJob(Base):
 class ExtractionJob(Base):
     __tablename__ = "extraction_jobs"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "request_key_sha256", name="uq_extraction_jobs_tenant_request_key"),
+        CheckConstraint(
+            "(request_key_sha256 IS NULL AND request_binding IS NULL) OR "
+            "(request_key_sha256 IS NOT NULL AND request_key_sha256 ~ '^[a-f0-9]{64}$' AND request_binding IS NOT NULL "
+            "AND jsonb_typeof(request_binding) = 'object' "
+            "AND octet_length(request_binding::text) <= 4096)",
+            name="ck_extraction_jobs_request_binding",
+        ),
         CheckConstraint(
             "preference_intent_admission IS NULL OR "
             "(jsonb_typeof(preference_intent_admission) = 'object' "
@@ -2814,6 +2822,10 @@ class ExtractionJob(Base):
         nullable=False,
     )
     external_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Durable acceptance receipt; retained with the job, independently of raw
+    # payload redaction. Explicit owner/tenant deletion still removes the job.
+    request_key_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_binding: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     source_event_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memory_source_events.id", ondelete="SET NULL"),

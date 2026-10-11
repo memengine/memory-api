@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 from datetime import UTC
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,8 @@ from api.db.models import ExtractionJob
 from api.db.models import ExtractionJobStatus
 from api.db.models import QuotaMode
 from api.services.memory_service import MemoryService
+from api.services.memory_add_replay import REPLAY_BINDING_FIELD, memory_add_replay_binding
+from api.services.proxy_user_service import ProxyUserService
 from api.services.quota_manager import QuotaEnvelope
 
 
@@ -298,8 +301,12 @@ async def test_queue_memory_add_scopes_idempotency_to_tenant() -> None:
         QuotaEnvelope(mode=QuotaMode.full, budget_remaining_pct=0.88, reset_at=None)
     )
     cache_service = MagicMock()
+    binding = memory_add_replay_binding(
+        tenant_id=tenant_id, owner_id="customer-1",
+        messages=[{"role": "user", "content": "remember this"}], metadata={},
+    )
     cache_service.get_idempotent_response = AsyncMock(
-        return_value={"job_id": "existing", "status": "queued"}
+        return_value={"job_id": "existing", "status": "queued", REPLAY_BINDING_FIELD: binding}
     )
     cache_service.set_job_status = AsyncMock()
     cache_service.set_idempotent_response = AsyncMock()
@@ -310,6 +317,13 @@ async def test_queue_memory_add_scopes_idempotency_to_tenant() -> None:
         qdrant_service=MagicMock(),
         quota_manager=quota_manager,
     )
+    receipt = SimpleNamespace(id="existing", request_binding=binding, proxy_user_id=proxy_user_id,
+        payload={"job_id": "existing"}, status=ExtractionJobStatus.queued,
+        memories_created=0, result={}, attempts=0, max_attempts=3, error_type=None, error=None)
+    service._check_replay_permissions = AsyncMock()
+    service.session.execute = AsyncMock(return_value=FakeExecuteResult([receipt]))
+    service.session.get = AsyncMock(return_value=SimpleNamespace(tenant_id=tenant_id, is_blocked=False,
+        external_user_id_hash=ProxyUserService.hash_external_user_id(tenant_id, "customer-1")))
 
     result = await service.queue_memory_add(
         requested_user_id=None,
@@ -324,18 +338,20 @@ async def test_queue_memory_add_scopes_idempotency_to_tenant() -> None:
     )
 
     assert result["job_id"] == "existing"
-    cache_service.get_idempotent_response.assert_awaited_once_with(
-        "request-1",
-        scope=f"tenant:{tenant_id}",
-        operation="memory_add",
-    )
+    cache_service.get_idempotent_response.assert_not_awaited()
+    service._check_replay_permissions.assert_awaited_once_with(tenant_id, "customer-1", None)
+    assert "extraction_jobs.tenant_id" in str(service.session.execute.await_args.args[0])
 
 
 @pytest.mark.asyncio
 async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
     cache_service = MagicMock()
+    tenant_id = str(uuid4())
+    binding = memory_add_replay_binding(
+        tenant_id=tenant_id, owner_id="customer-1", messages=[], metadata={},
+    )
     cache_service.get_idempotent_response = AsyncMock(
-        return_value={"job_id": "job-1", "status": "queued"}
+        return_value={"job_id": "job-1", "status": "queued", REPLAY_BINDING_FIELD: binding}
     )
     service = MemoryService(
         session=MagicMock(),
@@ -343,16 +359,20 @@ async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
         qdrant_service=MagicMock(),
         quota_manager=MagicMock(),
     )
+    service._check_replay_permissions = AsyncMock()
+    service.session.execute = AsyncMock(return_value=FakeExecuteResult([]))
 
     cached = await service.get_idempotent_memory_add(
-        tenant_id="tenant-1",
+        tenant_id=tenant_id,
         idempotency_key="same-key",
+        replay_binding=binding,
+        durable=False,  # Compatibility lane keeps cache behavior after SQL lookup.
     )
 
     assert cached == {"job_id": "job-1", "status": "queued"}
     cache_service.get_idempotent_response.assert_awaited_once_with(
         "same-key",
-        scope="tenant:tenant-1",
+        scope=f"tenant:{tenant_id}",
         operation="memory_add",
     )
 

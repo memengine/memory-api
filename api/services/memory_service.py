@@ -15,6 +15,8 @@ from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +33,7 @@ from api.db.models import MemoryClaimRevision
 from api.db.models import MemorySourceEvent
 from api.db.models import ProxyUser
 from api.db.models import Tenant
+from api.db.models import ApiKey
 from api.db.vector_store import QdrantService
 from api.errors import APIError
 from api.services.embedding_service import EmbeddingResult
@@ -43,6 +46,10 @@ from api.services.provenance_service import conversation_ingestion_sha256
 from api.services.provenance_service import source_event_sha256
 from api.services.provenance_service import source_event_payload_matches
 from api.services.common import resolve_authorized_user
+from api.services.memory_add_replay import REPLAY_BINDING_FIELD
+from api.services.memory_add_replay import memory_add_replay_binding
+from api.services.memory_add_replay import verified_memory_add_replay
+from api.services.memory_add_replay import durable_add_eligible, request_key_sha256
 from api.services.quota_manager import QuotaManager
 from api.services.runtime_preference_routing import RUNTIME_ROUTE, runtime_catalog, runtime_enabled
 from api.services.vector_outbox import build_vector_payload
@@ -149,12 +156,50 @@ class MemoryService:
         *,
         tenant_id: str,
         idempotency_key: str,
+        replay_binding: dict[str, Any],
+        api_key_id: str | None = None,
+        durable: bool = True,
     ) -> dict[str, Any] | None:
-        return await self.cache_service.get_idempotent_response(
+        # Even an excluded lane cannot reuse a retained durable receipt under
+        # the same tenant/key with different content/authority.
+        await self._check_replay_permissions(tenant_id, replay_binding["owner_id"], api_key_id)
+        row = (await self.session.execute(select(ExtractionJob).where(
+            ExtractionJob.tenant_id == uuid.UUID(tenant_id),
+            ExtractionJob.request_key_sha256 == request_key_sha256(idempotency_key),
+        ).execution_options(populate_existing=True))).scalar_one_or_none()
+        if row is not None:
+            verified_memory_add_replay({REPLAY_BINDING_FIELD: row.request_binding}, replay_binding)
+            # Permission checks use fresh SQL, not cached proxy/auth metadata.
+            owner = await self.session.get(ProxyUser, row.proxy_user_id, populate_existing=True)
+            if (owner is None or owner.is_blocked or str(owner.tenant_id) != tenant_id
+                    or owner.external_user_id_hash != ProxyUserService.hash_external_user_id(tenant_id, replay_binding["owner_id"])):
+                raise APIError(status_code=403, code="PRX_403", error="replay_owner_unavailable")
+            return _job_status_snapshot(self._job_payload_with_live_status(row))
+        if durable:
+            return None  # Deletion ends protection; do not resurrect a Redis receipt.
+        cached = await self.cache_service.get_idempotent_response(
             idempotency_key,
             scope=f"tenant:{tenant_id}",
             operation="memory_add",
         )
+        return verified_memory_add_replay(cached, replay_binding) if cached is not None else None
+
+    async def _check_replay_permissions(self, tenant_id, external_user_id, api_key_id):
+        tenant = await self.session.get(Tenant, uuid.UUID(tenant_id), populate_existing=True)
+        if tenant is None or not tenant.is_active:
+            raise APIError(status_code=403, code="AUTH_403", error="tenant_unavailable")
+        if api_key_id:
+            key = await self.session.get(ApiKey, uuid.UUID(api_key_id), populate_existing=True)
+            permissions = {str(p).strip().lower() for p in (key.permissions or [])} if key else set()
+            if (key is None or not key.is_active or str(key.tenant_id) != tenant_id
+                    or not permissions.intersection({"write", "admin"})):
+                raise APIError(status_code=403, code="AUTH_403", error="replay_permission_revoked")
+        owner = (await self.session.execute(select(ProxyUser).where(
+            ProxyUser.tenant_id == uuid.UUID(tenant_id),
+            ProxyUser.external_user_id_hash == ProxyUserService.hash_external_user_id(tenant_id, external_user_id),
+        ).execution_options(populate_existing=True))).scalar_one_or_none()
+        if owner is not None and owner.is_blocked:
+            raise APIError(status_code=403, code="PRX_403", error="proxy_user_blocked")
 
     async def queue_memory_add(
         self,
@@ -181,24 +226,20 @@ class MemoryService:
             if not get_settings().explicit_preference_claims_enabled or not tenant_id or source is not None or agent_id is not None or trusted_submission_kind is not None:
                 raise APIError(status_code=409, code="PREF_409", error="explicit_preferences_unavailable")
             declared_preferences(preference_claims, messages)
+        durable = bool(idempotency_key and durable_add_eligible(tenant_id=tenant_id,
+            source=source, agent_id=agent_id, trusted_submission_kind=trusted_submission_kind,
+            turn_preparation=turn_preparation))
         proxy_user = None
         resolved_proxy_user_id = proxy_user_id
         if tenant_id:
-            quota_envelope = await self.quota_manager.get_quota_envelope(tenant_id)
-            if quota_envelope.mode.value == "BLOCKED":
-                return {
-                    "job_id": None,
-                    "status": "blocked",
-                    "blocked_reason": "budget_exhausted",
-                    "budget_remaining_pct": quota_envelope.budget_remaining_pct,
-                }
-            if quota_envelope.mode.value == "PASSTHROUGH":
-                return {
-                    "job_id": None,
-                    "status": "passthrough",
-                    "blocked_reason": None,
-                    "budget_remaining_pct": quota_envelope.budget_remaining_pct,
-                }
+            if not durable:
+                # Preserve admission ordering for lanes outside this durable fix.
+                quota_envelope = await self.quota_manager.get_quota_envelope(tenant_id)
+                if quota_envelope.mode.value in {"BLOCKED", "PASSTHROUGH"}:
+                    return {"job_id": None,
+                        "status": "blocked" if quota_envelope.mode.value == "BLOCKED" else "passthrough",
+                        "blocked_reason": "budget_exhausted" if quota_envelope.mode.value == "BLOCKED" else None,
+                        "budget_remaining_pct": quota_envelope.budget_remaining_pct}
             if not external_user_id:
                 raise APIError(
                     status_code=422,
@@ -230,14 +271,56 @@ class MemoryService:
             if tenant_id
             else f"user:{authenticated_user_id or requested_user_id or resolved_proxy_user_id or 'anonymous'}"
         )
+        replay_binding = None
         if idempotency_key:
-            cached_job = await self.cache_service.get_idempotent_response(
-                idempotency_key,
-                scope=idempotency_scope,
-                operation="memory_add",
+            replay_binding = memory_add_replay_binding(
+                tenant_id=tenant_id,
+                owner_id=external_user_id if tenant_id else (
+                    requested_user_id or authenticated_user_id or resolved_proxy_user_id),
+                messages=messages, metadata=metadata, agent_id=agent_id, source=source,
+                evidence_mode=evidence_mode, conversation_id=conversation_id,
+                preference_claims=preference_claims, api_key_id=api_key_id,
+                trusted_submission_kind=trusted_submission_kind, turn_preparation=turn_preparation,
             )
+            if tenant_id:
+                if durable:
+                    # Serialize before any queue reservation. Losers see the
+                    # committed winning receipt, not a second admitted job.
+                    lock = int.from_bytes(hashlib.sha256(
+                        f"memory-add:{tenant_id}:{idempotency_key}".encode()).digest()[:8], "big", signed=True)
+                    try:
+                        await self.session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                        await self.session.execute(select(func.pg_advisory_xact_lock(lock)))
+                    except DBAPIError as exc:
+                        await self.session.rollback()
+                        raise APIError(status_code=503, code="IDEMPOTENCY_503",
+                                       error="memory_add_admission_busy") from exc
+                cached_job = await self.get_idempotent_memory_add(tenant_id=tenant_id,
+                    idempotency_key=idempotency_key, replay_binding=replay_binding,
+                    api_key_id=api_key_id, durable=durable)
+                if cached_job is None and durable:
+                    owner = await self.session.get(ProxyUser, uuid.UUID(str(resolved_proxy_user_id)), populate_existing=True)
+                    if (owner is None or owner.is_blocked or str(owner.tenant_id) != tenant_id
+                            or owner.external_user_id_hash != ProxyUserService.hash_external_user_id(tenant_id, external_user_id)):
+                        await self.session.rollback()
+                        raise APIError(status_code=403, code="PRX_403", error="admission_owner_unavailable")
+            else:
+                cached_job = await self.cache_service.get_idempotent_response(
+                    idempotency_key, scope=idempotency_scope, operation="memory_add")
             if cached_job is not None:
-                return cached_job
+                return cached_job if tenant_id else verified_memory_add_replay(cached_job, replay_binding)
+
+        if tenant_id and durable:
+            quota_envelope = await self.quota_manager.get_quota_envelope(tenant_id)
+            if quota_envelope.mode.value in {"BLOCKED", "PASSTHROUGH"}:
+                if idempotency_key and durable:
+                    await self.session.rollback()
+                return {
+                    "job_id": None,
+                    "status": "blocked" if quota_envelope.mode.value == "BLOCKED" else "passthrough",
+                    "blocked_reason": "budget_exhausted" if quota_envelope.mode.value == "BLOCKED" else None,
+                    "budget_remaining_pct": quota_envelope.budget_remaining_pct,
+                }
 
         job_id = turn_preparation["job_id"] if turn_preparation is not None else str(uuid.uuid4())
         job: dict[str, Any] = {
@@ -253,6 +336,9 @@ class MemoryService:
             "metadata": metadata,
             "queued_at": datetime.now(UTC).isoformat(),
         }
+        if idempotency_key and durable:
+            job["request_key_sha256"] = request_key_sha256(idempotency_key)
+            job["request_binding"] = replay_binding
         if conversation_id:
             job["external_conversation_id"] = conversation_id
         if turn_preparation is not None:
@@ -322,6 +408,8 @@ class MemoryService:
                 job_id=job["job_id"],
             )
             if reservation is None:
+                if idempotency_key and durable:
+                    await self.session.rollback()
                 return {
                     "job_id": None,
                     "status": "queue_full",
@@ -354,7 +442,7 @@ class MemoryService:
         if idempotency_key:
             await self.cache_service.set_idempotent_response(
                 idempotency_key,
-                _job_status_snapshot(job),
+                {**_job_status_snapshot(job), REPLAY_BINDING_FIELD: replay_binding},
                 ttl=86400,
                 scope=idempotency_scope,
                 operation="memory_add",
@@ -1042,6 +1130,8 @@ class MemoryService:
                 tenant_id=uuid.UUID(str(tenant_id)),
                 proxy_user_id=uuid.UUID(str(proxy_user_id)),
                 external_user_id=str(external_user_id),
+                request_key_sha256=job.get("request_key_sha256"),
+                request_binding=job.get("request_binding"),
                 status=ExtractionJobStatus.queued,
                 max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
                 queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
@@ -1079,6 +1169,19 @@ class MemoryService:
             return job, True
         except IntegrityError:
             await self.session.rollback()
+            if job.get("request_key_sha256"):
+                existing_row = (await self.session.execute(select(ExtractionJob).where(
+                    ExtractionJob.tenant_id == uuid.UUID(str(tenant_id)),
+                    ExtractionJob.request_key_sha256 == job["request_key_sha256"],
+                ).execution_options(populate_existing=True))).scalar_one_or_none()
+                if existing_row is not None:
+                    await self._check_replay_permissions(str(tenant_id), str(external_user_id), source.get("api_key_id"))
+                    verified_memory_add_replay({REPLAY_BINDING_FIELD: existing_row.request_binding}, job["request_binding"])
+                    owner = await self.session.get(ProxyUser, existing_row.proxy_user_id, populate_existing=True)
+                    if (owner is None or owner.is_blocked or str(owner.tenant_id) != str(tenant_id)
+                            or owner.external_user_id_hash != ProxyUserService.hash_external_user_id(str(tenant_id), str(external_user_id))):
+                        raise APIError(status_code=403, code="PRX_403", error="replay_owner_unavailable")
+                    return _job_status_snapshot(self._job_payload_with_live_status(existing_row)), False
             if "turn_preparation_sha256" in job:
                 replay = await self._prepared_turn_replay(job["job_id"], str(tenant_id), str(proxy_user_id),
                                                          job["turn_preparation_sha256"])
