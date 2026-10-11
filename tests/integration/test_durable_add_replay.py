@@ -433,7 +433,7 @@ def test_duplicate_worker_delivery_does_not_duplicate_persisted_mutation(scope, 
                  "_payload_reference": "extraction_job"}
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(extraction_tasks._process_extraction_job, reference,
-                             celery_task_id="synthetic-delivery")
+                             celery_task_id=original["job_id"])
         assert started.wait(timeout=10)
         try:
             duplicate_processing = extraction_tasks._process_extraction_job(reference,
@@ -444,7 +444,7 @@ def test_duplicate_worker_delivery_does_not_duplicate_persisted_mutation(scope, 
         first = future.result(timeout=10)
     assert first["memories_created"] == 1
     before = counts(scope)
-    duplicate = extraction_tasks._process_extraction_job(reference, celery_task_id="synthetic-delivery")
+    duplicate = extraction_tasks._process_extraction_job(reference, celery_task_id=original["job_id"])
     assert duplicate["status"] == "duplicate_ignored"
     assert counts(scope) == before
     with scope.factory() as session:

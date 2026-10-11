@@ -1,0 +1,23 @@
+{
+  "base_commit": "4bf8884737ef58416bb34b9d831b0836333d21c0",
+  "candidate": "approved working-tree dispatch repair; repin required",
+  "elapsed_s": 1.25,
+  "job_id": "9d816957-9dcb-4558-9e7a-63d0a9c5e92f",
+  "status": "completed",
+  "counts": {
+    "extraction_jobs": 1,
+    "memory_source_events": 1,
+    "memories": 1,
+    "memory_claim_revisions": 1,
+    "audit_logs": 1,
+    "vector_sync_outbox": 1
+  },
+  "scheduled_recovery_result": "PASS",
+  "workload": "one synthetic explicit preference; isolated real Beat/Redis/solo worker",
+  "limitations": [
+    "controlled embeddings and declaration pipeline; no provider calls",
+    "Windows solo worker; prefork time-limit enforcement not established",
+    "not independent pilot acceptance or production; worker-started crash excluded"
+  ],
+  "duplicate_delivery_counts_unchanged": true
+}

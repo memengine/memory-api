@@ -339,6 +339,7 @@ class MemoryService:
         if idempotency_key and durable:
             job["request_key_sha256"] = request_key_sha256(idempotency_key)
             job["request_binding"] = replay_binding
+            job["celery_task_id"] = job_id  # Stable across every delivery of this receipt.
         if conversation_id:
             job["external_conversation_id"] = conversation_id
         if turn_preparation is not None:
@@ -438,6 +439,20 @@ class MemoryService:
             return persisted_job
         if turn_preparation is not None:
             return job  # Committed admission; transport/cache work is not acknowledgement proof.
+        if durable:
+            # SQL acceptance survives cache/publish failure. Recovery republishes
+            # the same ID until the existing worker claim starts this job.
+            dispatch_error = await self._dispatch_extraction_job(job)
+            if dispatch_error:
+                LOGGER.warning("durable_extraction_dispatch_pending job_id=%s", job["job_id"])
+            try:
+                await self.cache_service.set_job_status(job["job_id"], _job_status_snapshot(job), ttl=3600)
+                await self.cache_service.set_idempotent_response(idempotency_key,
+                    {**_job_status_snapshot(job), REPLAY_BINDING_FIELD: replay_binding},
+                    ttl=86400, scope=idempotency_scope, operation="memory_add")
+            except Exception:
+                LOGGER.exception("durable_extraction_acceptance_cache_unavailable job_id=%s", job["job_id"])
+            return job
         await self.cache_service.set_job_status(job["job_id"], _job_status_snapshot(job), ttl=3600)
         if idempotency_key:
             await self.cache_service.set_idempotent_response(
@@ -1132,6 +1147,7 @@ class MemoryService:
                 external_user_id=str(external_user_id),
                 request_key_sha256=job.get("request_key_sha256"),
                 request_binding=job.get("request_binding"),
+                celery_task_id=job.get("celery_task_id"),
                 status=ExtractionJobStatus.queued,
                 max_attempts=DEFAULT_MAX_EXTRACTION_ATTEMPTS,
                 queue_name=str(job.get("queue_name")) if job.get("queue_name") else None,
@@ -1381,8 +1397,9 @@ class MemoryService:
     async def _send_extraction_task(self, job: dict[str, Any]) -> Any:
         if self.dispatch_task is None:
             return None
+        options = {"task_id": job["celery_task_id"], "retry": False} if job.get("request_key_sha256") else {}
         dispatched = await asyncio.to_thread(self.dispatch_task, EXTRACTION_TASK_NAME,
-            args=[_compact_task_payload(job)], queue=job.get("queue_name"))
+            args=[_compact_task_payload(job)], queue=job.get("queue_name"), **options)
         return await dispatched if hasattr(dispatched, "__await__") else dispatched
 
     async def dispatch_prepared_turn(self, job: dict[str, Any]) -> None:

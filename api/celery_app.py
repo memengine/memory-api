@@ -19,6 +19,7 @@ from api.tasks.lifecycle_tasks import DAILY_FORGETTING_TASK_NAME
 from api.tasks.lifecycle_tasks import TEMPORAL_VALIDITY_BEAT_SCHEDULE
 from api.tasks.vector_sync_tasks import VECTOR_SYNC_TASK_BEAT_SCHEDULE
 from api.tasks.watchdog_tasks import WATCHDOG_BEAT_SCHEDULE
+from api.tasks.watchdog_tasks import DISPATCH_RECOVERY_BEAT_SCHEDULE, DISPATCH_RECOVERY_TASK_NAME
 
 EXTRACTION_TASK_NAME = "api.tasks.extraction_tasks.process_extraction_job"
 
@@ -59,6 +60,7 @@ def create_celery_app() -> Celery:
             **DEPRECATION_ALERT_BEAT_SCHEDULE,
             **QUOTA_TASK_BEAT_SCHEDULE,
             **WATCHDOG_BEAT_SCHEDULE,
+            **DISPATCH_RECOVERY_BEAT_SCHEDULE,
             **VECTOR_SYNC_TASK_BEAT_SCHEDULE,
             **RECONCILIATION_TASK_BEAT_SCHEDULE,
             **LIFECYCLE_TASK_BEAT_SCHEDULE,
@@ -81,6 +83,7 @@ def create_celery_app() -> Celery:
         # prevents a slow tenant from being hidden in a worker-local backlog.
         worker_prefetch_multiplier=1,
         task_annotations={
+            DISPATCH_RECOVERY_TASK_NAME: {"soft_time_limit": 3, "time_limit": 4},
             EXTRACTION_TASK_NAME: {
                 "acks_late": True,
                 "reject_on_worker_lost": True,

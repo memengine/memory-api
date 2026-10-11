@@ -70,7 +70,7 @@ evidence or deployed/end-to-end qualification.
 | Committed-state scope decision | DONE | Approved Oct 9 amendment in frozen contract: one declaration/request; queued means scheduled; old committed value may remain readable before replacement commits. |
 | Typed preference governance components | PENDING | `preference_claim_service.py:155-240` validates declared evidence, identity and target/version; reserves/locks claims and checks authority. Components exist; full independent end-to-end acceptance is not demonstrated. |
 | Immediate new/pending visibility | DEFERRED | Explicit contract:347-349 disclaims read-after-write. Freeze records the guard-path mismatch. Excluded by approved amendment; do not reopen without new evidence or a customer requirement. |
-| Retained replay guarantee | BLOCKED | Oct 11 approved durable existing-job admission repair: 18 isolated PostgreSQL/Redis regression checks and 59 focused unit checks PASS, including concurrency/cache loss and controlled duplicate worker delivery. Production, crash recovery and retained 30 s recovery remain unqualified. P8 cannot be claimed. |
+| Retained replay guarantee | BLOCKED | Durable admission: 18 isolated PostgreSQL/Redis + 59 focused unit checks PASS. Separate approved one-run postcommit/predispatch diagnostic reproduced a 30 s recovery failure: queued at 30.265 s, zero dispatches/mutations; receipt retained, no duplicate admission. Watchdog unchanged (60 s grace/120 s schedule). Full P8 cannot be claimed. |
 | Thin observer and schema exports | DONE | Existing observer/schema artifacts and recorded successful schema exports. This establishes an interface only; `pilot_qualified=False` and coverage/failure-evidence gaps remain. |
 | Runtime, application and private-data qualification | BLOCKED | No verified local candidate/environment or compatible unused independent dataset established. SDK/application identity, status delivery and measured latency unverified. |
 | Natural-language V2 qualification | DEFERRED | Oct 7 diagnostic: 7/21 at `9a42514`, NO-GO. Keep V2 disabled; not an explicit-operation acceptance result. |
@@ -130,7 +130,10 @@ These are release work items, not new semantic phases or architecture.
 | 1b | Repair demonstrated cache-hit owner/payload mismatch | DONE | Separate repair approval; working-tree router/service/helper patch. 27 focused regression checks + 2 existing test bodies PASS; old unbound entries fail closed. Evidence: repair report below. This is not complete P8 qualification. |
 | 1c | Specify retained concurrent-admission/cache-loss guarantee | DONE | Read-only source-backed proposal in `docs/EXPLICIT_REPLAY_ADMISSION_SPEC_20261011.md`: existing-job binding/index plus guarded admission. Receipt retention and 30 s recovery limits explicit; no implementation or tests performed. |
 | 1d | Decide durable receipt lifetime and admission change | DONE | Owner approved at least 24 h after acceptance and longer while nonterminal, subject to explicit deletion; protection ends with job deletion. Existing lifecycle retains job rows without automatic purge. No new receipt table or deletion-policy change. |
-| 1e | Implement and verify bounded durable admission | DONE | Existing job columns, SQL tenant/key uniqueness, bounded transactional guard and current SQL permission checks. 18 isolated integration + 59 focused unit checks PASS. Report: `benchmarks/internal/reports/durable-add-replay-repair-20261011.md`. Uncommitted candidate requires repinning; no dispatch/watchdog changes or full P8 qualification. |
+| 1e | Implement and verify bounded durable admission | DONE | Existing job columns, SQL tenant/key uniqueness, bounded transactional guard and current SQL permission checks. 18 isolated integration + 59 focused unit checks PASS. Report: `benchmarks/internal/reports/durable-add-replay-repair-20261011.md`. Owner-approved commit `4bf8884737ef58416bb34b9d831b0836333d21c0` recorded as current source pin; runtime/schema freeze pending. No dispatch/watchdog changes or full P8 qualification. |
+| 1f | One bounded dispatch recovery diagnostic | DONE; requirement FAIL | Approved synthetic exception after receipt commit, before initial dispatch. Restored dependency; existing watchdog cycles at restoration and 30.25 s find zero eligible jobs. At 30.265 s original job remains queued; one receipt/source, zero memories. `benchmarks/internal/reports/dispatch-recovery-diagnostic-20261011.json`. No repair authorized; no rerun. |
+| 1g | Specify bounded same-job dispatch recovery | DONE | Owner approved specification and then exact implementation scope: existing rows/delivery ID/worker claim, independent publication and distinct 5 s task in existing Beat. No new table/migration; watchdog 60/120 unchanged. |
+| 1h | Implement and verify pre-worker dispatch recovery | DONE; full P8 still BLOCKED | 61 unit + 18 admission + 19 non-scheduled recovery + 1 scheduled local check PASS. Real Beat/Redis/controlled worker completed one API-killed receipt in 1.250 s; duplicate broker delivery ignored, one mutation. Original failed diagnostic preserved; first timing harness invalid, second valid. `benchmarks/internal/reports/dispatch-recovery-repair-20261011.md`. Owner approved commit and source repin. No worker-started crash/deployed qualification. |
 | Parallel | Validate initial use case with relevant agent teams | PENDING | Owner conducts or expressly authorizes outreach. Three interviews and named partner gate above; no invented contacts or unsolicited messages. |
 | 2 | Establish a usable controlled local vertical slice | BLOCKED | Item 1 and scoped execution approval. API/worker/database/queue/application identities verified; embeddings controlled without paid calls; V2 off; typed path settings consistent. Verify actual applied/rejected state and reopened-session reads. This is development evidence, not acceptance. |
 | 3 | Close only evaluation-interface gaps needed by frozen contract | BLOCKED | A working slice and approved bounded observer changes. Correct retryable-failure handling, total deadlines, after-state evidence on errors and requirement coverage; supply required P8 job/admission/outbox/guard observations and application timing. Reuse current observer; no new framework. |
@@ -216,11 +219,24 @@ observed customer need. No item grants implementation permission.
 
 ## Current checkpoint: bounded durable admission completed
 
-Status: shared-route reproduction, cache-hit binding repair, receipt-lifetime decision
-and approved durable-admission implementation DONE. Review the scoped diff and
-regression evidence; stop for owner approval before any further work. The changed
-candidate must be repinned before a frozen evaluation. Do not repeat consumed
-diagnostics, construct private data or broaden implementation without approval.
+Status: approved durable-admission repair committed; source pin
+`4bf8884737ef58416bb34b9d831b0836333d21c0`. The separately approved single recovery
+diagnostic completed and reproduced a retained 30 s recovery requirement failure.
+Receipt uniqueness held; no unauthorized/duplicate mutation occurred. See
+`benchmarks/internal/reports/dispatch-recovery-diagnostic-20261011.md` and JSON.
+Owner subsequently approved the specification and exact implementation. The
+pre-worker dispatch repair is complete in the working tree, with 99 distinct
+focused checks passed across recorded runs. Real scheduled recovery completed
+in 1.250 s; the same-ID broker duplicate added no mutation. Original failure
+evidence remains immutable; first timing attempt was invalid because Beat failed
+at harness startup, separately preserved. See
+`benchmarks/internal/reports/dispatch-recovery-repair-20261011.md` and the approved
+spec. Owner approved commit and continuation to source repin. Next deliverable:
+bounded controlled local vertical-slice plan using the reviewed commit; identify
+API/worker/application target and approved controlled dependencies before execution.
+No further repair, fault injection, dataset or acceptance run authorized. Original
+watchdog 60/120 and worker processing limits unchanged. Full runtime/application
+freeze, worker-started crash behavior and full P8 remain unqualified.
 
 Historical inconclusive execution record:
 `benchmarks/internal/reports/replay-safety-reproduction-20261011.json`.
