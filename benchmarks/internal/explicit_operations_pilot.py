@@ -87,6 +87,7 @@ class Step(Closed):
     fresh_client: bool = False
     retryable_http_statuses: list[Literal[429, 502, 503, 504]] = Field(default_factory=list, max_length=4)
     external_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
+    display_source: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
     external_kind: Literal["fault_injection", "browser_identity", "customer_rendering", "queue_accounting"] | None = None
     invalid_input_control: bool = False
     expected_http_status: int | None = Field(default=None, ge=100, le=599)
@@ -95,12 +96,14 @@ class Step(Closed):
     @model_validator(mode="after")
     def bounded(self):
         if self.operation == "external":
-            if (not self.external_env or not self.external_kind or self.principal_env or self.payload
+            if (bool(self.external_env) == bool(self.display_source) or not self.external_kind or self.principal_env or self.payload
                     or self.target or self.attempts != 1 or self.concurrent or self.fresh_client
                     or self.retryable_http_statuses or self.idempotency_key or self.expected_http_status is not None):
                 raise ValueError("external observation accepts only a declared owner evidence file")
+            if self.display_source and self.external_kind not in {"customer_rendering", "browser_identity"}:
+                raise ValueError("display cannot collect fault or queue evidence")
             return self
-        if self.external_env or self.external_kind:
+        if self.external_env or self.external_kind or self.display_source:
             raise ValueError("external fields require external operation")
         if self.operation == "sql":
             if self.principal_env or self.payload or self.target or self.attempts != 1 or self.fresh_client:
@@ -149,7 +152,7 @@ def validate_payload(operation: str, payload: dict, invalid_control: bool = Fals
 
 
 class Scenario(Closed):
-    schema_version: Literal["explicit-operations-observer-2"]
+    schema_version: Literal["explicit-operations-observer-3"]
     case_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
     requirement: Literal["P2", "P4", "P5", "P6", "P7", "P8", "P1_P9"]
     coverage_group: str = Field(min_length=1, max_length=100)
@@ -171,6 +174,9 @@ class Scenario(Closed):
             raise ValueError("write scenarios require SQL baseline and final state observations")
         for step in self.steps:
             if step.operation == "external":
+                if step.display_source and (step.display_source not in known or not any(
+                        prior.name == step.display_source and prior.principal_env for prior in self.steps)):
+                    raise ValueError("display evidence must name an earlier HTTP operation")
                 if step.external_kind not in self.external_requirements:
                     raise ValueError("external observations must be declared as required evidence")
                 if step.name == self.recovery_clock_step:
@@ -203,8 +209,23 @@ class RuntimePin(Closed):
     owner_verified_running_artifacts: Literal[True]
 
 
+class DisplayPin(Closed):
+    port: int = Field(ge=1024, le=65535)
+    artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    browser_version: str = Field(min_length=1, max_length=120)
+    owner_bindings: dict[str, str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def bindings(self):
+        import re
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or not value.strip()
+               for key, value in self.owner_bindings.items()):
+            raise ValueError("invalid display principal binding")
+        return self
+
+
 class LocalManifest(Closed):
-    schema_version: Literal["explicit-operations-observer-2"]
+    schema_version: Literal["explicit-operations-observer-3"]
     run_id: UUID
     observer_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     runtime: RuntimePin
@@ -220,6 +241,7 @@ class LocalManifest(Closed):
     controlled_embeddings: Literal[True]
     owner_attested_effective_settings: Literal[True]
     owners: list[UUID] = Field(min_length=1)
+    display: DisplayPin | None = None
 
     @model_validator(mode="after")
     def aligned(self):
@@ -236,7 +258,7 @@ class OperatorEvidence(Closed):
     source_head: str = Field(pattern=r"^[0-9a-f]{40}$")
     kind: Literal["fault_injection", "browser_identity", "customer_rendering", "queue_accounting"]
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    owner_adjudicated: Literal[True]
+    owner_adjudicated: bool
     recorded_at: datetime
     fault_removed_at: datetime | None = None
     first_rendered_elapsed_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -403,6 +425,12 @@ def preflight(cases, manifest: LocalManifest) -> str:
     local_url(database, {"postgresql+asyncpg"})
     if observer_digest() != manifest.observer_sha256:
         raise ValueError("observer hash differs from frozen manifest")
+    if manifest.display:
+        adapter = Path(__file__).with_name("explicit_operations_operator.py")
+        if digest(adapter.read_bytes()) != manifest.display.artifact_sha256:
+            raise ValueError("display artifact differs from frozen manifest")
+        if urlsplit(manifest.base_url).port == manifest.display.port:
+            raise ValueError("display cannot share backend port")
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if head != manifest.source_head:
         raise ValueError("source HEAD differs from manifest")
@@ -415,8 +443,12 @@ def preflight(cases, manifest: LocalManifest) -> str:
         raise ValueError("scenario observes owner outside frozen synthetic manifest")
     for case in cases:
         for step in case.steps:
+            if step.display_source and not manifest.display:
+                raise ValueError("display evidence requires frozen display artifact")
             if step.principal_env and not os.environ.get(step.principal_env):
                 raise ValueError("required principal unavailable")
+            if manifest.display and step.principal_env not in manifest.display.owner_bindings and step.principal_env:
+                raise ValueError("display principal lacks binding")
             if step.external_env and not os.environ.get(step.external_env):
                 raise ValueError("required operator evidence path unavailable")
     return database
@@ -443,7 +475,7 @@ def new_http_client(base_url):
                             transport=httpx.AsyncHTTPTransport(retries=0))
 
 
-async def observe_case(case, manifest, engine, client):
+async def observe_case(case, manifest, engine, client, display=None):
     observations, failures, provided = {}, [], set()
     started = time.perf_counter()
     deadline = started + 30
@@ -453,6 +485,7 @@ async def observe_case(case, manifest, engine, client):
     for step in case.steps:
         step_started = time.perf_counter()
         attempt_log = []
+        identity = None
         try:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
@@ -461,7 +494,12 @@ async def observe_case(case, manifest, engine, client):
                 call = sql_snapshot(engine, case.owners)
             elif step.operation == "external":
                 # Closed metadata only; no shell hooks, fault injection or rendering.
-                observation = read_operator_evidence(step, case, manifest)
+                if step.display_source:
+                    record = display.receipt(case, step.external_kind, step.display_source, step.name)
+                    OperatorEvidence.model_validate(record)
+                    observation = {"record": record, "receipt_sha256": digest(json.dumps(record, indent=2).encode())}
+                else:
+                    observation = read_operator_evidence(step, case, manifest)
                 provided.add(step.external_kind)
                 if step.name == case.recovery_clock_step:
                     removed = datetime.fromisoformat(observation["record"]["fault_removed_at"])
@@ -472,6 +510,8 @@ async def observe_case(case, manifest, engine, client):
                         raise TimeoutError("fault-removal recovery deadline expired")
                 call = None
             else:
+                if display:
+                    identity = await display.begin(case, step, resolve(step.payload, observations), deadline)
                 if step.operation == "add":
                     write_attempted = True
                 if step.fresh_client:
@@ -482,7 +522,11 @@ async def observe_case(case, manifest, engine, client):
                 else:
                     call = http_observation(client, step, observations, deadline, attempt_log)
             if call is not None:
-                observation = await asyncio.wait_for(call, timeout=remaining)
+                observation = await asyncio.wait_for(call, timeout=max(0, deadline-time.perf_counter()))
+                # Preserve the backend response even if the display acknowledgement times out.
+                observations[step.name] = observation
+                if display and identity is not None:
+                    await display.finish(case, step, observation, identity, deadline)
             observations[step.name] = observation
             if step.expected_http_status is not None:
                 replies = observation.get("attempts", [observation])
@@ -501,7 +545,9 @@ async def observe_case(case, manifest, engine, client):
             if any(f["safety"] for f in failures):
                 break  # No later mutating steps after a failed safety assertion.
         except Exception as exc:
+            prior = observations.get(step.name)
             observations[step.name] = {"error": type(exc).__name__, "attempts": attempt_log,
+                                      **({"backend_observation": prior} if prior is not None else {}),
                                       "elapsed_ms": (time.perf_counter()-step_started)*1000}
             safety_unknown = write_attempted
             failures.append({"step": step.name, "reason": type(exc).__name__, "safety": False,
@@ -539,7 +585,12 @@ async def execute(cases, manifest: LocalManifest, output: Path):
         connect_args={"timeout": 3, "server_settings": {"search_path": manifest.database_schema}})
     results = []
     stopped = False
+    display = None
     try:
+        if manifest.display:
+            from benchmarks.internal.explicit_operations_operator import DisplayOperator
+            display = DisplayOperator(manifest, output)
+            await display.start()
         async with new_http_client(manifest.base_url) as client:
             for case in cases:
                 if stopped:
@@ -550,13 +601,17 @@ async def execute(cases, manifest: LocalManifest, output: Path):
                                     "language": case.language, "external_evidence_provided": [],
                                     "not_executed": True, "elapsed_ms": 0})
                     continue
-                result = await observe_case(case, manifest, engine, client)
+                result = await observe_case(case, manifest, engine, client, display)
                 results.append(result)
                 stopped = result["safety_unknown"] or any(f["safety"] for f in result["failures"])
                 with (output / "evidence.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(result, ensure_ascii=False) + "\n")
     finally:
-        await engine.dispose()
+        try:
+            if display:
+                await display.close()
+        finally:
+            await engine.dispose()
     summary = {"cases": len(results), "checks_passed_cases": sum(not r["failures"] for r in results),
                "failed_cases": sum(bool(r["failures"]) for r in results),
                "safety_check_failed_cases": sum(any(f["safety"] for f in r["failures"]) for r in results),
@@ -576,6 +631,11 @@ async def execute(cases, manifest: LocalManifest, output: Path):
                 if isinstance(o, dict) and o.get("record", {}).get("kind") == "customer_rendering"]
     summary["operator_render_samples"] = len(rendered)
     summary["operator_first_render_p95_ms"] = sorted(rendered)[math.ceil(len(rendered)*.95)-1] if rendered else None
+    summary["unadjudicated_external_observations"] = sum(
+        o.get("record", {}).get("owner_adjudicated") is False
+        for r in results for o in r["observations"].values() if isinstance(o, dict))
+    summary["external_adjudication_complete"] = (summary["unadjudicated_external_observations"] == 0
+                                               and summary["external_evidence_missing_cases"] == 0)
     summary["runtime_pin"] = manifest.runtime.model_dump(mode="json")
     summary["observer_sha256"] = manifest.observer_sha256
     summary["by_requirement"] = {name: {"cases": sum(r["requirement"] == name for r in results),

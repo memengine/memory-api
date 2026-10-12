@@ -31,7 +31,6 @@
       "type": "string"
     },
     "owner_adjudicated": {
-      "const": true,
       "title": "Owner Adjudicated",
       "type": "boolean"
     },

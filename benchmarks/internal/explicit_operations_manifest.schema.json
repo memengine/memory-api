@@ -1,5 +1,43 @@
 {
   "$defs": {
+    "DisplayPin": {
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "maximum": 65535,
+          "minimum": 1024,
+          "title": "Port",
+          "type": "integer"
+        },
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "browser_version": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Browser Version",
+          "type": "string"
+        },
+        "owner_bindings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Owner Bindings",
+          "type": "object"
+        }
+      },
+      "required": [
+        "port",
+        "artifact_sha256",
+        "browser_version",
+        "owner_bindings"
+      ],
+      "title": "DisplayPin",
+      "type": "object"
+    },
     "RuntimePin": {
       "additionalProperties": false,
       "properties": {
@@ -55,7 +93,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "explicit-operations-observer-2",
+      "const": "explicit-operations-observer-3",
       "title": "Schema Version",
       "type": "string"
     },
@@ -135,6 +173,17 @@
       "minItems": 1,
       "title": "Owners",
       "type": "array"
+    },
+    "display": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DisplayPin"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

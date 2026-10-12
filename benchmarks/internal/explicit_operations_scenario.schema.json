@@ -179,6 +179,19 @@
           "default": null,
           "title": "External Env"
         },
+        "display_source": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Source"
+        },
         "external_kind": {
           "anyOf": [
             {
@@ -237,7 +250,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "explicit-operations-observer-2",
+      "const": "explicit-operations-observer-3",
       "title": "Schema Version",
       "type": "string"
     },

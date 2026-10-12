@@ -363,6 +363,26 @@ AWS recreation, deployment, private holdout inspection or new acceptance dataset
 
 ## Session rules
 
+### 2026-10-12 completed checkpoint: approved display/operator handoff
+
+Optional observer-only loopback display and offline evidence review implemented;
+working interface is explicit-operations-observer-3. Backend/V2/governance/frozen
+criteria unchanged. 38 focused synthetic mechanism checks passed in 2.19 s; no
+backend/provider/evaluation execution or acceptance fixtures. Report:
+`benchmarks/internal/reports/explicit-display-operator-20261012.md`; interface:
+`docs/EXPLICIT_OPERATIONS_DISPLAY_OPERATOR.md`. Existing v2 runtime manifest is
+untouched and does not freeze the new observer/adapter. Real browser paint,
+customer identity/reopening and fault coordination remain unverified. Roadmap 3b
+technical planning is now supplied by the implementation assistant; the owner
+need not independently design clocks or evidence mechanisms. Private blueprint
+completion remains pending, not acceptance authoring authorization. Owner approved
+commit of only this tooling/tests/schemas/necessary documentation. Git records the
+new tooling source commit; this does not refreeze runtime/application/browser or
+qualify the pilot. Old fa480db/v2 manifest and blueprint pins remain historical.
+Next task: resolve browser/customer integration and selective fault evidence
+responsibilities before a separately approved runtime/manifest reconciliation.
+Stop after scoped commit and the execution-readiness checklist.
+
 Read this guide and the relevant contract; verify HEAD/status. Inspect only the
 current deliverable. Preserve unrelated changes. V2 remains disabled. Do not
 inspect private cases/labels, rerun consumed holdouts, recreate AWS, change flags,

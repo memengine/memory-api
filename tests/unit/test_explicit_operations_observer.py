@@ -23,8 +23,80 @@ OWNER = UUID(int=1)
 HEAD = "a" * 40
 
 
+def test_display_handoff_keeps_single_request_and_original_response(monkeypatch):
+    monkeypatch.setenv('UNIT_TOKEN', 'synthetic-token')
+    calls=[]
+    async def handler(request):
+        calls.append(request)
+        return httpx.Response(200,json={'data':{'status':'queued'}})
+    display=SimpleNamespace(begin=AsyncMock(return_value={}),finish=AsyncMock())
+    async def run():
+        async with httpx.AsyncClient(base_url='http://127.0.0.1',transport=httpx.MockTransport(handler)) as client:
+            return await observer.observe_case(case([step()]),manifest(),None,client,display)
+    result=asyncio.run(run())
+    assert len(calls)==1 and not result['failures']
+    assert result['observations']['job']['body']['data']['status']=='queued'
+    display.begin.assert_awaited_once(); display.finish.assert_awaited_once()
+
+
+def test_display_failure_retains_backend_response_and_attempt(monkeypatch):
+    monkeypatch.setenv('UNIT_TOKEN','synthetic-token')
+    monkeypatch.setattr(observer,'sql_snapshot',AsyncMock(return_value={}))
+    display=SimpleNamespace(begin=AsyncMock(return_value={}),finish=AsyncMock(side_effect=TimeoutError))
+    async def run():
+        async with httpx.AsyncClient(base_url='http://127.0.0.1',transport=httpx.MockTransport(
+                lambda request:httpx.Response(200,json={'data':{'status':'completed'}}))) as client:
+            return await observer.observe_case(case([step()]),manifest(),None,client,display)
+    result=asyncio.run(run())
+    assert result['failures']
+    evidence=result['observations']['job']
+    assert evidence['backend_observation']['body']['data']['status']=='completed'
+    assert len(evidence['attempts'])==1
+
+
+def test_display_action_failure_prevents_request(monkeypatch):
+    monkeypatch.setenv('UNIT_TOKEN','synthetic-token')
+    monkeypatch.setattr(observer,'sql_snapshot',AsyncMock(return_value={}))
+    calls=[]
+    display=SimpleNamespace(begin=AsyncMock(side_effect=TimeoutError),finish=AsyncMock())
+    async def run():
+        async with httpx.AsyncClient(base_url='http://127.0.0.1',transport=httpx.MockTransport(
+                lambda request:calls.append(request))) as client:
+            return await observer.observe_case(case([step()]),manifest(),None,client,display)
+    result=asyncio.run(run())
+    assert result['failures'] and not calls
+
+
+def test_display_preserves_five_declared_concurrent_attempts(monkeypatch):
+    monkeypatch.setenv('UNIT_TOKEN','synthetic-token')
+    monkeypatch.setattr(observer,'sql_snapshot',AsyncMock(return_value={'memories':[]}))
+    calls=[]
+    async def handler(request):
+        calls.append(request)
+        return httpx.Response(200,json={'data':{'status':'queued'}})
+    display=SimpleNamespace(begin=AsyncMock(return_value={}),finish=AsyncMock())
+    async def run():
+        async with httpx.AsyncClient(base_url='http://127.0.0.1',transport=httpx.MockTransport(handler)) as client:
+            return await observer.observe_case(case([step('before','sql'),add_step(attempts=5,concurrent=True,
+                checks=[{'pointer':'/attempts','operator':'count','expected':5}]),
+                step('after','sql')]),manifest(),None,client,display)
+    result=asyncio.run(run())
+    assert len(calls)==5 and len(result['observations']['add']['attempts'])==5
+    assert not result['failures']
+    display.begin.assert_awaited_once(); display.finish.assert_awaited_once()
+
+
+def test_display_receipt_must_reference_prior_http_and_not_faults():
+    external=dict(name='render',operation='external',display_source='job',external_kind='customer_rendering',
+        checks=[{'pointer':'/record/owner_adjudicated','expected':False}])
+    signal=observer.Step(**external)
+    case([step(),signal],external_requirements=['customer_rendering'])
+    with pytest.raises(ValidationError): case([signal,step()],external_requirements=['customer_rendering'])
+    with pytest.raises(ValidationError): observer.Step(**{**external,'external_kind':'fault_injection'})
+
+
 def manifest():
-    return observer.LocalManifest(schema_version="explicit-operations-observer-2", run_id=uuid4(),
+    return observer.LocalManifest(schema_version="explicit-operations-observer-3", run_id=uuid4(),
         observer_sha256=observer.observer_digest(), source_head=HEAD, base_url="http://127.0.0.1:55081",
         database_env="UNIT_DB", database_schema="replay_unit", isolated_synthetic_environment=True,
         explicit_preferences_enabled=True, automatic_interpretation_disabled=True, v2_disabled=True,
@@ -52,7 +124,7 @@ def add_step(**kw):
 
 
 def case(steps, **kw):
-    data = dict(schema_version="explicit-operations-observer-2", case_id="unit-only", requirement="P2",
+    data = dict(schema_version="explicit-operations-observer-3", case_id="unit-only", requirement="P2",
         coverage_group="unit-only", language="en", human_adjudicated=True, owners=[OWNER], steps=steps)
     data.update(kw)
     return observer.Scenario(**data)

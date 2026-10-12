@@ -7,7 +7,16 @@ The approved promise is committed-state typed preferences, one declaration per
 request. Queue acceptance is not application; pre-commit reads may show the old
 committed value. V2 and automatic interpretation remain disabled.
 
-## Authoritative executable interface
+## Current working interface amendment — 2026-10-12
+
+Observer-3 adds the approved optional display handoff and unadjudicated collection.
+See docs/EXPLICIT_OPERATIONS_DISPLAY_OPERATOR.md for the current interface,
+review command and limits. The observer-2 freeze below remains historical; no
+manifest or acceptance contract was repinned. Schema exports now describe v3.
+Older statements about mandatory pre-adjudicated receipts and no rendering are
+superseded only for the optional display collection path. No execution authorized.
+
+## Historical observer-2 executable interface
 
 `benchmarks/internal/explicit_operations_pilot.py` defines `Scenario` (one JSONL
 line) and `LocalManifest` (one JSON object). Schema version is
