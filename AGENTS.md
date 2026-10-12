@@ -363,6 +363,19 @@ AWS recreation, deployment, private holdout inspection or new acceptance dataset
 
 ## Session rules
 
+### 2026-10-12 approved selective fault tooling checkpoint
+
+Implemented only benchmarks/internal/explicit_fault_operator.py, focused synthetic
+tests and matching documentation. Closed SQL-bound selector, local wrapper factories,
+prepared-before-arm control, max-10-second invalidating expiry, removal/queue receipt
+collection. 21 synthetic mechanism checks passed in 1.25 s; no live fault attached,
+memory journey, provider call or acceptance evaluation. Backend, frozen criteria,
+observer v3 and Northstar unchanged; watchdog 60/120 unchanged. Report:
+benchmarks/internal/reports/explicit-fault-operator-20261012.md. P8 qualification,
+physical outages/worker-started crashes and runtime/control/source refreeze remain
+unverified. Owner approved the scoped tooling commit. Next: a separately approved
+bounded live control diagnostic; stop before attachment or injection.
+
 ### 2026-10-12 completed checkpoint: approved display/operator handoff
 
 Optional observer-only loopback display and offline evidence review implemented;
