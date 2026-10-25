@@ -1,7 +1,20 @@
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
+ARCHIVED_WORKFLOWS = ROOT / ".github/archived-workflows"
+
+
+@pytest.mark.parametrize(
+    "filename", ("build-production-image.yml", "deploy.yml", "deploy-staging-ecs.yml")
+)
+def test_retired_aws_workflows_remain_archived_not_active(filename: str) -> None:
+    assert (ARCHIVED_WORKFLOWS / filename).is_file()
+    for suffix in (".yml", ".yaml"):
+        active_path = ROOT / ".github/workflows" / f"{Path(filename).stem}{suffix}"
+        assert not active_path.exists(), f"Retired AWS workflow is active: {active_path.name}"
 
 
 def test_deploy_script_avoids_noop_revisions_and_bounds_github_history() -> None:
@@ -33,8 +46,8 @@ def test_application_rollout_inventory_includes_celery_beat() -> None:
     assert "aws_ecs_service.celery_beat.name" in output_block
 
 
-def test_live_staging_alias_is_not_automatically_deployed_on_push() -> None:
-    workflow = (ROOT / ".github/workflows/deploy-staging-ecs.yml").read_text(
+def test_archived_staging_alias_is_not_automatically_deployed_on_push() -> None:
+    workflow = (ARCHIVED_WORKFLOWS / "deploy-staging-ecs.yml").read_text(
         encoding="utf-8"
     )
 
@@ -43,7 +56,7 @@ def test_live_staging_alias_is_not_automatically_deployed_on_push() -> None:
 
 
 def test_production_deploy_uses_requested_image_tag_as_app_version() -> None:
-    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    workflow = (ARCHIVED_WORKFLOWS / "deploy.yml").read_text(encoding="utf-8")
 
     assert 'DEPLOY_VERSION="$REQUESTED_TAG"' in workflow
     assert 'DEPLOY_VERSION="$SHORT_SHA"' in workflow
@@ -51,7 +64,7 @@ def test_production_deploy_uses_requested_image_tag_as_app_version() -> None:
 
 
 def test_production_bootstrap_skips_smoke_only_at_zero_desired_count() -> None:
-    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    workflow = (ARCHIVED_WORKFLOWS / "deploy.yml").read_text(encoding="utf-8")
 
     assert "'services[0].desiredCount'" in workflow
     assert 'if [ "$DESIRED_COUNT" = "0" ]' in workflow

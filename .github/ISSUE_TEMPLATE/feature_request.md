@@ -1,33 +1,35 @@
 ---
-name: Feature request
-about: Suggest an improvement or new capability
-title: "feat: "
+name: Improvement proposal
+about: Describe a concrete problem and a bounded contribution
+title: "proposal: "
 labels: enhancement
 assignees: ""
 ---
 
-## Is this related to a problem?
+## Problem and affected workflow
 
-Describe the problem or user need.
+Who encounters this problem? Give a synthetic example and distinguish observed
+behavior from a hypothesis. No customer data, credentials or private cases.
 
-## Describe the solution
+## Smallest useful change
 
-What would you like MemoryOS to do?
+What would improve the workflow? Could documentation, a test, or an existing API
+solve it without a new feature? Review the current README scope first.
 
-## Which domain does this affect?
+## Area
 
-- [ ] Generic memory
-- [ ] EdTech
-- [ ] Healthcare
-- [ ] AgriTech
-- [ ] HR Tech
-- [ ] Customer Support
-- [ ] Other:
+- [ ] Local setup / documentation
+- [ ] Python or TypeScript SDK
+- [ ] Explicit preference request/read contract
+- [ ] Provenance / currentness / scope
+- [ ] Reliability / idempotency
+- [ ] Other (explain)
 
-## Alternatives considered
+## Verification and trust boundaries
 
-What other approaches did you consider?
+How would we know it works? Identify any permission, authority, migration,
+provider-cost, experimental-flag or compatibility implications.
 
-## Additional context
+## Alternatives and willingness to contribute
 
-Screenshots, examples, links, or related issues.
+What have you tried? Would you like to work on the change after its scope is agreed?
