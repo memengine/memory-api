@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Private security reporting
+    url: https://github.com/memengine/memory-api/blob/main/SECURITY.md
+    about: Report suspected vulnerabilities privately; do not open a public issue.
+  - name: Contributor setup and first steps
+    url: https://github.com/memengine/memory-api/blob/main/CONTRIBUTING.md
+    about: Start with no-provider tests and a small, agreed contribution.

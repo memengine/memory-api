@@ -2,12 +2,15 @@ name: Internal benchmark integration
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * 2"
+
+# Maintainer-only/manual while the historical scheduled failure is unresolved.
+permissions:
+  contents: read
 
 jobs:
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16

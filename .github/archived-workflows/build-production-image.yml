@@ -1,3 +1,4 @@
+# Archived: not active in GitHub Actions. See ../WORKFLOWS.md before restoring.
 name: Build Production API Image
 
 on:
