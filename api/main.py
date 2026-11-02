@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi import Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -212,7 +213,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
             status_code=422,
             code="REQ_422",
             error="validation_error",
-            details=exc.errors(),
+            details=jsonable_encoder(exc.errors(), custom_encoder={Exception: str}),
         )
 
     @app.exception_handler(StarletteHTTPException)

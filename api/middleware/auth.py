@@ -73,6 +73,7 @@ class JwtAuthResult:
     error_code: str | None = None
     error_message: str | None = None
     org_id: str | None = None
+    org_role: str | None = None
 
 
 class _DirectRedisBreaker:
@@ -204,6 +205,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
             request.state.auth_scheme = "bearer"
             request.state.auth_method = "clerk_jwt"
+            request.state.org_role = auth_result.org_role
             return await call_next(request)
 
         if scheme_normalized == "apikey":
@@ -298,7 +300,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if not subject:
                 return None
 
-            org_id = str(claims.get("org_id", "")).strip() or None
+            organization = claims.get("o") if isinstance(claims.get("o"), dict) else {}
+            org_id = str(claims.get("org_id") or organization.get("id") or "").strip() or None
             email = str(claims.get("email") or "").strip().lower() or None
             email_verified = claims.get("email_verified") is True
             if org_id is None:
@@ -352,6 +355,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 user_id=str(subject),
                 tenant_id=tenant_id,
                 org_id=org_id,
+                org_role=(str(claims.get("org_role") or "") or
+                    ("org:" + str(organization["rol"]) if organization.get("id") == org_id and organization.get("rol") else None)),
                 email=email,
                 email_verified=email_verified,
             )

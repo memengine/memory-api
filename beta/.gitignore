@@ -1,0 +1,5 @@
+beta.env
+*.local.json
+*.zip
+*.tar
+__pycache__/

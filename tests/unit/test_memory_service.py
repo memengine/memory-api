@@ -264,6 +264,7 @@ async def test_list_memories_uses_tenant_scope_without_user_lookup() -> None:
     session = MagicMock()
     session.execute = AsyncMock(
         side_effect=[
+            FakeExecuteResult([SimpleNamespace(is_blocked=False)]),
             FakeExecuteResult([1]),
             FakeExecuteResult([memory]),
         ]
@@ -290,7 +291,7 @@ async def test_list_memories_uses_tenant_scope_without_user_lookup() -> None:
     assert [item.id for item in memories] == [memory.id]
     assert next_cursor is None
     assert total == 1
-    assert session.execute.await_count == 2
+    assert session.execute.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -347,11 +348,12 @@ async def test_queue_memory_add_scopes_idempotency_to_tenant() -> None:
 async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
     cache_service = MagicMock()
     tenant_id = str(uuid4())
+    job_id, owner_id = uuid4(), uuid4()
     binding = memory_add_replay_binding(
         tenant_id=tenant_id, owner_id="customer-1", messages=[], metadata={},
     )
     cache_service.get_idempotent_response = AsyncMock(
-        return_value={"job_id": "job-1", "status": "queued", REPLAY_BINDING_FIELD: binding}
+        return_value={"job_id": str(job_id), "status": "queued", REPLAY_BINDING_FIELD: binding}
     )
     service = MemoryService(
         session=MagicMock(),
@@ -361,6 +363,12 @@ async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
     )
     service._check_replay_permissions = AsyncMock()
     service.session.execute = AsyncMock(return_value=FakeExecuteResult([]))
+    service.session.get = AsyncMock(side_effect=[
+        SimpleNamespace(id=job_id, tenant_id=tenant_id, proxy_user_id=owner_id),
+        SimpleNamespace(tenant_id=tenant_id, is_blocked=False,
+            external_user_id_hash=ProxyUserService.hash_external_user_id(tenant_id, "customer-1")),
+    ])
+    service._job_payload_with_live_status = lambda _: {"job_id": str(job_id), "status": "queued"}
 
     cached = await service.get_idempotent_memory_add(
         tenant_id=tenant_id,
@@ -369,7 +377,7 @@ async def test_get_idempotent_memory_add_uses_tenant_scope() -> None:
         durable=False,  # Compatibility lane keeps cache behavior after SQL lookup.
     )
 
-    assert cached == {"job_id": "job-1", "status": "queued"}
+    assert cached == {"job_id": str(job_id), "status": "queued"}
     cache_service.get_idempotent_response.assert_awaited_once_with(
         "same-key",
         scope=f"tenant:{tenant_id}",

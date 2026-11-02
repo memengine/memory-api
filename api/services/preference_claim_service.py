@@ -182,27 +182,35 @@ def declared_preferences(claims, messages: list[dict[str, Any]]) -> list[Extract
     return result
 
 
-def reserve_claim(session, *, tenant_id: str, proxy_user_id: str, declaration: PreferenceClaimRequest):
+def reserve_claim(
+    session, *, tenant_id: str, proxy_user_id: str,
+    declaration: PreferenceClaimRequest, create_if_missing: bool = True,
+) -> MemoryClaim | None:
     identity = preference_identity(declaration)
-    # ON CONFLICT covers the first-writer race; row locking serializes subsequent
-    # target/version decisions. All calls are in the memory/outbox transaction.
-    session.execute(insert(MemoryClaim).values(
-        id=uuid.uuid4(), tenant_id=uuid.UUID(tenant_id), proxy_user_id=uuid.UUID(proxy_user_id),
-        category=MemoryCategory.preference, claim_fingerprint=identity.fingerprint,
-        subject_key=identity.subject_key, predicate_key=identity.predicate_key,
-        scope=identity.scope, status="disputed", authority_priority=20, confidence_score=0,
-    ).on_conflict_do_nothing(constraint="uq_memory_claims_tenant_user_fingerprint"))
-    return session.execute(select(MemoryClaim).where(
+    # Only a new assertion reserves absence. A target-bound operation must not
+    # leave an empty ledger when its owned target does not exist. Existing rows
+    # retain the same ledger-before-memory lock order in either path.
+    if create_if_missing:
+        session.execute(insert(MemoryClaim).values(
+            id=uuid.uuid4(), tenant_id=uuid.UUID(tenant_id), proxy_user_id=uuid.UUID(proxy_user_id),
+            category=MemoryCategory.preference, claim_fingerprint=identity.fingerprint,
+            subject_key=identity.subject_key, predicate_key=identity.predicate_key,
+            scope=identity.scope, status="disputed", authority_priority=20, confidence_score=0,
+        ).on_conflict_do_nothing(constraint="uq_memory_claims_tenant_user_fingerprint"))
+    result = session.execute(select(MemoryClaim).where(
         MemoryClaim.tenant_id == uuid.UUID(tenant_id),
         MemoryClaim.proxy_user_id == uuid.UUID(proxy_user_id),
         MemoryClaim.claim_fingerprint == identity.fingerprint,
-    ).with_for_update().execution_options(populate_existing=True)).scalar_one()
+    ).with_for_update().execution_options(populate_existing=True))
+    return result.scalar_one() if create_if_missing else result.scalar_one_or_none()
 
 
-def transition_reason(declaration: PreferenceClaimRequest, ledger: MemoryClaim, target: Memory | None) -> str:
+def transition_reason(declaration: PreferenceClaimRequest, ledger: MemoryClaim | None, target: Memory | None) -> str:
     holds_current = declaration.choice_state == "current_choice_unresolved"
     if declaration.applicability.kind == "unresolved" or (declaration.commitment == "uncertain" and not holds_current):
         return "preference_requires_review"
+    if ledger is None:
+        return "preference_target_stale"
     if ledger.active_memory_id is None:
         return "preference_target_stale" if declaration.commitment == "replacement" or holds_current else "NEW"
     if target is None or str(target.id) != str(ledger.active_memory_id):

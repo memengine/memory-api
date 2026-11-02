@@ -25,13 +25,7 @@ from api.services.provenance_service import build_provenance_snapshot
 
 _SPACE_RE = re.compile(r"\s+")
 _TRAILING_PUNCT_RE = re.compile(r"[\s.?!]+$")
-_POSSESSIVE_PREFIX_RE = re.compile(
-    r"^(?:the\s+)?(?:user|customer|student|person|learner)'?s\s+", re.I
-)
-_CLAIM_SPLIT_RE = re.compile(
-    r"\b(?:is|are|was|were|uses|use|prefers|prefer|needs|need|wants|want|has|have)\b",
-    re.I,
-)
+GENERIC_CLAIM_SUBJECT = "exact_proposition_v1"
 
 
 @dataclass(slots=True)
@@ -90,12 +84,27 @@ class ClaimLedgerService:
             or str(predecessor_claim.proxy_user_id) != str(proxy_user_id)
         ):
             raise ValueError("explicit preference predecessor identity mismatch")
+        if not declaration and predecessor_memory_id is not None and resolution in {"UPDATE", "MERGE"}:
+            # Only the resolver's target-bound update can join different generic
+            # propositions. Never inherit an old verb-derived (possibly merged)
+            # claim or a claim outside this owner. Failure rolls back source writes.
+            if (predecessor_claim is None
+                or predecessor_claim.subject_key != GENERIC_CLAIM_SUBJECT
+                or str(predecessor_claim.tenant_id) != str(tenant_id)
+                or str(predecessor_claim.proxy_user_id) != str(proxy_user_id)
+                or predecessor_claim.category != memory.category
+                or normalize_generic_scope(predecessor_claim.scope or {}) != normalize_generic_scope(identity.scope)):
+                raise ValueError("generic predecessor identity is unverified")
         claim = predecessor_claim or self._find_claim(
             tenant_id=uuid.UUID(str(tenant_id)),
             proxy_user_id=uuid.UUID(str(proxy_user_id)),
             fingerprint=identity.fingerprint,
             for_update=True,
         )
+        if not declaration and claim is not None and normalize_generic_scope(claim.scope or {}) != normalize_generic_scope(identity.scope):
+            # A pre-fix typed scope may share the old stringified fingerprint.
+            # Never inherit that claim or rewrite it into a different scope.
+            raise ValueError("generic claim scope binding mismatch")
         priority = authority_priority(
             provenance,
             memory.category.value
@@ -545,20 +554,16 @@ def build_claim_identity(
     category: str,
     scope: dict[str, Any] | None = None,
 ) -> ClaimIdentity:
-    normalized = normalize_text(content)
-    subject_key = "user"
+    normalized = content.strip()
+    # Natural-language subject/verb splitting does not establish a business
+    # field. Exact propositions can group automatically; case and punctuation
+    # are meaningful data, so only outer whitespace is stripped. Corrections
+    # require the existing explicit predecessor path in record_memory.
+    subject_key = GENERIC_CLAIM_SUBJECT
     predicate_key = normalized
     value = normalized
 
-    split = _CLAIM_SPLIT_RE.search(normalized)
-    if split is not None:
-        left = normalized[: split.start()].strip()
-        right = normalized[split.end() :].strip()
-        if left and right:
-            predicate_key = _POSSESSIVE_PREFIX_RE.sub("", left).strip() or left
-            value = right
-
-    scope_key = normalize_scope(scope or {})
+    scope_key = normalize_generic_scope(scope or {})
     fingerprint_base = {
         "category": category,
         "subject": subject_key,
@@ -653,6 +658,17 @@ def normalize_scope(scope: dict[str, Any]) -> tuple[tuple[str, str], ...]:
             continue
         stable_items.append((str(key), str(value)))
     return tuple(stable_items)
+
+
+def normalize_generic_scope(scope: dict[str, Any]) -> tuple:
+    """Preserve string-only fingerprints; encode other JSON types distinctly.
+
+    Existing domain/preference fingerprints retain their frozen normalization.
+    A tuple tag cannot collide with an arbitrary caller string under repr().
+    """
+    return tuple((str(key), value if isinstance(value, str) else (
+        "json", json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False),
+    )) for key, value in sorted(scope.items(), key=lambda item: str(item[0])))
 
 
 def authority_priority(provenance: dict[str, Any] | None, category: str) -> int:

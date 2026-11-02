@@ -68,7 +68,7 @@ def make_memory(
     )
 
 
-def test_plan_claims_share_fingerprint_when_value_changes() -> None:
+def test_generic_changed_values_do_not_establish_field_identity() -> None:
     starter = build_claim_identity(
         content="Customer's current subscription plan is Starter.",
         category="fact",
@@ -80,10 +80,9 @@ def test_plan_claims_share_fingerprint_when_value_changes() -> None:
         scope={"workspace": "ws_1"},
     )
 
-    assert starter.fingerprint == growth.fingerprint
-    assert starter.predicate_key == "current subscription plan"
-    assert starter.value == "starter"
-    assert growth.value == "growth"
+    assert starter.fingerprint != growth.fingerprint
+    assert starter.value == "Customer's current subscription plan is Starter."
+    assert growth.value == "Customer's current subscription plan is Growth."
 
 
 def test_claim_scope_participates_in_identity() -> None:
@@ -99,6 +98,86 @@ def test_claim_scope_participates_in_identity() -> None:
     )
 
     assert first.fingerprint != second.fingerprint
+
+
+def test_generic_fields_and_copular_statements_do_not_false_merge():
+    statements = [
+        "This account uses the billing currency INR.",
+        "This account has exactly 12 licensed seats.",
+        "This account uses timezone Asia/Kolkata.",
+        "This account uses English for support.",
+        "This account uses email as contact channel.",
+        "This account is active.",
+        "This account is based in India.",
+    ]
+    identities = [build_claim_identity(content=s, category="fact") for s in statements]
+    assert len({i.fingerprint for i in identities}) == len(statements)
+    repeated = build_claim_identity(content="  This account uses the billing currency INR. ", category="fact")
+    assert repeated.fingerprint == identities[0].fingerprint
+    different_case = build_claim_identity(content=statements[0].lower(), category="fact")
+    assert different_case.fingerprint != identities[0].fingerprint
+
+
+def test_targeted_correction_preserves_other_claims_and_provenance():
+    session = FakeSession()
+    tenant, owner, writer = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    service = ClaimLedgerService(session)
+    service._find_claim = lambda **kw: next((c for c in session.added
+        if isinstance(c, MemoryClaim) and c.claim_fingerprint == kw["fingerprint"]), None)
+    service._find_claim_for_memory = lambda mid: next((c for c in session.added
+        if isinstance(c, MemoryClaim) and c.active_memory_id == mid), None)
+    claims, memories = [], []
+    for text in ["Account uses INR.", "Account has 12 seats.", "Account uses Asia/Kolkata.",
+                 "Account uses English.", "Account uses email."]:
+        row = make_memory(text)
+        row.proxy_user_id = owner
+        provenance = {"writer_id": str(writer), "scope": {"account": "synthetic"},
+                      "evidence": [{"reference": str(row.source_event_id)}]}
+        row.metadata_json = {"provenance": provenance}
+        claim = service.record_memory(row, tenant_id=tenant, proxy_user_id=owner,
+            provenance=provenance, resolution="NEW")
+        memories.append(row)
+        claims.append(claim)
+    assert len({c.id for c in claims}) == 5
+    old_winners = [(c.active_memory_id, c.winning_revision_id) for c in claims]
+    corrected = make_memory("Account uses EUR.")
+    corrected.proxy_user_id = owner
+    provenance = {**provenance, "evidence": [{"reference": str(corrected.source_event_id)}]}
+    corrected.metadata_json = {"provenance": provenance}
+    updated = service.record_memory(corrected, tenant_id=tenant, proxy_user_id=owner,
+        provenance=provenance, resolution="UPDATE", predecessor_memory_id=memories[0].id)
+    assert updated.id == claims[0].id
+    assert updated.active_memory_id == corrected.id
+    assert [(c.active_memory_id, c.winning_revision_id) for c in claims[1:]] == old_winners[1:]
+    from api.services.retriever import source_winner_matches
+    for claim, row in zip(claims, [corrected] + memories[1:]):
+        revision = session.get(MemoryClaimRevision, claim.winning_revision_id)
+        assert source_winner_matches(claim, row, revision)
+        assert revision.source_writer_id == writer
+        assert revision.source_event_id == row.source_event_id
+        assert revision.evidence_refs == row.metadata_json["provenance"]["evidence"]
+
+
+@pytest.mark.parametrize("invalid", ["legacy", "tenant", "owner", "scope", "category", "missing"])
+def test_generic_predecessor_must_be_verified_owned_and_scoped(invalid):
+    from api.services.claim_ledger_service import GENERIC_CLAIM_SUBJECT
+    tenant, owner = uuid.uuid4(), uuid.uuid4()
+    row = make_memory("Account uses EUR.")
+    claim = SimpleNamespace(subject_key=GENERIC_CLAIM_SUBJECT, tenant_id=tenant,
+        proxy_user_id=owner, scope={}, category=MemoryCategory.fact)
+    if invalid == "legacy": claim.subject_key = "user"
+    if invalid == "tenant": claim.tenant_id = uuid.uuid4()
+    if invalid == "owner": claim.proxy_user_id = uuid.uuid4()
+    if invalid == "scope": claim.scope = {"other": "account"}
+    if invalid == "category": claim.category = MemoryCategory.preference
+    session = FakeSession()
+    service = ClaimLedgerService(session)
+    service._find_claim_for_memory = lambda _: None if invalid == "missing" else claim
+    with pytest.raises(ValueError, match="predecessor identity is unverified"):
+        service.record_memory(row, tenant_id=tenant, proxy_user_id=owner,
+            provenance={"writer_id": str(uuid.uuid4())}, resolution="UPDATE",
+            predecessor_memory_id=uuid.uuid4())
+    assert session.added == []
 
 
 def test_record_memory_creates_active_claim_and_revision() -> None:
@@ -125,12 +204,12 @@ def test_record_memory_creates_active_claim_and_revision() -> None:
     ]
     assert claim is not None
     assert claim.status == "active"
-    assert claim.active_value == "growth"
+    assert claim.active_value == memory.content
     assert claim.active_memory_id == memory.id
     assert claim.authority_priority == 70
     assert len(revisions) == 1
     assert revisions[0].status == "activated"
-    assert revisions[0].asserted_value == "growth"
+    assert revisions[0].asserted_value == claim.active_value
     assert revisions[0].schema_version == CLAIM_SCHEMA_VERSION
     assert revisions[0].processor_version == CLAIM_PROCESSOR_VERSION
     assert revisions[0].effective_from == memory.effective_from
@@ -186,7 +265,7 @@ def test_higher_authority_revision_becomes_winner() -> None:
     ][0]
     assert old_revision.status == "superseded"
     assert existing_claim.status == "active"
-    assert existing_claim.active_value == "growth"
+    assert existing_claim.active_value == memory.content
     assert existing_claim.active_memory_id == memory.id
     assert new_revision.status == "activated"
 

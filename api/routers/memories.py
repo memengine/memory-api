@@ -96,6 +96,8 @@ from api.infra.postgres_benchmark import postgres_benchmark_enabled
 
 
 router = APIRouter(prefix="/v1/memories", tags=["memories"])
+from api.routers.service_corrections import router as service_corrections_router
+router.include_router(service_corrections_router)
 logger = logging.getLogger(__name__)
 
 
@@ -1232,6 +1234,7 @@ async def get_memory_job_status(
     # example, a legacy or malformed cache entry) as not found.
     if tenant_id and str(job.get("tenant_id") or "") != str(tenant_id):
         raise APIError(status_code=404, code="JOB_404", error="job_not_found")
+    await memory_service.check_job_owner_access(job)
     return MemoryJobStatusResponse(
         data=MemoryJobStatusData(
             job_id=job["job_id"],

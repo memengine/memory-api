@@ -833,7 +833,8 @@ def test_source_commitment_disagreement_cannot_admit_or_replace_memory(marker, s
     assert resolver.last_source_decision_tokens_used == 70
     assert json.loads(model.complete_sync.call_args.kwargs["user_message"])["supporting_user_turns"][0]["content"] == full_turn
     if relation == "duplicate":
-        assert not resolver.last_pending_candidates
+        (pending,) = resolver.last_pending_candidates
+        assert "source_duplicate_unverified" in pending.validated_evidence["source_decision"]["reason_codes"]
     else:
         pending = resolver.last_pending_candidates
         assert len(pending) == 1
@@ -864,7 +865,9 @@ def test_committed_source_control_keeps_existing_admission_behavior(relation):
                                      tenant_id=str(proxy.tenant_id), proxy_user_id=str(proxy.id))
     assert [row.resolution for row in stored] == ({"supersedes": ["UPDATE"], "novel": ["NEW"], "duplicate": []}[relation])
     assert existing.is_archived == (relation == "supersedes")
-    assert not resolver.last_pending_candidates
+    assert len(resolver.last_pending_candidates) == (1 if relation == "duplicate" else 0)
+    if relation == "duplicate":
+        assert "source_duplicate_unverified" in resolver.last_pending_candidates[0].validated_evidence["source_decision"]["reason_codes"]
 
 
 @pytest.mark.parametrize("option", [None, "not-an-option", {
@@ -1174,6 +1177,7 @@ def test_reject_resolution_discards_new_memory_and_logs_reason() -> None:
 
 
 def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None:
+    """Routing unit test; registered-source SQL admission is tested separately."""
     existing = make_existing_memory()
     existing.content = "Customer's current subscription plan is Starter."
     existing.category = MemoryCategory.fact
@@ -1185,7 +1189,8 @@ def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None
             "observed_at": "2026-06-14T08:00:00+00:00",
         }
     }
-    session = FakeSession(existing_memory=existing)
+    proxy = ProxyUser(id=existing.proxy_user_id, tenant_id=uuid.uuid4())
+    session = FakeSession(existing_memory=existing, proxy_user=proxy)
     qdrant = MagicMock()
     qdrant.search_memories.return_value = [make_qdrant_point(existing)]
     resolver = ConflictResolver(
@@ -1202,6 +1207,9 @@ def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None
         },
     )
 
+    # FakeSession has no SQL ledger or admitted source event. Isolate that
+    # persistence boundary rather than weakening the registered-source gate.
+    resolver._record_claim_for_memory = MagicMock()
     stored = resolver.check_and_store(
         [
             ExtractedMemory(
@@ -1214,7 +1222,7 @@ def test_equal_authority_cross_writer_conflict_queues_human_resolution() -> None
             )
         ],
         user_id=str(existing.user_id),
-        tenant_id=str(uuid.uuid4()),
+        tenant_id=str(proxy.tenant_id),
         proxy_user_id=str(existing.proxy_user_id),
     )
 

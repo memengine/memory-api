@@ -1,12 +1,31 @@
 # MemoryO / MemoryOS: operating guide and release roadmap
 
-Updated: 2026-10-11 (Asia/Calcutta). Applies to this backend repository.
+Updated: 2026-11-02 (Asia/Calcutta). Applies to this backend repository.
 MemoryO is the product name in the owner's operating instructions; MemoryOS
 remains the existing repository/API name. No rename is authorized.
 
 This is the single release roadmap. The documents below specify contracts and
 evidence; they do not create competing roadmaps. Resume the next unfinished task
 instead of repeating the historical audit.
+
+## Local developer beta package — 2 November 2026
+
+Owner requested a developer-beta package and commit, excluding unnecessary testing
+files. Package beta/ contains source pin, dedicated local Compose/Docker setup,
+non-superuser DB init/bootstrap, HTTP example with explicit paid-call opt-in and
+literal quotation/visibility gate, operator and feedback instructions. This is
+guided synthetic local beta, not production or independent demand proof. Existing
+native quotation journey is reported passed; no further broad evaluation needed.
+Fresh packaged startup/migrations/bootstrap/paid demo not executed: static Compose
+and offline tests do not establish that full path. No existing runtime/volume/
+credential/flag changes or paid calls during packaging. Commit only verified
+runtime repairs, necessary product regressions, package and operator contract.
+Do not stage .env, generated evidence/reports, private datasets, local dashboard
+overlays, archived evaluation tooling, unrelated workflows/README edits or other
+repositories. Unrelated working-tree changes and historical evidence are preserved.
+Archive is an explicit public source allowlist exported from the committed tree;
+no AGENTS/private acceptance/internal reports included in the developer handoff.
+
 
 ## Mission, customers and boundaries
 

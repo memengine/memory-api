@@ -1,0 +1,12 @@
+# Dockerfile-specific allowlist: never send credentials/evidence to the builder.
+**
+!pyproject.toml
+!alembic.ini
+!api/
+!api/**
+!docs/
+!docs/extraction_spec.md
+!beta/
+!beta/Dockerfile
+!beta/bootstrap.py
+!beta/local_vector_publisher.py

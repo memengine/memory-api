@@ -296,6 +296,7 @@ class VersionService:
             .where(
                 Memory.id == uuid.UUID(str(memory_id)),
                 ProxyUser.tenant_id == uuid.UUID(str(tenant_id)),
+                ProxyUser.is_blocked.is_(False),
             )
         )
         memory = result.scalar_one_or_none()

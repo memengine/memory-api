@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -14,7 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from api.db.database import build_sync_session_factory
-from api.db.models import VectorSyncOperation, VectorSyncOutbox, VectorSyncStatus
+from api.db.models import Memory, VectorSyncOperation, VectorSyncOutbox, VectorSyncStatus
 from api.db.vector_store import QdrantService
 
 LOGGER = logging.getLogger(__name__)
@@ -66,20 +67,21 @@ def run_outbox_cycle(
     session_factory: Callable[[], Any] | None = None,
     qdrant_service: QdrantService | None = None,
     batch_size: int = 100,
+    tenant_id: str | None = None,
 ) -> dict[str, int]:
     factory = session_factory or build_vector_sync_session_factory()
     session = factory()
     qdrant = qdrant_service or QdrantService()
 
     try:
-        pending_ids = list(
-            session.execute(
-                select(VectorSyncOutbox.id)
-                .where(VectorSyncOutbox.status == VectorSyncStatus.pending)
-                .order_by(VectorSyncOutbox.created_at, VectorSyncOutbox.id)
-                .limit(batch_size)
-            ).scalars().all()
-        )
+        pending_query = select(VectorSyncOutbox.id).where(VectorSyncOutbox.status == VectorSyncStatus.pending)
+        if tenant_id is not None:
+            # Local scoped dispatch must never publish another tenant's rows.
+            from api.db.models import ProxyUser
+            pending_query = pending_query.join(Memory, Memory.id == VectorSyncOutbox.memory_id).join(
+                ProxyUser, ProxyUser.id == Memory.proxy_user_id).where(ProxyUser.tenant_id == uuid.UUID(tenant_id))
+        pending_ids = list(session.execute(pending_query.order_by(
+            VectorSyncOutbox.created_at, VectorSyncOutbox.id).limit(batch_size)).scalars().all())
         claimed_rows: list[VectorSyncOutbox] = []
         for outbox_id in pending_ids:
             claimed = _claim_outbox_row(session, outbox_id)
@@ -273,8 +275,8 @@ def _mark_rows_failed_or_pending(session: Session, rows: list[VectorSyncOutbox],
 
 
 @shared_task(name=PROCESS_OUTBOX_TASK_NAME)
-def process_outbox() -> dict[str, int]:
-    result = run_outbox_cycle()
+def process_outbox(tenant_id: str | None = None) -> dict[str, int]:
+    result = run_outbox_cycle(tenant_id=tenant_id)
     LOGGER.info(
         "vector_sync_outbox_cycle claimed=%s done=%s failed=%s",
         result["claimed"],

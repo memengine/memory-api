@@ -1,0 +1,116 @@
+# Dedicated fresh local resources. Never combine with the ordinary Compose stack.
+name: memoryos-beta
+x-environment: &environment
+  APP_ENV: development
+  DATABASE_URL: postgresql+asyncpg://memoryos_beta_app:local_beta_only@postgres:5432/memoryos_beta
+  REDIS_URL: redis://redis:6379/2
+  CELERY_BROKER_URL: redis://redis:6379/2
+  CELERY_RESULT_BACKEND: redis://redis:6379/3
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_API_KEY: ""
+  QDRANT_COLLECTION: memories_openai
+  REGION_IN1_QDRANT_URL: http://qdrant:6333
+  REGION_EU1_QDRANT_URL: http://qdrant:6333
+  REGION_US1_QDRANT_URL: http://qdrant:6333
+  REGION_IN1_REDIS_URL: redis://redis:6379/2
+  REGION_EU1_REDIS_URL: redis://redis:6379/2
+  REGION_US1_REDIS_URL: redis://redis:6379/2
+  REGION_IN1_QDRANT_API_KEY: ""
+  REGION_EU1_QDRANT_API_KEY: ""
+  REGION_US1_QDRANT_API_KEY: ""
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_ACCESS_KEY_ID: local-only
+  AWS_SECRET_ACCESS_KEY: local-only
+  AWS_DEFAULT_REGION: ap-south-1
+  AWS_REGION: ap-south-1
+  AWS_EC2_METADATA_DISABLED: "true"
+  LLM_PROVIDER_ORDER: openai
+  EMBEDDING_PROVIDER: openai
+  EMBEDDING_MODEL: text-embedding-3-small
+  EMBEDDING_MODEL_ID: openai-text-embedding-3-small-v1
+  EMBEDDING_DIMENSIONS: "1536"
+  GEMINI_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  COHERE_API_KEY: ""
+  OPENAI_API_KEY_SECRET_NAME: ""
+  GEMINI_API_KEY_SECRET_NAME: ""
+  ANTHROPIC_API_KEY_SECRET_NAME: ""
+  COHERE_API_KEY_SECRET_NAME: ""
+  SENTRY_DSN: ""
+  DATA_ENCRYPTION_WRITE_MODE: disabled
+  PHASE3A_CONFIRMATION_ENABLED: "false"
+  PHASE3A_CONFIRMATION_SHADOW_ENABLED: "false"
+  EXPLICIT_PREFERENCE_CLAIMS_ENABLED: "false"
+  RUNTIME_PREFERENCE_ENABLED: "false"
+  RUNTIME_PREFERENCE_DISCOVERY_ENABLED: "false"
+  RUNTIME_TURN_PREPARATION_ENABLED: "false"
+  RUNTIME_TARGET_WITHHOLDING_ENABLED: "false"
+  RUNTIME_TARGET_RELEASE_ENABLED: "false"
+  UNIVERSAL_EXTRACTION_SHADOW_ENABLED: "false"
+  MEMORY_PASSPORT_ENABLED: "false"
+  IMPORTANCE_SHADOW_ENABLED: "false"
+x-app: &app
+  image: memoryos-api:local-beta-source
+  build:
+    context: ..
+    dockerfile: beta/Dockerfile
+  env_file: beta.env
+  environment: *environment
+  init: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: beta_admin
+      POSTGRES_PASSWORD: local_bootstrap_only
+      POSTGRES_DB: memoryos_beta
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-beta.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U beta_admin -d memoryos_beta"]
+      interval: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes: ["qdrant:/qdrant/storage"]
+  localstack:
+    image: localstack/localstack:3.8.1
+    environment:
+      SERVICES: s3,sqs,secretsmanager
+      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
+    volumes: ["localstack:/var/lib/localstack"]
+  api:
+    <<: *app
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["127.0.0.1:18000:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 10s
+      retries: 12
+      start_period: 20s
+  worker:
+    <<: *app
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "free-extraction,starter-extraction", "-c", "1", "--prefetch-multiplier", "1", "--loglevel=info"]
+  background:
+    <<: *app
+    command: ["celery", "-A", "api.celery_app.celery_app", "worker", "-Q", "celery,reembedding,dead-letter", "-c", "1", "--prefetch-multiplier", "1", "--loglevel=info"]
+  publisher:
+    <<: *app
+    profiles: ["publisher"]
+    command: ["python", "-m", "local_vector_publisher"]
+
+volumes:
+  postgres:
+  redis:
+  qdrant:
+  localstack:

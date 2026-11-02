@@ -54,7 +54,8 @@ async def test_resolve_upserts_then_hits_cache() -> None:
     proxy_user = make_proxy_user(tenant_id=uuid.UUID(tenant_id))
 
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=FakeResult(scalar_one=proxy_user.id))
+    session.execute = AsyncMock(side_effect=[FakeResult(scalar_one=proxy_user.id),
+        FakeResult(scalar_one_or_none=proxy_user)])
     session.get = AsyncMock(return_value=proxy_user)
     session.commit = AsyncMock()
 
@@ -70,7 +71,7 @@ async def test_resolve_upserts_then_hits_cache() -> None:
 
     assert first.id == proxy_user.id
     assert second.id == proxy_user.id
-    assert session.execute.await_count == 1
+    assert session.execute.await_count == 2  # Cached identity still rechecks SQL suspension.
     assert session.get.await_count == 1
     assert session.commit.await_count == 1
     cache_key = (
@@ -97,8 +98,11 @@ async def test_resolve_raises_for_blocked_proxy_user_from_cache() -> None:
         ex=600,
     )
 
+    blocked_owner = make_proxy_user(tenant_id=uuid.UUID(tenant_id), is_blocked=True)
+    blocked_session = AsyncMock()
+    blocked_session.execute = AsyncMock(return_value=FakeResult(scalar_one_or_none=blocked_owner))
     service = ProxyUserService(
-        session=AsyncMock(),
+        session=blocked_session,
         cache_service=CacheService(client=redis_client),
         qdrant_service=MagicMock(),
     )

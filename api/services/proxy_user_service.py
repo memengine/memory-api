@@ -75,12 +75,14 @@ class ProxyUserService:
         cache_key = self._cache_key(tenant_id, external_user_id_hash)
         cached_proxy_user = await self._get_cached_proxy_user(cache_key)
         if cached_proxy_user is not None:
-            if cached_proxy_user.is_blocked:
+            current = await self._get_proxy_user_by_hash(tenant_id=tenant_id, external_user_id_hash=external_user_id_hash)
+            if current is not None and current.is_blocked:
                 raise ProxyUserBlockedError(
                     tenant_id=tenant_id,
                     external_user_id_hash=external_user_id_hash,
                 )
-            return cached_proxy_user
+            if current is not None:
+                return current
 
         proxy_user = await self._upsert_proxy_user(
             tenant_id=tenant_id,
@@ -105,14 +107,9 @@ class ProxyUserService:
         """Look up an existing tenant user without creating identity state."""
         external_user_id_hash = self.hash_external_user_id(tenant_id, external_user_id)
         cache_key = self._cache_key(tenant_id, external_user_id_hash)
-        proxy_user = await self._get_cached_proxy_user(cache_key)
-        if proxy_user is None:
-            proxy_user = await self._get_proxy_user_by_hash(
-                tenant_id=tenant_id,
-                external_user_id_hash=external_user_id_hash,
-            )
-            if proxy_user is not None:
-                await self._cache_proxy_user(cache_key, proxy_user)
+        proxy_user = await self._get_proxy_user_by_hash(
+            tenant_id=tenant_id, external_user_id_hash=external_user_id_hash,
+        )
         if proxy_user is not None and proxy_user.is_blocked:
             raise ProxyUserBlockedError(
                 tenant_id=tenant_id,
@@ -120,18 +117,32 @@ class ProxyUserService:
             )
         return proxy_user
 
-    async def block(self, tenant_id: str, external_user_id: str) -> bool:
-        proxy_user = await self._get_proxy_user_by_hash(
-            tenant_id=tenant_id,
-            external_user_id_hash=self.hash_external_user_id(tenant_id, external_user_id),
-        )
+    async def block(self, tenant_id: str, external_user_id: str, *, actor: dict | None = None) -> bool:
+        return await self._set_blocked(tenant_id, external_user_id, True, actor=actor)
+
+    async def unblock(self, tenant_id: str, external_user_id: str, *, actor: dict | None = None) -> bool:
+        return await self._set_blocked(tenant_id, external_user_id, False, actor=actor)
+
+    async def _set_blocked(self, tenant_id, external_user_id, blocked, *, actor=None) -> bool:
+        proxy_user = (await self.session.execute(select(ProxyUser).where(
+            ProxyUser.tenant_id == self._as_uuid(tenant_id),
+            ProxyUser.external_user_id_hash == self.hash_external_user_id(tenant_id, external_user_id),
+        ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
         if proxy_user is None:
             return False
-
-        proxy_user.is_blocked = True
-        proxy_user.last_active_at = func.now()
-        await self.session.commit()
-        await self._invalidate_cache(tenant_id, proxy_user.external_user_id_hash)
+        external_hash = proxy_user.external_user_id_hash
+        old = bool(proxy_user.is_blocked)
+        if old != blocked:
+            proxy_user.is_blocked = blocked
+            proxy_user.last_active_at = func.now()
+            self.session.add(AuditLog(proxy_user_id=proxy_user.id, action=AuditAction.updated,
+                old_value={"is_blocked": old}, new_value={"is_blocked": blocked},
+                metadata_json={"tenant_id": str(tenant_id), "entity": "proxy_user",
+                    "operation": "block" if blocked else "unblock", "actor": actor or {}}))
+            await self.session.commit()
+        else:
+            await self.session.rollback()  # Release the idempotent transition's row lock.
+        await self._invalidate_cache(tenant_id, external_hash)
         return True
 
     async def get_stats(self, tenant_id: str, external_user_id: str) -> ProxyUserStats:
@@ -236,7 +247,7 @@ class ProxyUserService:
             select(ProxyUser).where(
                 ProxyUser.tenant_id == self._as_uuid(tenant_id),
                 ProxyUser.external_user_id_hash == external_user_id_hash,
-            )
+            ).execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 

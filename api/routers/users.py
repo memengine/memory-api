@@ -50,6 +50,19 @@ from api.routers.tenant import DEPRECATED_PROXY_USER_STATS_FIELD_SUNSET
 router = APIRouter(prefix="/v1/users", tags=["users"])
 
 
+def _proxy_admin_actor(request: Request) -> dict:
+    """Require explicit admin credentials or a verified active-org admin role."""
+    scheme = getattr(request.state, "auth_scheme", None)
+    key_admin = scheme == "apikey" and "admin" in {
+        str(p).lower() for p in (getattr(request.state, "api_key_permissions", ()) or ())}
+    org_admin = (scheme == "bearer" and getattr(request.state, "auth_method", None) == "clerk_jwt"
+        and getattr(request.state, "org_role", None) == "org:admin")
+    if not (key_admin or org_admin):
+        raise APIError(status_code=403, code="AUTH_403", error="insufficient_permissions")
+    return {"api_key_id": str(getattr(request.state, "api_key_id", "") or ""),
+            "user_id": str(getattr(request.state, "user_id", "") or "")}
+
+
 def _user_profile_data(user, memory_count: int, storage_bytes: int) -> UserProfileData:
     return UserProfileData(
         id=str(user.id),
@@ -186,6 +199,7 @@ async def get_proxy_user_stats(
     Parameters: external user id in the path. Tenant identity is derived from API key auth.
     Responses: memory count and activity timestamps for the tenant's proxy user.
     """
+    _proxy_admin_actor(request)
     stats = await proxy_user_service.get_stats(tenant_id=tenant_id, external_user_id=external_user_id)
     register_deprecated_field(
         request,
@@ -218,6 +232,7 @@ async def export_proxy_user_data(
     cache_service: Annotated[CacheService, Depends(get_cache_service)],
 ) -> dict[str, object]:
     """Export a tenant user's memories and full version history for GDPR access requests."""
+    _proxy_admin_actor(request)
     rate_key = f"user_export:{tenant_id}:{external_user_id}"
     if await cache_service.increment_rate_counter(rate_key, window_seconds=86400) > 1:
         raise APIError(
@@ -296,9 +311,26 @@ async def block_proxy_user(
     blocked = await proxy_user_service.block(
         tenant_id=tenant_id,
         external_user_id=external_user_id,
+        actor=_proxy_admin_actor(request),
     )
     return ProxyUserBlockResponse(
         data=ProxyUserBlockData(blocked=blocked),
         request_id=get_request_id(request),
         timestamp=utc_now(),
     )
+
+
+@router.post("/{external_user_id}/unblock", response_model=ProxyUserBlockResponse)
+async def unblock_proxy_user(
+    request: Request,
+    external_user_id: str,
+    tenant_id: Annotated[str, Depends(get_authenticated_tenant_id)],
+    proxy_user_service: Annotated[ProxyUserService, Depends(get_proxy_user_service)],
+) -> ProxyUserBlockResponse:
+    """Resume application access without deleting memories, jobs or history."""
+    found = await proxy_user_service.unblock(tenant_id=tenant_id, external_user_id=external_user_id,
+        actor=_proxy_admin_actor(request))
+    if not found:
+        raise APIError(status_code=404, code="PRX_404", error="proxy_user_not_found")
+    return ProxyUserBlockResponse(data=ProxyUserBlockData(blocked=False),
+        request_id=get_request_id(request), timestamp=utc_now())

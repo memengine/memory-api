@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import uuid
@@ -20,8 +21,14 @@ from api.db.models import (
     ExtractionJob,
     ExtractionJobStatus,
     Memory,
+    MemoryClaim,
+    MemoryClaimRevision,
+    MemorySourceEvent,
+    PendingExtractionCandidate,
     ProxyUser,
     QuotaMode,
+    VectorSyncOutbox,
+    VectorSyncStatus,
 )
 from api.db.vector_store import QdrantService
 from api.errors import APIError
@@ -34,6 +41,7 @@ from api.schemas.preferences import (
 )
 from api.schemas.responses import MemoryVisibility
 from api.services.embedding_service import EmbeddingResult, EmbeddingService
+from api.services.claim_ledger_service import GENERIC_CLAIM_SUBJECT
 from api.services.preference_claim_service import (
     held_choice,
     legacy_memory_predicate,
@@ -54,6 +62,7 @@ from api.services.runtime_fact_visibility import unresolved_runtime_predicate
 from api.services.runtime_preference_routing import target_release_enabled
 from api.services.runtime_withholding import RuntimeHold, read_runtime_hold
 from api.tasks.retrieval_tasks import update_memory_accesses
+from sqlalchemy.orm import aliased
 
 CACHE_TTL_SECONDS = 60
 L1_CACHE_TTL_SECONDS = float(os.getenv("RETRIEVAL_L1_CACHE_TTL_SECONDS", "1.0"))
@@ -70,6 +79,29 @@ DEDUPLICATION_THRESHOLD = 0.95
 
 
 logger = logging.getLogger(__name__)
+
+
+def source_winner_matches(claim, memory, revision) -> bool:
+    """A source winner is usable only with coherent owned revision linkage."""
+    if claim is None or memory is None or revision is None:
+        return False
+    # Old generic claims may merge unrelated attributes. Do not silently promote
+    # their winner or rewrite history. Typed preferences retain their contract.
+    declaration = preference_declaration((getattr(memory, "metadata_json", None) or {}).get("provenance"))
+    if declaration is not None:
+        if claim.claim_fingerprint != preference_fingerprint(declaration.property_key, declaration.applicability):
+            return False
+    elif getattr(claim, "subject_key", None) != GENERIC_CLAIM_SUBJECT:
+        return False
+    return bool(claim is not None and memory is not None and revision is not None
+        and claim.status == "active" and not memory.is_archived
+        and str(claim.active_memory_id) == str(memory.id)
+        and str(claim.winning_revision_id) == str(revision.id)
+        and str(revision.claim_id) == str(claim.id)
+        and str(revision.memory_id) == str(memory.id)
+        and str(revision.asserted_value) == str(claim.active_value)
+        and revision.source_event_id == memory.source_event_id
+        and claim.proxy_user_id == memory.proxy_user_id)
 
 
 def _retrieval_weight_from_env(name: str, default: str) -> float:
@@ -229,6 +261,13 @@ class RetrieverService:
                 else:
                     hold = RuntimeHold(broad=False)
                     self.last_memory_visibility = None
+                if await self._source_index_pending(owner, args["tenant_id"]):
+                    candidates = await self._retrieve_cold_start_memories(
+                        proxy_user_id=owner, limit=args["limit"],
+                        categories=[c.lower() for c in args["categories"] or []],
+                        agent_id=args["agent_id"], created_after=self._created_after(args["time_filter_days"]))
+                    self.last_memory_visibility = MemoryVisibility(state="processing", scope="affected_context")
+                    self.last_is_degraded, self.last_cache_hit = True, False
                 from api.services.preference_confirmation_service import pending_fingerprints
                 confirmation_holds = await self.session.run_sync(lambda s: pending_fingerprints(s,
                     tenant_id=args["tenant_id"], proxy_user_id=owner))
@@ -261,7 +300,7 @@ class RetrieverService:
                     self.last_discovered_preference_context = discovery.context
                     self.last_preference_scope_request = discovery.scope_request
                 if not row[2] and discovery is None:
-                    return candidates  # No server-selected runtime job for this owner.
+                    return await self._project_current_sources(candidates, owner=owner, **args)
                 categories = [c.lower() for c in args["categories"] or []]
                 fresh = await self._hydrate_current_results(
                     [m for m in candidates if (args["preference_context"] is None
@@ -291,9 +330,118 @@ class RetrieverService:
                     self.last_preference_scope_request = None
                     self.last_is_degraded = True
                 self.last_cache_hit = False
-                return fresh[:args["limit"]]
+                return await self._project_current_sources(fresh[:args["limit"]], owner=owner, **args)
             finally:
                 self.session = original
+
+    async def _project_current_sources(self, candidates, *, owner, **args):
+        projected = await self._project_source_claims(candidates, owner=owner, **args)
+        return await self._withhold_pending_source_corrections(projected, owner=owner, **args)
+
+    async def _withhold_pending_source_corrections(self, candidates, *, owner, **args):
+        """A completed extraction is not resolution of its retained correction.
+
+        Run in the final read snapshot, after winner projection, even on cache
+        hits or empty nominations. No validated target exists: withhold service
+        records in the same category and exact source scope, not a guessed field.
+        Do not turn a service candidate into a verified-user review card.
+        """
+        tenant, proxy = self._as_uuid(args["tenant_id"]), self._as_uuid(owner)
+        pending = select(PendingExtractionCandidate.id).join(MemorySourceEvent,
+            MemorySourceEvent.id == PendingExtractionCandidate.source_event_id).where(
+            PendingExtractionCandidate.tenant_id == tenant,
+            PendingExtractionCandidate.proxy_user_id == proxy,
+            PendingExtractionCandidate.status == "pending",
+            PendingExtractionCandidate.candidate_reason == "source_decision_pending",
+            PendingExtractionCandidate.metadata_json["extraction_evidence"]["source_decision"]["reason_codes"].contains(
+                ["source_correction_unresolved"]),
+            MemorySourceEvent.tenant_id == tenant,
+            MemorySourceEvent.proxy_user_id == proxy,
+            MemorySourceEvent.writer_id.is_not(None),
+        )
+        categories = [c.lower() for c in args.get("categories") or []]
+        if categories:
+            pending = pending.where(PendingExtractionCandidate.category.in_(categories))
+        if not await self.session.scalar(select(pending.exists())):
+            return candidates
+        # Preserve any broader withholding decision established earlier.
+        if self.last_memory_visibility is None or self.last_memory_visibility.scope == "affected_context":
+            self.last_memory_visibility = MemoryVisibility(state="unavailable", scope="affected_context")
+        self.last_is_degraded, self.last_cache_hit = True, False
+        self.last_preference_decisions = []
+        self.last_preference_scope_request = None
+        if not candidates:
+            return []
+        current_source = aliased(MemorySourceEvent)
+        blocked = select(Memory.id).join(current_source, current_source.id == Memory.source_event_id).where(
+            Memory.id.in_([self._as_uuid(m.id) for m in candidates]),
+            Memory.proxy_user_id == proxy,
+            current_source.tenant_id == tenant,
+            current_source.proxy_user_id == proxy,
+            current_source.writer_id.is_not(None),
+            pending.where(PendingExtractionCandidate.category == Memory.category,
+                MemorySourceEvent.scope == current_source.scope).correlate(Memory, current_source).exists(),
+        )
+        blocked_ids = {str(value) for value in (await self.session.scalars(blocked)).all()}
+        return [m for m in candidates if m.id not in blocked_ids]
+
+    async def _project_source_claims(self, candidates, *, owner, **args):
+        """All current candidate tiers pass the same source-ledger projection.
+
+        Disputes are withheld, not resolved by model confidence or cache order.
+        Explicit preferences and legacy non-source memories keep their contracts.
+        """
+        source = [m for m in candidates if (m.provenance or {}).get("writer_id")]
+        if not source:
+            return candidates
+        rows = (await self.session.execute(select(MemoryClaimRevision, MemoryClaim)
+            .join(MemoryClaim, MemoryClaim.id == MemoryClaimRevision.claim_id)
+            .where(MemoryClaimRevision.memory_id.in_([self._as_uuid(m.id) for m in source]),
+                   MemoryClaim.tenant_id == self._as_uuid(args["tenant_id"]),
+                   MemoryClaim.proxy_user_id == self._as_uuid(owner))
+            .execution_options(populate_existing=True))).all()
+        by_memory = {}
+        for revision, claim in rows:
+            by_memory.setdefault(str(revision.memory_id), []).append(claim)
+        claims = [items[0] for items in by_memory.values() if len(items) == 1]
+        winner_ids = {str(c.active_memory_id) for c in claims
+                      if c.status == "active" and c.active_memory_id and c.winning_revision_id}
+        winners = await self._fetch_memories_by_ids(memory_ids=winner_ids,
+            proxy_user_id=owner, tenant_id=args["tenant_id"],
+            categories=[c.lower() for c in args["categories"] or []], agent_id=args["agent_id"],
+            created_after=self._created_after(args["time_filter_days"])) if winner_ids else {}
+        revision_ids = [c.winning_revision_id for c in claims if c.winning_revision_id]
+        revisions = {str(r.id): r for r in (await self.session.execute(
+            select(MemoryClaimRevision).where(MemoryClaimRevision.id.in_(revision_ids))
+            .execution_options(populate_existing=True))).scalars()} if revision_ids else {}
+        result, seen, withheld = [], set(), False
+        for candidate in candidates:
+            if not (candidate.provenance or {}).get("writer_id"):
+                result.append(candidate)
+                continue
+            mapped = by_memory.get(candidate.id, [])
+            claim = mapped[0] if len(mapped) == 1 else None
+            memory = winners.get(str(claim.active_memory_id)) if claim else None
+            revision = revisions.get(str(claim.winning_revision_id)) if claim else None
+            if not source_winner_matches(claim, memory, revision) or not self._memory_is_current(memory):
+                withheld = True
+                continue
+            if str(memory.id) not in seen:
+                result.append(self._memory_to_result(memory, semantic_score=candidate.semantic_score))
+                seen.add(str(memory.id))
+        if withheld:
+            self.last_memory_visibility = MemoryVisibility(state="unavailable", scope="affected_context")
+            self.last_is_degraded = True
+        self.last_cache_hit = False  # Source authority was freshly checked in SQL.
+        return result[:args["limit"]]
+
+    async def _source_index_pending(self, owner, tenant_id):
+        pending = select(VectorSyncOutbox.id).join(Memory, Memory.id == VectorSyncOutbox.memory_id)
+        pending = pending.join(ProxyUser, ProxyUser.id == Memory.proxy_user_id).where(
+            ProxyUser.tenant_id == self._as_uuid(tenant_id),
+            Memory.proxy_user_id == self._as_uuid(owner), legacy_memory_predicate(),
+            VectorSyncOutbox.status.in_([VectorSyncStatus.pending, VectorSyncStatus.processing]))
+        return (await self.session.execute(pending.limit(1))).first() is not None
 
     async def _runtime_visibility_row(self, owner, tenant_id):
         # Partial owner indexes; no raw evidence or unbounded job loading.
@@ -457,6 +605,15 @@ class RetrieverService:
 
         if proxy_user is not None:
             scoped_identity = str(proxy_user.id)
+            if await self._source_index_pending(scoped_identity, tenant_id):
+                # Completed SQL writes remain readable while async publication
+                # lags, independently of count cache and the five-row threshold.
+                self.last_is_degraded = True
+                self.last_memory_visibility = MemoryVisibility(state="processing", scope="affected_context")
+                results = await self._retrieve_cold_start_memories(
+                    proxy_user_id=scoped_identity, limit=limit, categories=normalized_categories,
+                    agent_id=agent_id, created_after=created_after)
+                return self._merge_hot_tier_results(hot_tier_results, results, limit)
             user_memory_count = await self._count_proxy_user_memories(proxy_user_id=scoped_identity)
         else:
             scoped_identity = identity
@@ -1652,10 +1809,23 @@ class RetrieverService:
     def _deduplicate_results(cls, results: list[MemoryResult]) -> list[MemoryResult]:
         deduplicated: list[MemoryResult] = []
         for candidate in sorted(results, key=lambda item: item.final_score, reverse=True):
-            if any(cls._content_similarity(candidate.content, item.content) > DEDUPLICATION_THRESHOLD for item in deduplicated):
+            if any(cls._same_source_scope(candidate, item) and
+                   cls._content_similarity(candidate.content, item.content) > DEDUPLICATION_THRESHOLD
+                   for item in deduplicated):
                 continue
             deduplicated.append(candidate)
         return deduplicated
+
+    @staticmethod
+    def _same_source_scope(left: MemoryResult, right: MemoryResult) -> bool:
+        """Similar text cannot erase another declared applicability association."""
+        try:
+            scopes = [json.dumps((row.provenance or {}).get("scope") or {},
+                sort_keys=True, ensure_ascii=False, allow_nan=False) for row in (left, right)]
+            return scopes[0] == scopes[1]
+        except (TypeError, ValueError):
+            # Uncomparable metadata must preserve both records, not imply equality.
+            return False
 
     @staticmethod
     def _content_similarity(left: str, right: str) -> float:

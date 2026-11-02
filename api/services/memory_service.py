@@ -182,7 +182,21 @@ class MemoryService:
             scope=f"tenant:{tenant_id}",
             operation="memory_add",
         )
-        return verified_memory_add_replay(cached, replay_binding) if cached is not None else None
+        if cached is None:
+            return None
+        replay = verified_memory_add_replay(cached, replay_binding)
+        # Excluded source/agent lanes still bind their cached request. A valid
+        # cache hit is a nomination, not authority for a stale queued envelope.
+        job_id = replay.get("job_id")
+        if not job_id:
+            return replay  # Non-admitted quality/quota outcome; no job to refresh.
+        job = await self.session.get(ExtractionJob, uuid.UUID(str(job_id)), populate_existing=True)
+        owner = await self.session.get(ProxyUser, job.proxy_user_id, populate_existing=True) if job else None
+        if (job is None or str(job.tenant_id) != tenant_id or owner is None
+                or owner.is_blocked or str(owner.tenant_id) != tenant_id
+                or owner.external_user_id_hash != ProxyUserService.hash_external_user_id(tenant_id, replay_binding["owner_id"])):
+            raise APIError(status_code=409, code="IDEMPOTENCY_409", error="memory_add_replay_unverifiable")
+        return _job_status_snapshot(self._job_payload_with_live_status(job))
 
     async def _check_replay_permissions(self, tenant_id, external_user_id, api_key_id):
         tenant = await self.session.get(Tenant, uuid.UUID(tenant_id), populate_existing=True)
@@ -527,10 +541,17 @@ class MemoryService:
         external_user_id: str | None = None,
     ) -> tuple[list[Memory], str | None, int]:
         if tenant_id:
+            if external_user_id is not None:
+                owner = (await self.session.execute(select(ProxyUser).where(
+                    ProxyUser.tenant_id == uuid.UUID(tenant_id),
+                    ProxyUser.external_user_id == external_user_id,
+                ).execution_options(populate_existing=True))).scalar_one_or_none()
+                if owner is not None and owner.is_blocked:
+                    raise APIError(status_code=403, code="PRX_403", error="proxy_user_blocked")
             base_query = (
                 select(Memory)
                 .join(ProxyUser, Memory.proxy_user_id == ProxyUser.id)
-                .where(ProxyUser.tenant_id == uuid.UUID(tenant_id))
+                .where(ProxyUser.tenant_id == uuid.UUID(tenant_id), ProxyUser.is_blocked.is_(False))
             )
             if external_user_id:
                 base_query = base_query.where(ProxyUser.external_user_id == external_user_id)
@@ -544,7 +565,8 @@ class MemoryService:
             )
             base_query = (
                 select(Memory)
-                .where(Memory.user_id == user.id)
+                .join(ProxyUser, Memory.proxy_user_id == ProxyUser.id)
+                .where(Memory.user_id == user.id, ProxyUser.is_blocked.is_(False))
             )
         if categories:
             base_query = base_query.where(Memory.category.in_(categories))
@@ -827,6 +849,20 @@ class MemoryService:
                 claim.winning_revision_id = None
             claim.updated_at = datetime.now(UTC)
             self.session.add(claim)
+
+    async def check_job_owner_access(self, job: dict[str, Any]) -> None:
+        """Recheck SQL suspension after the router has established job tenancy."""
+        try:
+            tenant, owner = uuid.UUID(str(job["tenant_id"])), uuid.UUID(str(job["proxy_user_id"]))
+        except (KeyError, TypeError, ValueError):
+            raise APIError(status_code=404, code="JOB_404", error="job_not_found") from None
+        row = (await self.session.execute(select(ProxyUser).where(
+            ProxyUser.id == owner, ProxyUser.tenant_id == tenant,
+        ).execution_options(populate_existing=True))).scalar_one_or_none()
+        if row is None:
+            raise APIError(status_code=404, code="JOB_404", error="job_not_found")
+        if row.is_blocked:
+            raise APIError(status_code=403, code="PRX_403", error="proxy_user_blocked")
 
     async def get_job_status(self, *, job_id: str) -> dict[str, Any]:
         job_row = await self.session.get(ExtractionJob, uuid.UUID(job_id))
@@ -1321,6 +1357,7 @@ class MemoryService:
                 .where(
                     Memory.id == uuid.UUID(memory_id),
                     ProxyUser.tenant_id == uuid.UUID(tenant_id),
+                    ProxyUser.is_blocked.is_(False),
                     *(
                         [ProxyUser.external_user_id == external_user_id]
                         if external_user_id is not None
@@ -1341,6 +1378,10 @@ class MemoryService:
             memory = await self.session.get(Memory, uuid.UUID(memory_id))
             if memory is not None and memory.user_id != user.id:
                 memory = None
+            if memory is not None:
+                owner = await self.session.get(ProxyUser, memory.proxy_user_id, populate_existing=True)
+                if owner is None or owner.is_blocked:
+                    memory = None
         if memory is None:
             raise APIError(
                 status_code=404,

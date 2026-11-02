@@ -7,6 +7,7 @@ import os
 import time
 import traceback
 import uuid
+from copy import deepcopy
 from datetime import UTC
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -573,6 +574,8 @@ def _candidate_fingerprint(candidate: PendingExtractedMemory, *, review_generati
         "category": str(candidate.category).lower(),
         "content": _normalize_candidate_text(candidate.content),
     }
+    if (binding := candidate.validated_evidence.get("pending_source_binding_v1")) is not None:
+        fields["source_binding"] = binding
     if (review := candidate.validated_evidence.get("source_review")) is not None:
         fields["source_review"] = review
         if review_generation is not None:
@@ -624,6 +627,10 @@ def _candidate_polarity(value: str) -> str:
 
 
 def _can_reinforce_candidate(existing: Any, candidate: PendingExtractedMemory) -> bool:
+    incoming_binding = (candidate.validated_evidence or {}).get("pending_source_binding_v1")
+    stored_binding = ((getattr(existing, "metadata_json", None) or {}).get("extraction_evidence") or {}).get("pending_source_binding_v1")
+    if json.dumps(incoming_binding, sort_keys=True) != json.dumps(stored_binding, sort_keys=True):
+        return False
     from api.services.preference_claim_service import PREFERENCE_MARKER
     incoming_declaration = (candidate.validated_evidence or {}).get(PREFERENCE_MARKER)
     existing_declaration = ((getattr(existing, "metadata_json", None) or {}).get("extraction_evidence") or {}).get(PREFERENCE_MARKER)
@@ -749,6 +756,7 @@ def _persist_pending_extraction_candidates(
     extraction_job_id: str | None,
     source_event_id: str | None,
     diagnostics: dict[str, Any] | None = None,
+    source_provenance: dict[str, Any] | None = None,
 ) -> int:
     if not candidates:
         return 0
@@ -770,6 +778,19 @@ def _persist_pending_extraction_candidates(
             review_created_at = review_created_at.replace(tzinfo=UTC)
 
     for candidate in candidates:
+        # Construct only from worker-owned source provenance, never model or
+        # caller evidence. Keep event ownership even for identical wording.
+        candidate = deepcopy(candidate)
+        candidate.validated_evidence.pop("pending_source_binding_v1", None)
+        from api.services.preference_claim_service import PREFERENCE_MARKER
+        if (event_uuid is not None and (source_provenance or {}).get("writer_id")
+            and candidate.validated_evidence.get("grounding_mode") != "verified_source_spans"
+            and PREFERENCE_MARKER not in candidate.validated_evidence):
+            candidate.validated_evidence["pending_source_binding_v1"] = {
+                "writer_id": str(source_provenance["writer_id"]),
+                "source_event_id": str(event_uuid),
+                "scope": dict(source_provenance.get("scope") or {}),
+            }
         review = is_source_review(candidate)
         if review and review_created_at + REVIEW_TTL <= now:
             if diagnostics is not None:
@@ -913,6 +934,16 @@ def _claim_confirmed_proposals(
         )
         accepted.extend(proposal_memories)
     return accepted, len(memories) - len(accepted)
+
+
+def _scope_extraction_context(memories, source_provenance):
+    """Other declared applicability cannot justify a source-event no-op."""
+    if source_provenance is None:
+        return list(memories)
+    scope = json.dumps(source_provenance.get("scope") or {}, sort_keys=True)
+    return [row for row in memories if json.dumps(
+        ((row.metadata_json or {}).get("provenance") or {}).get("scope") or {}, sort_keys=True,
+    ) == scope]
 
 
 def _load_existing_memories_for_context(session: Session, proxy_user_id: str) -> SourceMemoryContext:
@@ -1462,6 +1493,7 @@ def run_extraction_pipeline(
             if source_event is not None and source_payload.get("explicit") is True
             else None
         )
+        existing_memories = _scope_extraction_context(existing_memories, source_context)
         stage = "extract_memories"
         proposal_context = (
             _active_proposal_context(
@@ -1547,6 +1579,7 @@ def run_extraction_pipeline(
             extraction_job_id=str(job_payload.get("job_id") or "") or None,
             source_event_id=str(source_event.id) if source_event is not None else None,
             diagnostics=extraction_meta.setdefault("extraction_metadata", {}),
+            source_provenance=source_context,
         )
         extraction_meta["pending_candidates_buffered"] = pending_candidates_buffered
         extraction_meta["uncertain_changes_routed"] = len(uncertain_changes)
@@ -1642,6 +1675,7 @@ def run_extraction_pipeline(
                 extraction_job_id=str(job_payload.get("job_id") or "") or None,
                 source_event_id=str(source_event.id) if source_event is not None else None,
                 diagnostics=extraction_meta.setdefault("extraction_metadata", {}),
+                source_provenance=provenance_snapshot,
             )
         source_tokens = int(getattr(resolver, "last_source_decision_tokens_used", 0) or 0)
         extraction_meta["tokens_used"] = int(extraction_meta.get("tokens_used", 0) or 0) + source_tokens

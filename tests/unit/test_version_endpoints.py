@@ -173,6 +173,11 @@ def test_user_export_endpoint_returns_versions_and_rate_limits(monkeypatch) -> N
 
     monkeypatch.setattr(VersionService, "get_user_data_export", fake_export)
     app = _build_app(cache)
+    @app.middleware("http")
+    async def synthetic_admin(request, call_next):
+        request.state.auth_scheme = "apikey"
+        request.state.api_key_permissions = ("admin",)
+        return await call_next(request)
     app.dependency_overrides[get_authenticated_tenant_id] = override_tenant_id
 
     class FakeSession:

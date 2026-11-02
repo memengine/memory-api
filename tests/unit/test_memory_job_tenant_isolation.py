@@ -23,6 +23,11 @@ class _JobStatusService:
             "result_memory_ids": self.result_memory_ids,
         }
 
+    async def check_job_owner_access(self, job):
+        # Router ownership-envelope test double; suspension checks are exercised
+        # against MemoryService in test_proxy_suspension_access.
+        pass
+
 
 @pytest.mark.parametrize("job_tenant_id", [None, str(uuid.uuid4())])
 @pytest.mark.asyncio

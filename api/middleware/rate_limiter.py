@@ -113,6 +113,12 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _required_permission(method: str, path: str) -> str | None:
+        if path == "/v1/memories/service-corrections" or path.startswith("/v1/memories/service-corrections/"):
+            return "admin"
+        if path.startswith("/v1/users/") and not path.startswith("/v1/users/me/") and path.endswith(
+            ("/block", "/unblock", "/export", "/stats")
+        ):
+            return "admin"
         if path.startswith(("/v1/api-keys", "/v1/tenant")):
             return "admin"
         if path.startswith("/v1/agents"):

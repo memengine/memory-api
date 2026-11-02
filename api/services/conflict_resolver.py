@@ -899,6 +899,8 @@ class ConflictResolver:
             source_verified = (new_memory.validated_evidence or {}).get(
                 "grounding_mode"
             ) == "verified_source_spans"
+            registered_source = bool((self.provenance_snapshot or {}).get("writer_id"))
+            governed_source = source_verified or registered_source
             if source_verified and (
                 (source_context is not None and not source_context.available)
                 or (source_context is None and isinstance(self.qdrant_service, QdrantService))
@@ -961,17 +963,16 @@ class ConflictResolver:
             candidate_memories: list[Memory] = []
             if source_verified:
                 for row in context_rows:
-                    if self._owned_active_target(row, user_id=user_id, tenant_id=tenant_id, proxy_user_id=proxy_user_id):
+                    if self._owned_active_target(row, user_id=user_id, tenant_id=tenant_id, proxy_user_id=proxy_user_id) and self._source_scope_matches(row):
                         if not any(old.id == row.id for old in candidate_memories):
                             candidate_memories.append(row)
             for point in raw_candidates:
                 existing_memory = self._load_existing_memory(point)
                 if existing_memory is None:
                     continue
-                if source_verified and not self._owned_active_target(
-                    existing_memory, user_id=user_id,
-                    tenant_id=tenant_id, proxy_user_id=proxy_user_id,
-                ):
+                if governed_source and (not self._owned_active_target(
+                    existing_memory, user_id=user_id, tenant_id=tenant_id, proxy_user_id=proxy_user_id,
+                ) or not self._source_scope_matches(existing_memory)):
                     continue
                 if any(row.id == existing_memory.id for row in candidate_memories):
                     continue
@@ -1051,13 +1052,21 @@ class ConflictResolver:
             for candidate in candidates:
                 existing_memory = candidate.existing_memory
 
-                decision = self._authority_conflict_decision(new_memory, existing_memory)
+                # Authority resolves competing claims; it cannot create a
+                # replacement relation. Coexisting contexts and duplicates must
+                # retain the source relation even across differently ranked writers.
+                nonreplacement_source = source_decision is not None and source_decision.action in {
+                    "KEEP_BOTH", "REJECT",
+                }
+                decision = source_decision if nonreplacement_source else self._authority_conflict_decision(
+                    new_memory, existing_memory,
+                )
                 if source_decision is not None and source_decision.action == "CLARIFY" and (
                     decision is None or decision.action != "REJECT"
                 ):
                     # Authority can reject a write, not manufacture commitment.
                     decision = source_decision
-                equal_authority_conflict = self._is_equal_authority_cross_writer_conflict(
+                equal_authority_conflict = not nonreplacement_source and self._is_equal_authority_cross_writer_conflict(
                     new_memory,
                     existing_memory,
                 )
@@ -1339,6 +1348,17 @@ class ConflictResolver:
                 continue
 
             if not decision_applied:
+                if governed_source and (new_memory.validated_evidence or {}).get("claim_state") == "correction":
+                    # A proposed correction that fell through KEEP_BOTH (or
+                    # found no target) must not create a second current value.
+                    # Preserve the candidate; do not infer a target from wording.
+                    decision = self._classifier_failure_decision(
+                        conflict_type=ConflictType.UNKNOWN, reason_code="source_correction_unresolved",
+                    )
+                    if source_verified:
+                        decision.source_review = review_intent(None)
+                    self._buffer_source_candidate(new_memory, decision)
+                    continue
                 stored_memories.append(
                     self._store_new_memory_with_shared_context(
                         extracted_memory=new_memory,
@@ -1434,6 +1454,15 @@ class ConflictResolver:
                 return None
             return memory
         return None
+
+    def _source_scope_matches(self, memory: Memory) -> bool:
+        """Only identical declared source applicability may be a successor target."""
+        incoming = (self.provenance_snapshot or {}).get("scope") or {}
+        stored = ((memory.metadata_json or {}).get("provenance") or {}).get("scope") or {}
+        try:
+            return json.dumps(incoming, sort_keys=True) == json.dumps(stored, sort_keys=True)
+        except (TypeError, ValueError):
+            return False
 
     def _owned_active_target(
         self, memory: Memory, *, user_id: str,
@@ -1556,12 +1585,17 @@ class ConflictResolver:
             elif declaration.applicability.kind == "unresolved":
                 reason, target = "preference_requires_review", None
             else:
-                ledger = reserve_claim(self.session, tenant_id=tenant_id, proxy_user_id=proxy_user_id, declaration=declaration)
+                ledger = reserve_claim(
+                    self.session, tenant_id=tenant_id, proxy_user_id=proxy_user_id,
+                    declaration=declaration,
+                    create_if_missing=(declaration.commitment != "replacement"
+                        and declaration.choice_state != "current_choice_unresolved"),
+                )
                 target = self.session.execute(select(Memory).where(
                     Memory.id == ledger.active_memory_id,
                     Memory.proxy_user_id == uuid.UUID(proxy_user_id),
                     Memory.user_id == uuid.UUID(user_id),
-                ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none() if ledger.active_memory_id else None
+                ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none() if ledger is not None and ledger.active_memory_id else None
                 reason = transition_reason(declaration, ledger, target)
             if ((choice_operations and reason not in {"WITHHOLD", "REAFFIRM", "DEDUP"})
                 or (not choice_operations and declaration.choice_state == "current_choice_unresolved"
@@ -1671,6 +1705,7 @@ class ConflictResolver:
             if reason_code in {
                 "source_target_missing", "source_representation_unavailable",
                 "source_option_invalid", "source_option_missing", "source_commitment_disagreement",
+                "source_duplicate_unverified",
             }:
                 decision.source_review = pending_review
             return None, decision
@@ -1830,6 +1865,12 @@ class ConflictResolver:
             )
             if decision.decision_evidence is not None:
                 decision.decision_evidence.setdefault("details", {}).update(source_details)
+            if payload["relation"] == "duplicate" and (target is None or not self._exact_source_duplicate(memory, target)):
+                # A semantic label is not proof that supported new evidence is
+                # redundant. Retain it in the existing non-activating review
+                # store; neither authority nor confidence may silently drop it.
+                pending_review = review_intent(target)
+                return fail("source_duplicate_unverified")
             if decision.action == "CLARIFY" and decision.clarification_option_memory is None:
                 # No selectable source claim exists. Buffer its failure audit
                 # before writer authority can discard or reinterpret it.
@@ -1864,6 +1905,27 @@ class ConflictResolver:
             return fail("source_provider_unavailable")
         except (json.JSONDecodeError, TypeError, ValueError):
             return fail("source_response_invalid")
+
+    def _exact_source_duplicate(self, memory: ExtractedMemory, target: Memory) -> bool:
+        """Conservative duplicate proof, not semantic or canonical identity."""
+        incoming = dict(self.provenance_snapshot or {})
+        stored = dict((target.metadata_json or {}).get("provenance") or {})
+        try:
+            same_scope = json.dumps(incoming.get("scope") or {}, sort_keys=True) == json.dumps(
+                stored.get("scope") or {}, sort_keys=True,
+            )
+            interval = temporal_validity_from_provenance(incoming)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            memory.content.strip() == target.content.strip()
+            and memory.category == target.category.value
+            and same_scope
+            and interval == (target.effective_from, target.effective_until)
+            # Temporary retention is relative to ingestion; identical text does
+            # not prove that dropping the new event preserves that lifetime.
+            and memory.expiry == "permanent" and target.expires_at is None
+        )
 
     @staticmethod
     def _source_response_format(
@@ -3008,6 +3070,12 @@ class ConflictResolver:
         decision_evidence: dict[str, Any] | None,
         predecessor_memory_id: str | None,
     ) -> None:
+        provenance = dict(memory.metadata_json or {}).get("provenance") or {}
+        registered_source = bool(provenance.get("writer_id"))
+        if registered_source and (
+            tenant_id is None or proxy_user_id is None or memory.source_event_id is None
+        ):
+            raise ValueError("registered source ledger requires owner and source event")
         if tenant_id is None or proxy_user_id is None:
             return
         try:
@@ -3015,7 +3083,7 @@ class ConflictResolver:
                 memory,
                 tenant_id=tenant_id,
                 proxy_user_id=proxy_user_id,
-                provenance=dict(memory.metadata_json or {}).get("provenance"),
+                provenance=provenance,
                 resolution=resolution,
                 decision_evidence=decision_evidence,
                 predecessor_memory_id=predecessor_memory_id,
@@ -3025,11 +3093,14 @@ class ConflictResolver:
                 claim is None or claim.active_memory_id != memory.id or claim.status != "active"
             ):
                 raise ValueError("explicit preference ledger did not activate the stored memory")
+            if registered_source and claim is None:
+                raise ValueError("registered source ledger did not record the memory")
         except Exception:
-            # Preserve the legacy metadata behavior. Explicit preferences use
-            # the ledger as a write gate, so its failure must abort that write.
+            # Registered source tracking and explicit preference selection are
+            # write gates. Let their transaction owner roll back staged state;
+            # legacy unregistered metadata retains its best-effort behavior.
             from api.services.preference_claim_service import preference_declaration
-            if preference_declaration(dict(memory.metadata_json or {}).get("provenance")):
+            if registered_source or preference_declaration(provenance):
                 raise
             return
 
