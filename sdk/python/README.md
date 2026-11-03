@@ -1,8 +1,46 @@
-﻿# MemoryOS Python SDK
+# MemoryOS Python SDK
 
 ```bash
-pip install memoryo-sdk
+pip install memoryo-sdk==0.1.2
 ```
+
+## Local beta and release status
+
+This README accompanies release candidate **0.1.2**. Preparing source or a
+package artifact does not publish it; check your installed version before using
+these additions. SDK installation installs a client, not the MemoryOS backend.
+The guided local beta is not production-qualified. Start the backend using the
+[local beta instructions](https://github.com/memengine/memory-api/blob/main/beta/README.md)
+and use its newly generated synthetic credentials. Keep keys server-side.
+The hosted default URL does not establish hosted availability; explicitly set
+the local URL shown below (or your own verified server).
+
+```python
+import os
+from memoryos import Memory
+mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url="http://127.0.0.1:18000")
+context = mem.get(query="What is current?", external_user_id="application-owned-user-id")
+if context.memory_visibility is not None:
+    raise RuntimeError("Memory context is unavailable or processing; stop this answer.")
+# Only after the visibility check, consider context.items/system_prompt_addition.
+mem.close()
+```
+
+This example deliberately stops on any hold. An affected-context hold may leave
+unaffected records, but the application must decide whether they can answer its
+request. `has_context`/`hasContext`, a nonempty prompt, HTTP 200 or `FULL` quota
+alone do not establish safe/current context. Unknown visibility states are rejected.
+Queued ingestion means admitted, not applied; poll the same job and inspect the
+committed result. Retrieval and ingestion may use paid backend providers; this
+snippet is not a cost-free smoke test. No provider calls are made by installing.
+
+Explicit retained service-correction preview/decision remains an operator HTTP
+workflow, documented in the
+[operator guide](https://github.com/memengine/memory-api/blob/main/beta/OPERATOR.md).
+These SDKs do not yet provide service-correction convenience methods or API-key
+writer registration. Local bootstrap supplies synthetic writers; normal writer
+management requires dashboard authentication. Experimental methods below do not
+enable server flags; keep V2 disabled for the local beta.
 
 ## Preference confirmations (internal v2, source checkout)
 
@@ -53,6 +91,8 @@ context = mem.get(
     query="How should I answer this user?",
 )
 
+if context.memory_visibility is not None:
+    raise RuntimeError("Memory visibility hold; stop before answering.")
 if context.has_context:
     system_prompt = BASE_SYSTEM_PROMPT + "\n\n" + context.system_prompt_addition
 ```
@@ -81,7 +121,7 @@ default, and is not yet a general chat latency/availability solution. See the
 withholding, identity, evidence, and release limits. No package release is
 implied by this source-checkout API.
 
-### Read withholding status (source checkout)
+### Read withholding status
 
 `Memory.get()` and `AsyncMemory.get()` preserve `result.memory_visibility`
 as an exported `MemoryVisibility` model, or `None` when the server supplies no
@@ -336,6 +376,8 @@ preferences = json.loads(result.system_prompt_addition)
 ```python
 result = client.get(query="technical preferences", external_user_id="user_1")
 
+if result.memory_visibility is not None:
+    raise RuntimeError("Memory visibility hold; stop before answering.")
 if result.has_context:
     system_prompt = BASE_SYSTEM_PROMPT + result.system_prompt_addition
 
@@ -469,6 +511,8 @@ memories = client.get(
 )
 
 system_prompt = BASE_SUPPORT_PROMPT
+if memories.memory_visibility is not None:
+    raise RuntimeError("Memory visibility hold; stop before answering.")
 if memories.has_context:
     system_prompt += "\n\n" + memories.system_prompt_addition
 ```
@@ -511,7 +555,7 @@ if result.retrieval_id:
 ```
 ## Quickstart
 
-1. Create an API key in the MemoryOS dashboard.
+1. Start the local beta backend and use its synthetic bootstrap key (see above).
 2. Install the package with `pip install memoryo-sdk`.
 3. Import `Memory` for sync code or `AsyncMemory` for async apps.
 4. Pass your API key as `api_key="mem_live_..."`.
@@ -519,7 +563,7 @@ if result.retrieval_id:
 6. Call `add()` with the tenant's `external_user_id`.
 7. Check `result.status` and `result.quota_mode` to handle `blocked` or `passthrough` gracefully.
 8. Call `get()` with the same `external_user_id` to retrieve relevant memories for a query.
-9. Use `retrieve_result.system_prompt_addition` only when `retrieve_result.quota_mode != "PASSTHROUGH"`.
+9. Check `retrieve_result.memory_visibility` first; a hold stops this answer. Only then consider eligible context and quota mode.
 10. Call `list()` to page through stored memories.
 11. Call `delete()` to archive or hard-delete a memory.
 12. Call `export()` to download the user export bundle.
@@ -535,19 +579,20 @@ if result.retrieval_id:
 ```python
 result = client.get(query="...", external_user_id="...")
 
-if result.is_passthrough:
+if result.memory_visibility is not None:
+    raise RuntimeError("Memory visibility hold; stop before answering.")
+elif result.is_passthrough:
     # MemoryOS quota exhausted or system degraded
     # Your AI still works - just without memory context
     system_prompt = BASE_SYSTEM_PROMPT
 elif result.is_degraded:
-    # Serving from cache - fewer memories than usual
-    # Still worth using
+    # Degraded does not itself establish currentness; apply your answer policy.
     system_prompt = BASE_SYSTEM_PROMPT + result.system_prompt_addition
 else:
     # Full memory context
     system_prompt = BASE_SYSTEM_PROMPT + result.system_prompt_addition
 
-# Always call your LLM - never skip because of MemoryOS state
+# Call the model only after holds and application answer policy have been checked.
 response = llm.complete(system_prompt, user_message)
 ```
 
@@ -555,8 +600,8 @@ response = llm.complete(system_prompt, user_message)
 result = client.add(messages=messages, external_user_id="...")
 
 if result.processing_status == "delayed":
-    # Queue is busy - memory will be stored but takes longer
+    # Accepted work is delayed; completion and applied state remain unverified.
     # ETA in seconds:
     eta = result.processing_eta_seconds
-    # Log it - do not surface to end user
+    # Show truthful pending status where the application needs it.
 ```

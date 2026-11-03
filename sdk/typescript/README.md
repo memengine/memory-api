@@ -1,8 +1,45 @@
 # MemoryOS TypeScript SDK
 
 ```bash
-npm install memoryo-sdk
+npm install memoryo-sdk@0.1.3
 ```
+
+## Local beta and release status
+
+This README accompanies release candidate **0.1.3**. Preparing source or a
+package artifact does not publish it; check your installed version before using
+these additions. SDK installation installs a client, not the MemoryOS backend.
+The guided local beta is not production-qualified. Start the backend using the
+[local beta instructions](https://github.com/memengine/memory-api/blob/main/beta/README.md)
+and use its newly generated synthetic credentials. Keep keys server-side.
+The hosted default URL does not establish hosted availability; explicitly set
+the local URL shown below (or your own verified server).
+
+```ts
+import { MemoryOS } from "memoryo-sdk";
+const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!, "http://127.0.0.1:18000");
+const context = await mem.get("What is current?", "application-owned-user-id");
+if (context.memoryVisibility) {
+  throw new Error("Memory context is unavailable or processing; stop this answer.");
+}
+// Only after the visibility check, consider context.items/systemPromptAddition.
+```
+
+This example deliberately stops on any hold. An affected-context hold may leave
+unaffected records, but the application must decide whether they can answer its
+request. `has_context`/`hasContext`, a nonempty prompt, HTTP 200 or `FULL` quota
+alone do not establish safe/current context. Unknown visibility states are rejected.
+Queued ingestion means admitted, not applied; poll the same job and inspect the
+committed result. Retrieval and ingestion may use paid backend providers; this
+snippet is not a cost-free smoke test. No provider calls are made by installing.
+
+Explicit retained service-correction preview/decision remains an operator HTTP
+workflow, documented in the
+[operator guide](https://github.com/memengine/memory-api/blob/main/beta/OPERATOR.md).
+These SDKs do not yet provide service-correction convenience methods or API-key
+writer registration. Local bootstrap supplies synthetic writers; normal writer
+management requires dashboard authentication. Experimental methods below do not
+enable server flags; keep V2 disabled for the local beta.
 
 ## Ordered current-turn preparation (default off, source checkout)
 
@@ -72,6 +109,9 @@ const context = await mem.get(
   "user_123",
 );
 
+if (context.memoryVisibility) {
+  throw new Error("Memory visibility hold; stop before answering.");
+}
 const systemPrompt = context.hasContext
   ? `${BASE_SYSTEM_PROMPT}\n\n${context.systemPromptAddition}`
   : BASE_SYSTEM_PROMPT;
@@ -79,7 +119,7 @@ const systemPrompt = context.hasContext
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
 
-### Read withholding status (source checkout)
+### Read withholding status
 
 `get()` preserves `result.memoryVisibility` as `MemoryVisibility`, or `null`
 when the server supplies no hold. Its `state` is `processing` or `unavailable`;
@@ -399,20 +439,21 @@ const result = await client.get(
   "...",
 );
 
-if (result.isPassthrough) {
+if (result.memoryVisibility) {
+  throw new Error("Memory visibility hold; stop before answering.");
+} else if (result.isPassthrough) {
   // MemoryOS quota exhausted or system degraded
   // Your AI still works — just without memory context
   systemPrompt = BASE_SYSTEM_PROMPT;
 } else if (result.isDegraded) {
-  // Serving from cache — fewer memories than usual
-  // Still worth using
+  // Degraded does not itself establish currentness; apply your answer policy.
   systemPrompt = BASE_SYSTEM_PROMPT + result.systemPromptAddition;
 } else {
   // Full memory context
   systemPrompt = BASE_SYSTEM_PROMPT + result.systemPromptAddition;
 }
 
-// Always call your LLM — never skip because of MemoryOS state
+// Call the model only after holds and application answer policy have been checked.
 const response = await llm.complete(systemPrompt, userMessage);
 ```
 
@@ -420,9 +461,9 @@ const response = await llm.complete(systemPrompt, userMessage);
 const result = await client.add(messages, "...");
 
 if (result.processingStatus === "delayed") {
-  // Queue is busy — memory will be stored but takes longer
+  // Accepted work is delayed; completion and applied state remain unverified.
   // ETA in seconds:
   const eta = result.processingEtaSeconds;
-  // Log it — do not surface to end user
+  // Show truthful pending status where the application needs it.
 }
 ```

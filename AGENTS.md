@@ -8,6 +8,22 @@ This is the single release roadmap. The documents below specify contracts and
 evidence; they do not create competing roadmaps. Resume the next unfinished task
 instead of repeating the historical audit.
 
+## SDK release preparation — 3 November 2026
+
+Owner requested packages first. Prepared npm0.1.3/PyPI0.1.2 (unpublished; prepared for scoped commit): existing source typed visibility/degraded status included; no new
+backend features or service-correction SDK wrappers. README local URL/setup,
+hold-before-answer examples, HTTP-only corrections and server gates clarified.
+Python128 mocked contracts +8 installed-wheel checks pass; npm56 installed ESM/CJS
+contracts, typecheck and installed Node16/NodeNext/Bundler declarations pass.
+Built wheel/sdist/tgz outside Git; bounded inventories, source equality and final
+runtime bytes match tested artifacts. No backend/provider calls/services/AWS/V2.
+Sandbox initially blocked asyncio socketpair; approved local access resolved.
+External probe mistakes/README encoding corrected; no SDK runtime behavior patched.
+Artifacts D:\memoryos\sdk-release-preparation-20261103\artifacts\final;
+summary D:\memoryos\sdk-release-preparation-20261103\summary.json.
+Publishing requires separate approval. Root README remains unrelated/dirty;
+no claimed public release, live integration or production readiness.
+
 ## Local beta packaging repair — 3 November 2026
 
 Corrected bootstrap transaction ownership and atomically initialized synthetic

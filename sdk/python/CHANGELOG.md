@@ -1,8 +1,14 @@
 # Changelog
 
+## 0.1.2 (release candidate; not yet published)
+
+- Include existing typed visibility holds and degraded-read status in sync/async clients.
+- Document explicit local backend URLs, hold-before-answer handling and operator HTTP limits.
+- Experimental transports remain server-gated; no flags enabled by SDK installation.
+
 ## 0.1.0
 
-- Initial production-ready Python SDK for MemoryOS
+- Initial Python SDK for MemoryOS
 - Added synchronous `Memory` client using `httpx.Client`
 - Added asynchronous `AsyncMemory` client using `httpx.AsyncClient`
 - Added Pydantic v2 request and response models
