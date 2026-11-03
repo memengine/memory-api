@@ -34,9 +34,9 @@ What actually happened?
 
 - OS:
 - Python version:
-- MemoryOS version or commit:
+- Backend commit and installed SDK/package version:
 - LLM provider (or "none/mocked"; never include a key):
-- Running with Docker, local Python, or both:
+- Setup guide/profile followed (beta, contributor or custom):
 
 ## Logs
 
@@ -54,4 +54,4 @@ Anything else we should know?
 ## Verification and proposed scope
 
 Which checks did you actually run? Is this an observed backend failure, a setup
-problem, or still unknown? Do not reset state or rerun a consumed private evaluation.
+problem, or still unknown? Preserve the first failure before changing the setup.

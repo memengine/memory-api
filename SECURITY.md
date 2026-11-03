@@ -2,38 +2,49 @@
 
 ## Report privately
 
-Please do **not** disclose suspected vulnerabilities, cross-tenant leaks,
-credentials or real customer data in a public issue or pull request.
+Send suspected vulnerabilities to **support@memoryo.dev**, subject
+`MemoryOS security report`. If this repository offers **Security → Report a
+vulnerability**, that private channel is also suitable. Its availability is a
+repository setting, not established by this document.
 
-Email **support@memoryo.dev** with the subject `MemoryOS security report`.
-If GitHub's private vulnerability reporting is enabled for this repository,
-you may use **Security → Report a vulnerability** instead. This document does
-not imply that repository setting is enabled.
+Do not open public issues containing exploit details, credentials, customer data
+or evidence of an unauthorized disclosure. Include:
 
-Include:
+- Affected commit/package version and component.
+- Expected trust boundary, observed behavior and impact.
+- Minimal synthetic reproduction, prerequisites and sanitized configuration.
+- Whether real data may have been exposed and a safe follow-up contact.
 
-- Affected commit/version and component.
-- Expected trust boundary and the observed violation.
-- Minimal synthetic reproduction and necessary configuration, without secrets.
-- Impact, prerequisites and whether any real data may have been exposed.
-- A safe way to contact you for follow-up.
+Redact tokens, authorization headers, DSNs and personal data. Do not send database
+dumps, live credentials or private acceptance inputs. If a secret is exposed,
+revoke/rotate it with its issuer; removing a log or commit does not revoke it.
 
-Send only the minimum necessary information. Redact tokens, authorization
-headers, DSNs, personal data and private evaluation cases. Do not send database
-dumps, executable payloads or live credentials. If a credential is exposed,
-revoke/rotate it through its issuer; deleting a GitHub run is not remediation.
+## Release scope
 
-## Scope and expectations
+The current offering is a local developer beta, with published Python 0.1.2 and
+TypeScript 0.1.3 clients. There is no production security certification,
+supported-release maintenance matrix, response SLA or bug-bounty commitment.
+Report issues against older versions too, identifying the exact version.
+Passing tests do not establish that every trust boundary is safe. Report observed
+security violations with the affected version and a minimal reproduction.
 
-This is an early-stage project. There is no published supported-release matrix,
-security-response SLA or bug-bounty commitment. Acknowledge uncertainty rather
-than assuming a demonstration or passing test establishes production safety.
+Relevant concerns include cross-tenant disclosure, credential theft, authority
+escalation, unauthorized mutation and corruption of provenance/revision history.
 
-Tenant isolation, credential handling, authority escalation, unauthorized state
-changes and evidence/provenance corruption are relevant security concerns.
-A tenant service key is administrative within its own tenant; the documented
-customer-application identity boundary still applies.
+## Deployment and application boundary
 
-Investigate only systems and data you are authorized to access. Use local,
-synthetic tenants and do not test a hosted endpoint without permission. Coordinate
-disclosure privately before publishing exploit details.
+- The beta uses public local test passwords. Keep its API on loopback; do not
+  expose it as a hosted deployment or reuse its keys outside disposable testing.
+- Keep API/provider keys server-side. Never commit `.env`, bootstrap credentials,
+  database state or tokens, and do not place admin keys in browser/agent tools.
+- Keys have tenant scope and specific permissions. An admin operator key differs
+  from a read/write service key; neither replaces customer user authentication.
+- The application authorizes owner/project access. Do not assume every tenant
+  endpoint supplies per-human isolation, or that a model's claimed role is trusted.
+- Honor visibility holds before model/tool execution. Stored provenance does not
+  prove input truth; memory governance is not general prompt-injection protection.
+
+Investigate only systems/data you are authorized to access. Use local synthetic
+identities and do not probe hosted systems without permission. Coordinate private
+disclosure before publishing a reproduction. Deployment definitions under
+`.github/archived-workflows/` are historical, not authorization to run AWS.

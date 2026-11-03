@@ -19,23 +19,21 @@ normalize line endings; the source hashes explicitly normalize CRLF to LF. This
 is a source package, not a claim that a newly built image has identical dependency
 bytes to the earlier runtime.
 
-**The original 7c85e02 archive failed fresh-install verification. The repaired local
-working copy passed isolated build, migrations, atomic bootstrap, authentication,
-worker and publisher checks on 3 November 2026. The paid ingestion example remains
-unexecuted. The original 7c85e02 ZIP does not contain these repairs; use the
-new archive built from this repair commit.**
-The existing installed runtime's previous results do not prove this fresh-install
-path. Preserve the first setup failure and report it; do not bypass migration,
-ownership or permission guards. Internet is needed to build/install dependencies.
+Fresh isolated build, non-superuser migrations, atomic bootstrap, authentication,
+workers and the scoped publisher passed local checks on 3 November 2026. The paid
+ingestion example below remains unexecuted after the packaging repair. Earlier
+runtime results do not prove this entire fresh-install journey. Preserve the first
+failure rather than bypassing migration or permission guards. Internet is needed
+for dependency/image downloads.
 
 ## Fresh local startup
 
 Requires Docker Compose v2 and Python 3.12+ for the host-side example. Use a fresh
-checkout/extracted source package and a clean shell. Do not use the root deployment
+Git clone and a clean shell. Do not use the root deployment
 Compose files or overwrite an existing environment file.
 
 ```powershell
-# Run from the source-package root. Refuse to overwrite existing beta credentials.
+# Run from the repository root. Refuse to overwrite existing beta credentials.
 $betaContainers = docker ps -aq --filter label=com.docker.compose.project=memoryos-beta
 $betaVolumes = docker volume ls -q --filter label=com.docker.compose.project=memoryos-beta
 if ($betaContainers -or $betaVolumes) { throw 'Existing beta resources: stop and inspect; do not reuse or delete them for a fresh install.' }
@@ -139,4 +137,4 @@ docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta dow
 ```
 
 Do not use `down -v`, clear someone else's queues, or change existing application
-data. No deployment, push, paid run or new service startup was part of packaging.
+data. These commands do not deploy a hosted service or authorize paid runs.

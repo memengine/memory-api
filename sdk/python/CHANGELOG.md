@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 (release candidate; not yet published)
+## 0.1.2 - 2026-11-03
 
 - Include existing typed visibility holds and degraded-read status in sync/async clients.
 - Document explicit local backend URLs, hold-before-answer handling and operator HTTP limits.

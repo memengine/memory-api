@@ -1,34 +1,18 @@
-## Problem and scope
+## Problem and resulting behavior
 
-What user/developer problem does this change solve? Link an issue if applicable.
-For a larger policy/API/schema change, link the prior design discussion.
+What changes for a user/developer? Link the issue or design discussion if applicable.
 
-## Changes
+## Verification
 
-Describe the smallest coherent change. State whether API behavior, permissions,
-experimental flags, state transitions or migrations changed.
+State the exact checks run and their results. List relevant unrun checks or known
+limits. For docs-only changes, link/command review and `git diff --check` suffice.
 
-## Verification actually performed
+## Checklist
 
-| Command/check | Result | Environment and limits |
-| --- | --- | --- |
-| | | |
+- [ ] Focused change following [CONTRIBUTING.md](https://github.com/memengine/memory-api/blob/main/CONTRIBUTING.md).
+- [ ] Relevant tests/docs included; permission/schema/compatibility changes explained.
+- [ ] No secrets, real customer data, private cases, generated state or unrelated edits.
+- [ ] No authorization weakening, unapproved paid calls, deployment or flag changes.
+- [ ] Staged diff reviewed; actual verification distinguished from assumptions.
 
-List unrun checks, known failures and remaining unknowns. Distinguish model
-claims/mock checks from actual program/service execution. For docs-only changes,
-link/command review and a clean diff check are sufficient; do not claim tests ran.
-
-## Safety and contribution checklist
-
-- [ ] Reviewed [CONTRIBUTING.md](https://github.com/memengine/memory-api/blob/main/CONTRIBUTING.md) and kept the PR focused.
-- [ ] Added appropriate synthetic tests/docs, or explained why they are not needed.
-- [ ] Disclosed behavior/permission/schema changes and migration implications.
-- [ ] No credentials, real conversations, dumps, private acceptance data or generated runtime state.
-- [ ] Did not inspect/tune against a private holdout or relabel historical failures.
-- [ ] No unapproved provider calls, deployment, experimental rollout or weakening of CI checks.
-- [ ] Reviewed the staged diff and ran `git diff --check` on the changed files.
-
-## Assistance and dependencies
-
-Mention substantial AI assistance, external code/data and required licence
-notices. The contributor remains responsible for reviewing and verifying the PR.
+Mention substantial AI assistance or external code/data and required license notices.

@@ -6,9 +6,8 @@ pip install memoryo-sdk==0.1.2
 
 ## Local beta and release status
 
-This README accompanies release candidate **0.1.2**. Preparing source or a
-package artifact does not publish it; check your installed version before using
-these additions. SDK installation installs a client, not the MemoryOS backend.
+**0.1.2 is published.** Check your installed version before using these
+additions; older registry versions do not expose all of the same status fields. SDK installation installs a client, not the MemoryOS backend.
 The guided local beta is not production-qualified. Start the backend using the
 [local beta instructions](https://github.com/memengine/memory-api/blob/main/beta/README.md)
 and use its newly generated synthetic credentials. Keep keys server-side.

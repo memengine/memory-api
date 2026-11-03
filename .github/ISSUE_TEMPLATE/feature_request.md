@@ -20,7 +20,7 @@ solve it without a new feature? Review the current README scope first.
 
 - [ ] Local setup / documentation
 - [ ] Python or TypeScript SDK
-- [ ] Explicit preference request/read contract
+- [ ] Existing source/correction or explicit request/read contract
 - [ ] Provenance / currentness / scope
 - [ ] Reliability / idempotency
 - [ ] Other (explain)

@@ -1,5 +1,9 @@
 # Domain Schemas and Governed State Overlays
 
+> Reference/experimental material: domain overlays are not part of the current
+> local beta journey or a production support commitment. Start with
+> [README.md](README.md) for the current supported entry points.
+
 ## Why Domain Overlays Exist
 
 Domain overlays are not separate memory databases and are not the primary value proposition of

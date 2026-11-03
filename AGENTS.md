@@ -24,6 +24,17 @@ summary D:\memoryos\sdk-release-preparation-20261103\summary.json.
 Publishing requires separate approval. Root README remains unrelated/dirty;
 no claimed public release, live integration or production readiness.
 
+## Public onboarding and published clients - 3 November 2026
+
+Reviewed and simplified README, development/contribution/security guidance,
+architecture, roadmap and issue/PR templates. Verified beta is primary setup;
+source SDK docs now reflect published Python0.1.2/TypeScript0.1.3. Corrected tenant
+key permissions and hold-before-answer guidance. Removed obsolete feature and
+broad benchmark wishlist. CI/deployment definitions unchanged; no backend changes.
+Public Markdown links/UTF8/fences and scoped diff checks passed. Detailed local
+assessment is excluded from Git; do not stage generated evidence/credentials or
+unrelated working-tree changes. No deployment or paid calls.
+
 ## Local beta packaging repair — 3 November 2026
 
 Corrected bootstrap transaction ownership and atomically initialized synthetic
