@@ -1,5 +1,6 @@
 """Package boundaries and no-accidental-paid-call gates; no live services."""
 import importlib.util
+import io
 import sys
 from pathlib import Path
 
@@ -64,3 +65,46 @@ def test_container_build_context_is_an_allowlist_without_local_keys_or_evidence(
     assert "api/**" in allowed
     assert "beta/bootstrap.py" in allowed
     assert not any(".env" in path or "credentials" in path or "benchmarks" in path for path in allowed)
+
+
+def test_http_client_uses_the_public_apikey_authorization_contract(monkeypatch):
+    requests = []
+    def response(request, timeout):
+        requests.append(request)
+        return io.BytesIO(b'{"data": []}')
+    monkeypatch.setattr(example, "urlopen", response)
+    assert example.call("http://127.0.0.1:18000", "synthetic", "GET", "/v1/api-keys") == {"data": []}
+    assert requests[0].get_header("Authorization") == "ApiKey synthetic"
+    assert requests[0].get_header("X-api-key") is None
+
+
+def test_demo_requires_bootstrap_catalog_before_any_network_call(monkeypatch):
+    monkeypatch.setattr(example, "call", lambda *a, **k: pytest.fail("Network must not be reached"))
+    with pytest.raises(ValueError, match="writer catalog missing"):
+        example.demo("http://127.0.0.1:18000", {"admin_api_key": "synthetic"})
+
+
+def test_demo_uses_bound_client_keys_without_dashboard_registration(monkeypatch):
+    seen = []
+    def call(base, key, method, path, body=None, **kwargs):
+        seen.append((key, method, path, body))
+        if path == "/v1/memories/add":
+            return {"data": {"job_id": "synthetic-job"}}
+        if path == "/v1/memories/retrieve":
+            return {"data": []}
+        if path.startswith("/v1/memories/service-corrections?"):
+            return {"data": []}
+        pytest.fail(f"Unexpected request: {method} {path}")
+    monkeypatch.setattr(example, "call", call)
+    monkeypatch.setattr(example, "wait_for_job", lambda *a: {"status": "completed"})
+    credentials = {"admin_api_key": "operator", "clients": {
+        service: {"service_key": service, "api_key": f"key-{service}"}
+        for service in ("billing", "crm")}}
+    result = example.demo("http://127.0.0.1:18000", credentials)
+    writes = [item for item in seen if item[2] == "/v1/memories/add"]
+    assert [(key, body["source"]["service"]) for key, _, _, body in writes] == [
+        ("key-billing", "billing"), ("key-billing", "billing"),
+        ("key-crm", "crm"), ("key-crm", "crm")]
+    assert seen[-2][0] == "key-crm"
+    assert seen[-1][0] == "operator"
+    assert "key-billing" not in str(result) and "key-crm" not in str(result)

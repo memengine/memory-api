@@ -1,12 +1,26 @@
 # MemoryO / MemoryOS: operating guide and release roadmap
 
-Updated: 2026-11-02 (Asia/Calcutta). Applies to this backend repository.
+Updated: 2026-11-03 (Asia/Calcutta). Applies to this backend repository.
 MemoryO is the product name in the owner's operating instructions; MemoryOS
 remains the existing repository/API name. No rename is authorized.
 
 This is the single release roadmap. The documents below specify contracts and
 evidence; they do not create competing roadmaps. Resume the next unfinished task
 instead of repeating the historical audit.
+
+## Local beta packaging repair — 3 November 2026
+
+Corrected bootstrap transaction ownership and atomically initialized synthetic
+operator plus RW Billing20/CRM95 writer credentials. Example consumes that private
+catalog with Authorization: ApiKey; dashboard-only management remains protected.
+13 focused package checks and Ruff pass. Fresh isolated repair project passed
+build, non-superuser migrations, health, three authenticated principals, SQL
+key/writer bindings, injected full bootstrap rollback, workers and scoped publisher.
+Paid ingestion journey unexecuted; no deployment/AWS/V2/backend permission changes.
+Test containers stopped, volumes/logs preserved. Original 7c85e02 ZIP retained as
+failed-install evidence; repaired archive must be exported from this commit.
+Keep generated evidence, credentials and unrelated work out of Git.
+Evidence: D:\memoryos\fresh-beta-install-20261103\packaging-repair\summary.json.
 
 ## Local developer beta package — 2 November 2026
 

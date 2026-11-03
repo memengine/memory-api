@@ -19,8 +19,11 @@ normalize line endings; the source hashes explicitly normalize CRLF to LF. This
 is a source package, not a claim that a newly built image has identical dependency
 bytes to the earlier runtime.
 
-**Packaging checks are offline/static. The fresh Compose install, database init,
-bootstrap and paid example below have not been executed as part of packaging.**
+**The original 7c85e02 archive failed fresh-install verification. The repaired local
+working copy passed isolated build, migrations, atomic bootstrap, authentication,
+worker and publisher checks on 3 November 2026. The paid ingestion example remains
+unexecuted. The original 7c85e02 ZIP does not contain these repairs; use the
+new archive built from this repair commit.**
 The existing installed runtime's previous results do not prove this fresh-install
 path. Preserve the first setup failure and report it; do not bypass migration,
 ownership or permission guards. Internet is needed to build/install dependencies.
@@ -78,11 +81,15 @@ Do not share that file or include it in a bug report.
 python beta/example.py demo --allow-paid-calls --output beta/journey.local.json
 ```
 
-The example creates two new scoped read/write client keys and credential-bound
-Billing20/CRM95 writers, a fresh synthetic owner and an application-declared
-global/account scope. It submits Growth, INR, Scale and Enterprise source events,
+The one-time bootstrap atomically provisions the synthetic tenant, operator key
+and two read/write-only client keys bound to Billing20/CRM95 writers. This is
+local database initialization, not an API-key bypass of dashboard-only writer
+registration. Keep all three keys private. The example reuses that catalog, creates
+a fresh synthetic owner and declares a global/account scope. It submits Growth,
+INR, Scale and Enterprise source events,
 polling each original job without resubmitting on automatic retry. It then reads
-current context and discovers pending corrections. Credentials remain in memory;
+current context and discovers pending corrections. Client credentials are loaded
+from the private bootstrap file;
 the output does not include newly created raw client keys.
 
 This optional ingestion path uses existing model extraction/relation handling,

@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 
 def call(base, key, method, path, body=None, *, request_key=None):
-    headers = {"X-API-Key": key, "Content-Type": "application/json"}
+    headers = {"Authorization": f"ApiKey {key}", "Content-Type": "application/json"}
     if request_key:
         headers["Idempotency-Key"] = request_key
     request = Request(base.rstrip("/") + path, method=method, headers=headers,
@@ -47,19 +47,17 @@ def quote_response(response):
         for item in response.get("data", [])]}
 
 
-def demo(base, admin):
+def demo(base, credentials):
+    admin = credentials["admin_api_key"]
+    catalog = credentials.get("clients", {})
+    if not all(catalog.get(service, {}).get("service_key") and catalog[service].get("api_key")
+        for service in ("billing", "crm")):
+        raise ValueError("Use credentials from the corrected local beta bootstrap; writer catalog missing.")
     run = uuid.uuid4().hex
     owner = f"beta-example-{run}"
     scope = {"kind": "global", "account": owner}
-    clients = {}
-    for service, priority in (("billing", 20), ("crm", 95)):
-        credential = call(base, admin, "POST", "/v1/api-keys", {"name": f"{service}-{run}",
-            "permissions": ["read", "write"]})["data"]
-        name = f"beta-{service}-{run}"
-        call(base, admin, "POST", "/v1/tenant/service-writers", {"service_key": name,
-            "display_name": f"Synthetic {service}", "api_key_id": credential["id"],
-            "authority_rules": {"default_priority": priority}})
-        clients[service] = (name, credential["raw_key"])
+    clients = {service: (catalog[service]["service_key"], catalog[service]["api_key"])
+        for service in ("billing", "crm")}
     jobs = []
     for service, text in (("billing", "This account has subscription plan Growth."),
         ("billing", "This account has billing currency INR."),
@@ -110,7 +108,7 @@ def main():
     credentials = json.loads(Path(args.credentials).read_text(encoding="utf-8-sig"))
     admin = credentials["admin_api_key"]
     if args.mode == "demo":
-        response = demo(args.base_url, admin)
+        response = demo(args.base_url, credentials)
     elif args.mode == "read":
         response = quote_response(call(args.base_url, admin, "POST", "/v1/memories/retrieve", {
             "external_user_id": args.owner, "query": "What is current for this account?",
