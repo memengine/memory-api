@@ -9,10 +9,14 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   provider:
     if: inputs.approve_paid_provider == true
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: benchmark-provider-approval
     services:
       postgres:

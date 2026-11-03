@@ -1,0 +1,65 @@
+# Infrastructure only. No API/worker/Beat, paid providers or cloud provisioning.
+# Always use -f compose.contributor.yml -p memoryos-contributor explicitly.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: memoryos
+      POSTGRES_PASSWORD: contributor_local_only
+      POSTGRES_DB: memoryos_contributor
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoryos -d memoryos_contributor"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  qdrant:
+    # Matches the existing development stack; this is not a production image pin.
+    image: qdrant/qdrant:latest
+    ports:
+      - "127.0.0.1:16333:6333"
+    volumes:
+      - qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  localstack:
+    image: localstack/localstack:3.8.1
+    environment:
+      SERVICES: s3,sqs,secretsmanager
+      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
+    ports:
+      - "127.0.0.1:14566:4566"
+    volumes:
+      - localstack:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4566/_localstack/health', timeout=5)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres:
+  redis:
+  qdrant:
+  localstack:
