@@ -305,7 +305,9 @@ def test_wrong_tenant_and_blocked_user_cannot_resolve(sql_scope, turn_http):
                 session.get(ProxyUser, sql_scope.proxy_id).is_blocked = True
             result = await client.post(f"/v1/memories/preference-reviews/{row['id']}/answer", json={
                 "external_user_id":sql_scope.external_id,"version":row["version"],"action":"dismiss"})
-            assert result.status_code == 404, result.text
+            assert result.status_code == 403, result.text
+            assert result.json()["code"] == "PRX_403"
+            assert result.json()["error"] == "proxy_user_blocked"
             with sql_scope.factory() as session:
                 assert session.get(PendingExtractionCandidate, uuid.UUID(row["id"])).status == "pending"
     asyncio.run(exercise())

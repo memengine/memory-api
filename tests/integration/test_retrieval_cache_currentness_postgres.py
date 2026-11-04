@@ -24,6 +24,8 @@ from api.db.models import (
     PlanTier,
     ProxyUser,
     Tenant,
+    VectorSyncOutbox,
+    VectorSyncStatus,
 )
 from api.routers.memories import answer_memory_clarification
 from api.schemas.requests import MemoryClarificationAnswerRequest
@@ -66,6 +68,22 @@ def _args(tenant_id, proxy_id, external_id):
         tenant_id=str(tenant_id),
         quota_mode="full",
     )
+
+
+def _complete_mock_publication(scope):
+    # These tests control vector results rather than running a publisher. Model
+    # the settled fixture state explicitly so pending-publication SQL fallback
+    # does not prevent exercising the cache/vector path under test.
+    with scope.factory.begin() as session:
+        result = session.execute(
+            update(VectorSyncOutbox).where(
+                VectorSyncOutbox.memory_id.in_(
+                    select(Memory.id).where(Memory.proxy_user_id == scope.proxy_id)
+                ),
+                VectorSyncOutbox.status == VectorSyncStatus.pending,
+            ).values(status=VectorSyncStatus.done, synced_at=datetime.now(UTC))
+        )
+        assert result.rowcount > 0
 
 
 def _cached_api_process(connection, tenant_id, proxy_id, external_id):
@@ -137,6 +155,7 @@ def test_two_api_processes_reject_old_l1_after_real_chat_selection(
         ),
     )
     new_id = result["stored_memories"][0]["id"]
+    _complete_mock_publication(sql_scope)
     with sql_scope.factory() as session:
         clarification_id = (
             session.scalars(
@@ -344,6 +363,8 @@ def test_complete_vector_payload_cannot_bypass_sql_scope_or_provenance(
                 metadata_json={},
             )
         )
+
+    _complete_mock_publication(sql_scope)
 
     class Search:
         breaker = SimpleNamespace(current_state=lambda: "CLOSED")

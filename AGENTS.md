@@ -24,6 +24,19 @@ summary D:\memoryos\sdk-release-preparation-20261103\summary.json.
 Publishing requires separate approval. Root README remains unrelated/dirty;
 no claimed public release, live integration or production readiness.
 
+## CI integration fixture alignment - 4 November 2026
+
+CI atc2af279 passed all2732units and SDK; newly reached governance gate failed3
+stale integration assumptions. Reproduced on dedicated local PostgreSQL15/Redis7.
+Two cache/vector tests now explicitly settle their mocked-publication outbox before
+asserting those paths; no runtime guard bypass. Blocked-owner review expects the
+existing403/PRX_403 refusal and retains pending-state assertion; foreign tenant404
+check unchanged. Both entire affected modules pass51tests. Only tests changed;
+CI definitions/backend/provider policy unchanged. Full local unit attempt2731pass
+with1Windows archive CRLF hash mismatch; canonical Git bytes confirmed and that
+check passed separately. Historical failed runs/logs preserved. Final remote CI
+pending at commit time. Evidence D:\memoryos\ci-repair-20261104.
+
 ## CI fixture repair - 4 November 2026
 
 Investigated failed CI41651376086 at2ff758c: migrations and SDK job passed;
