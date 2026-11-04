@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC
-from datetime import datetime
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from api.db.models import Memory
-from api.db.models import MemoryCategory
-from api.db.models import QuotaMode
+from api.db.models import Memory, MemoryCategory, QuotaMode
 from api.services.embedding_service import DEFAULT_ACTIVE_MODEL_ID
 from api.services.lifecycle_manager import MemoryLifecycleManager
 from api.services.retriever import RetrieverService
@@ -32,6 +27,9 @@ class FakeScalarResult:
 
     def scalar_one(self):
         return self._items[0] if self._items else 0
+
+    def first(self):
+        return self._items[0] if self._items else None
 
 
 class FakeSession:
@@ -253,7 +251,10 @@ async def test_hot_tier_memory_is_returned_without_qdrant_lookup(monkeypatch) ->
     cache = FakeCache()
     cache.hot_tier_payloads = [MemoryLifecycleManager._memory_cache_payload(hot_memory)]
     session = MagicMock()
-    session.execute = AsyncMock(side_effect=[FakeScalarResult([hot_memory]), FakeScalarResult([10])])
+    # Hot-row readback, no pending source publication, then owner memory count.
+    session.execute = AsyncMock(side_effect=[
+        FakeScalarResult([hot_memory]), FakeScalarResult([]), FakeScalarResult([10]),
+    ])
     qdrant_service = MagicMock()
     qdrant_service.search_memories = MagicMock(return_value=[])
     qdrant_service.breaker = SimpleNamespace(current_state=lambda: "CLOSED")
@@ -280,6 +281,7 @@ async def test_hot_tier_memory_is_returned_without_qdrant_lookup(monkeypatch) ->
     )
 
     assert [result.id for result in results] == [str(hot_memory.id)]
+    assert session.execute.await_count == 3
     qdrant_service.search_memories.assert_not_called()
 
 

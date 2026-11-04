@@ -24,6 +24,18 @@ summary D:\memoryos\sdk-release-preparation-20261103\summary.json.
 Publishing requires separate approval. Root README remains unrelated/dirty;
 no claimed public release, live integration or production readiness.
 
+## CI fixture repair - 4 November 2026
+
+Investigated failed CI41651376086 at2ff758c: migrations and SDK job passed;
+unit step failed5 tests. Reproduced5failed/9passed locally. Fixture corrections
+only: verified exact-proposition predecessor identity, pending-outbox SQL mock,
+full-proposition universal claim values. Existing legacy/owner/scope/category
+rejection tests retained. Focused31pass and Ruff pass; no API/workflow changes.
+Full clean-export unit verification and remote CI result pending at commit time.
+Windows default pytest temp denied access; use a fresh workspace basetemp locally.
+Original failure log retained outside Git D:\memoryos\ci-repair-20261104.
+No skipped gates, changed assertions about authority, paid calls or deployment.
+
 ## Public onboarding and published clients - 3 November 2026
 
 Reviewed and simplified README, development/contribution/security guidance,

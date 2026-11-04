@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 from api.db.models import Memory, MemoryCategory, MemoryClaim, MemoryClaimRevision
-from api.services.claim_ledger_service import ClaimLedgerService
+from api.services.claim_ledger_service import ClaimLedgerService, build_claim_identity
 
 
 class Session:
@@ -47,17 +47,18 @@ def test_update_reconciles_using_predecessor_revision_despite_new_fingerprint() 
     proxy_user_id = uuid.uuid4()
     old_memory = memory("User lives in Chennai.")
     old_memory.proxy_user_id = proxy_user_id
+    old_identity = build_claim_identity(content=old_memory.content, category="fact", scope={})
     claim = MemoryClaim(
         id=uuid.uuid4(), tenant_id=tenant_id, proxy_user_id=proxy_user_id,
-        category=MemoryCategory.fact, claim_fingerprint="old-fingerprint",
-        subject_key="user", predicate_key="user lives in chennai", scope={},
-        active_value="user lives in chennai", status="active",
+        category=MemoryCategory.fact, claim_fingerprint=old_identity.fingerprint,
+        subject_key=old_identity.subject_key, predicate_key=old_identity.predicate_key, scope={},
+        active_value=old_memory.content, status="active",
         active_memory_id=old_memory.id, authority_priority=50,
         confidence_score=0.95, observed_at=datetime(2026, 7, 1, tzinfo=UTC),
     )
     old_revision = MemoryClaimRevision(
         id=uuid.uuid4(), claim_id=claim.id, memory_id=old_memory.id,
-        asserted_value="user lives in chennai", status="activated",
+        asserted_value=old_memory.content, status="activated",
         authority_priority=50, confidence_score=0.95,
     )
     claim.winning_revision_id = old_revision.id
@@ -66,6 +67,8 @@ def test_update_reconciles_using_predecessor_revision_despite_new_fingerprint() 
     service._find_claim_for_memory = lambda _memory_id: claim  # type: ignore[method-assign]
     new_memory = memory("Correction: User now lives in Bengaluru.")
     new_memory.proxy_user_id = proxy_user_id
+    new_identity = build_claim_identity(content=new_memory.content, category="fact", scope={})
+    assert new_identity.fingerprint != old_identity.fingerprint
     evidence = {"action": "UPDATE", "reason_codes": ["incoming_source_wins"]}
 
     result = service.record_memory(
@@ -88,6 +91,7 @@ def test_update_reconciles_using_predecessor_revision_despite_new_fingerprint() 
     assert new_revision.decision_evidence == evidence
     assert claim.active_memory_id == new_memory.id
     assert claim.winning_revision_id == new_revision.id
+    assert claim.active_value == new_memory.content
 
 
 def test_keep_both_does_not_use_predecessor_reconciliation() -> None:

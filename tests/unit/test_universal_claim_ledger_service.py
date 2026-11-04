@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import uuid
 
-from api.db.models import UniversalMemory
-from api.db.models import UniversalMemoryClaim
-from api.db.models import UniversalMemoryClaimRevision
+from api.db.models import (
+    UniversalMemory,
+    UniversalMemoryClaim,
+    UniversalMemoryClaimRevision,
+)
 from api.services.claim_ledger_service import build_claim_identity
-from api.services.claim_versions import CLAIM_PROCESSOR_VERSION
-from api.services.claim_versions import CLAIM_SCHEMA_VERSION
-from api.services.claim_versions import PASSPORT_BACKFILL_PROCESSOR_VERSION
+from api.services.claim_versions import (
+    CLAIM_PROCESSOR_VERSION,
+    CLAIM_SCHEMA_VERSION,
+    PASSPORT_BACKFILL_PROCESSOR_VERSION,
+)
 from api.services.universal_claim_ledger_service import UniversalClaimLedgerService
 
 
@@ -131,7 +135,7 @@ def test_user_correction_becomes_the_claim_winner() -> None:
     assert decision.memory_is_active is True
     assert claim.status == "active"
     assert claim.active_memory_id == correction.id
-    assert claim.active_value == "growth"
+    assert claim.active_value == "User's current plan is Growth"
 
 
 def test_backfill_advances_only_backfill_managed_claim_to_newer_legacy_memory() -> None:
@@ -156,7 +160,7 @@ def test_backfill_advances_only_backfill_managed_claim_to_newer_legacy_memory() 
     )
 
     assert claim.active_memory_id == newer.id
-    assert claim.active_value == "growth"
+    assert claim.active_value == "User's current plan is Growth"
     assert older_revision.status == "superseded"
     assert newer_revision.status == "activated"
     assert newer_revision.schema_version == CLAIM_SCHEMA_VERSION
@@ -190,7 +194,7 @@ def test_backfill_never_replaces_live_ledger_winner() -> None:
     )
 
     assert claim.active_memory_id == live.id
-    assert claim.active_value == "starter"
+    assert claim.active_value == "User's current plan is Starter"
     assert live_revision.status == "activated"
     assert legacy_revision.status == "disputed"
     assert legacy.is_archived is False
