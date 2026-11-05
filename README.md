@@ -144,8 +144,13 @@ A successful read prints the saved plan. The example waits for the write job and
 
 1. **Save updates** after a conversation or when a service reports a change. Use the same user or account ID from your application on reads and writes.
 2. **Fetch context** before the agent answers. If MemoryOS reports that context is processing or needs review, use your app's fallback.
-3. **Add a second source** when you need to reconcile updates from different systems. Try the [billing and CRM example](beta/README.md#one-two-service-integration-example) to see source priority, review and history together.
 
 Load the API key on your server. Use the [Python](sdk/python/README.md) or [TypeScript guide](sdk/typescript/README.md) for job polling, provenance and more examples.
+
+### 4. Try it with two sources
+
+Billing says a test customer is on Growth. CRM reports a correction to Scale. What should your support agent say when the customer asks, “What plan am I on?”
+
+Run the [Billing and CRM walkthrough](beta/README.md#one-two-service-integration-example) to see what MemoryOS returns for the same account, which source supplied the current record, and whether a correction needs review before your agent can use the affected context.
 
 [Contributing](CONTRIBUTING.md) · [Development](DEVELOPMENT.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
