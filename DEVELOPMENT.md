@@ -1,8 +1,6 @@
 # Local contributor development
 
-Use a fresh clone and synthetic data. For the running API, workers and synthetic
-credentials, follow **[the local beta setup](beta/README.md)**. That is the checked
-service setup path. This guide covers contribution without paid providers.
+Use the [Docker guide](beta/README.md) to run the API. Follow the steps below to install development tools and run tests.
 
 ## Install for code changes
 
@@ -55,19 +53,7 @@ of a contribution. SDK package verification is distinct from backend integration
 
 ## Service-dependent work
 
-Use [beta/README.md](beta/README.md) for the checked isolated container path and
-shutdown commands. Its API uses `127.0.0.1:18000`; source is built into the image,
-not mounted for hot reload. Rebuild only your disposable project's image after a
-source change. Check dependency health and workers; a listening API alone does
-not prove queued writes can complete. Model calls require separate configuration
-and cost approval.
-
-`compose.contributor.yml` is an alternative storage-only development profile,
-not the beta runtime. Its syntax/starter checks were checked earlier; its full
-startup/migration/provisioning path is not established. It does not provide the
-beta bootstrap or workers. Do not combine the two profiles or point a beta
-bootstrap at its database. Older deployment overlays and Terraform are not local
-contribution instructions.
+Use the [Docker guide](beta/README.md) to run the API and workers. The image contains the source, so rebuild your local image after backend changes. `compose.contributor.yml` provides storage services for development. Use a separate Compose project for each setup.
 
 ## Troubleshooting
 

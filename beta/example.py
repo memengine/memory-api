@@ -71,7 +71,10 @@ def demo(base, credentials):
                 "external_turn_id": event, "content": text}],
             "source": {"service": source, "event_id": event,
                 "observed_at": datetime.now(UTC).isoformat(), "scope": scope}}, request_key=event)
-        jobs.append(wait_for_job(base, key, admitted["data"]["job_id"]))
+        job_id = admitted.get("job_id")
+        if not job_id:
+            raise RuntimeError(f"Memory was not queued: {admitted.get('blocked_reason') or admitted.get('status')}")
+        jobs.append(wait_for_job(base, key, job_id))
     response = call(base, clients["crm"][1], "POST", "/v1/memories/retrieve", {
         "external_user_id": owner, "query": "What subscription plan and billing currency are recorded?",
         "categories": ["fact"], "format": "json", "limit": 10})

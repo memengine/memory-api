@@ -4,61 +4,9 @@
 pip install memoryo-sdk==0.1.2
 ```
 
-## Local beta and release status
+## Connect to MemoryOS
 
-**0.1.2 is published.** Check your installed version before using these
-additions; older registry versions do not expose all of the same status fields. SDK installation installs a client, not the MemoryOS backend.
-The guided local beta is not production-qualified. Start the backend using the
-[local beta instructions](https://github.com/memengine/memory-api/blob/main/beta/README.md)
-and use its newly generated synthetic credentials. Keep keys server-side.
-The hosted default URL does not establish hosted availability; explicitly set
-the local URL shown below (or your own verified server).
-
-```python
-import os
-from memoryos import Memory
-mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url="http://127.0.0.1:18000")
-context = mem.get(query="What is current?", external_user_id="application-owned-user-id")
-if context.memory_visibility is not None:
-    raise RuntimeError("Memory context is unavailable or processing; stop this answer.")
-# Only after the visibility check, consider context.items/system_prompt_addition.
-mem.close()
-```
-
-This example deliberately stops on any hold. An affected-context hold may leave
-unaffected records, but the application must decide whether they can answer its
-request. `has_context`/`hasContext`, a nonempty prompt, HTTP 200 or `FULL` quota
-alone do not establish safe/current context. Unknown visibility states are rejected.
-Queued ingestion means admitted, not applied; poll the same job and inspect the
-committed result. Retrieval and ingestion may use paid backend providers; this
-snippet is not a cost-free smoke test. No provider calls are made by installing.
-
-Explicit retained service-correction preview/decision remains an operator HTTP
-workflow, documented in the
-[operator guide](https://github.com/memengine/memory-api/blob/main/beta/OPERATOR.md).
-These SDKs do not yet provide service-correction convenience methods or API-key
-writer registration. Local bootstrap supplies synthetic writers; normal writer
-management requires dashboard authentication. Experimental methods below do not
-enable server flags; keep V2 disabled for the local beta.
-
-## Preference confirmations (internal v2, source checkout)
-
-Retrieval preserves `result.preference_reviews`; alternatively call
-`mem.list_preference_reviews(external_user_id)`. Display the returned known scope,
-proposal and allowed actions in your existing authenticated chat. Only after an
-explicit user action, your server can call
-`mem.answer_preference_review(review.id, external_user_id=user_id,
-version=review.version, action="confirm")`. Async methods have the same contract.
-Derive `user_id` from your authenticated session, not a model-generated argument.
-Do not expose confirmation as an autonomous agent tool. Keep the API key server-only.
-
-The backend rechecks source, target/version, ownership, permissions and authority;
-this application assertion stays authority 20, not independently verified human
-authority. Source-review actions never activate text. V1 remains the runtime
-default. All V2 preference creations/replacements require explicit confirmation,
-including direct statements; the SDK never auto-confirms them. These methods do
-not enable v2 or imply publication. See the
-[full contract](../../docs/preference_confirmation_contract.md).
+Follow the [quickstart](../../README.md#quickstart) to start the API and save your first memory. Set `MEMORYOS_API_URL` to your server URL and `MEMORYOS_API_KEY` to your application key. The Docker setup uses `http://127.0.0.1:18000`.
 
 ## Start simple: solo builders and small teams
 
@@ -69,7 +17,7 @@ not enable v2 or imply publication. See the
 import os
 from memoryos import Memory
 
-mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"])
+mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url=os.environ["MEMORYOS_API_URL"])
 
 write = mem.add(
     external_user_id="user_123",
@@ -97,28 +45,6 @@ if context.has_context:
 ```
 
 This is the recommended first integration. Add source metadata only when more than one backend service writes memories for the same users.
-
-### Ordered current-turn preparation (default off, source checkout)
-
-`Memory.prepare_turn()` / `AsyncMemory.prepare_turn()` use one backend request
-to register the incoming user turn before retrieval, without worker polling:
-
-```python
-context = mem.prepare_turn(
-    "Python instead", external_user_id="user_123",
-    conversation_id="chat_456", turn_id="message_789",
-)
-# Check context.admission separately from context.memory_visibility.
-# Accepted registration is not completed processing or a resolved preference.
-```
-
-Reuse these IDs and the exact transcript on retry. Do not also `add()` this
-turn or fall back to an ordinary read after a refusal. The feature requires
-operator rollout gates and both read/write permissions, remains disabled by
-default, and is not yet a general chat latency/availability solution. See the
-[backend contract](../../docs/turn_preparation.md) for response states,
-withholding, identity, evidence, and release limits. No package release is
-implied by this source-checkout API.
 
 ### Read withholding status
 
@@ -152,104 +78,6 @@ With discovery off, generic reads still exclude declared preferences. No automat
 polling or additional read-time model call is added. This source change is not a
 claim that a new package has been published.
 
-## Opt-in scoped preferences (local, unreleased)
-
-This source checkout exposes an application-declared contract, **not automatic
-natural-language scope/uncertainty recognition**. Published `0.1.1` does not
-include these fields. The backend feature remains disabled by default; disabled
-requests fail with `409 / PREF_409` rather than falling back to unscoped writes.
-
-```python
-from memoryos import PreferenceClaimRequest, PreferenceReadContext
-
-scope = {"kind": "context", "namespace": "project", "key": "release-check"}
-quote = "For Release Check, use Python for examples."
-write = mem.add(
-    messages=[{"role": "user", "content": quote}],
-    external_user_id="user_123",
-    preference_claims=[PreferenceClaimRequest(
-        property_key="examples.language", value="Python", applicability=scope,
-        turn_index=0, quote=quote,
-    )],
-)
-# Queued, not confirmed storage. Check status separately, not during streaming.
-context = mem.get(
-    query="Which language should examples use?", external_user_id="user_123",
-    preference_context=PreferenceReadContext(
-        applicability=scope, property_keys=["examples.language"],
-    ),
-)
-```
-
-`AsyncMemory` accepts the same keyword arguments with `await`. Normal calls that
-omit these options retain the existing flow. When declarations are supplied,
-the job processes only those declarations, not other facts in the transcript.
-Property/scope keys must be stable and application-owned; never guess unknown
-scope as global. Declarations stay `client_asserted`, authority capped at 20.
-Do not combine them with `source` or `agent_id`, or explicit reads with `as_of`.
-
-For intentional replacement, use `commitment="replacement"` plus
-`replaces_memory_id` and the exact `provenance["preference_version"]` returned
-by the backend. Tentative uncertainty stays pending without withholding an
-existing default; review actions never activate candidate text.
-Existing job status preserves raw `extraction_metadata` and provides
-`source_reviews_capacity_rejected`; completion alone does not mean storage.
-Immediate reads may precede job completion. There is no automatic polling,
-new model call, authority decision, or read-after-write guarantee in the SDK.
-See [the full contract](../../docs/explicit_preference_contract.md).
-
-### An explicitly unresolved current choice
-
-The local, unreleased SDK also accepts `choice_state="current_choice_unresolved"`
-with `commitment="uncertain"`, known applicability, and the existing winner's exact
-ID/version. This is an application declaration, not interpretation of the user's
-wording. Use it only when your integration has established that the current choice
-is unresolved, not for merely tentative interest in another value.
-
-```python
-# current_id/current_version are backend-issued values from an owned management
-# or prior retrieval result, not guesses or assistant-generated references.
-quote = "For Release Check, I am undecided between my current C++ default and Python."
-write = mem.add(
-    messages=[{"role": "user", "content": quote}], external_user_id="user_123",
-    preference_claims=[PreferenceClaimRequest(
-        property_key="examples.language", value="Python", applicability=scope,
-        turn_index=0, quote=quote, commitment="uncertain",
-        choice_state="current_choice_unresolved",
-        replaces_memory_id=current_id, replaces_version=current_version,
-    )],
-)
-```
-
-The backend checks the exact identity, evidence, ownership, currentness, authority
-and version. A queued write does not prove the choice was withheld: inspect raw
-job `extraction_metadata["preference_choices"]` when processing confirmation is
-needed. Do not add an automatic wait to the answer-generation path.
-
-Tenant `get()` returns exported `PreferenceReadDecision` objects in
-`context.preference_decisions` and preserves `context.clarification_question`.
-Old servers without the field return an empty decision list. Check decisions
-independently of `context.has_context` or `context.items`: an unresolved choice
-can be the only returned information, or coexist with usable unrelated facts.
-
-```python
-context = mem.get(
-    query="Which language should examples use?", external_user_id="user_123",
-    preference_context={"applicability": scope, "property_keys": ["examples.language"]},
-)
-for decision in context.preference_decisions:
-    # Supply this structured outcome to your existing chat workflow. The SDK
-    # does not render UI, alter your agent prompt, choose a value, or resolve it.
-    print(decision.property_key, decision.applicability, decision.state)
-```
-
-Dismissal/expiry of a review does not restore the withheld default. A matching
-`keep_current` review can reaffirm the existing valid value; an exact version-bound
-replacement can resolve the choice. No authority is raised and no candidate text
-is activated by review. The backend remains disabled by default; older servers
-that reject a new declaration surface that error, not a retry with fields removed.
-This capability is not yet published and does not add automatic semantic admission.
-
 ## Multi-service mode: support, billing, CRM, and product services
 
 > **For whom:** teams where multiple services can write facts about the same user.
@@ -260,7 +88,7 @@ After registering the service writers in the Tenant Dashboard, teams can pass th
 ```python
 from memoryos import Memory
 
-mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"])
+mem = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url=os.environ["MEMORYOS_API_URL"])
 
 mem.add(
     external_user_id="cust_123",
@@ -429,7 +257,7 @@ import os
 
 from memoryos import Memory
 
-client = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url="https://api.memoryo.dev")
+client = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url=os.environ["MEMORYOS_API_URL"])
 
 result = client.add(
     external_user_id="student_44821",
@@ -467,7 +295,7 @@ import os
 
 from memoryos import Memory
 
-client = Memory(api_key=os.environ["MEMORYOS_API_KEY"])
+client = Memory(api_key=os.environ["MEMORYOS_API_KEY"], base_url=os.environ["MEMORYOS_API_URL"])
 result = client.get(query="customer preference", external_user_id="cust_123")
 ```
 
@@ -478,7 +306,7 @@ import os
 
 from memoryos import AsyncMemory
 
-client = AsyncMemory(api_key=os.environ["MEMORYOS_API_KEY"])
+client = AsyncMemory(api_key=os.environ["MEMORYOS_API_KEY"], base_url=os.environ["MEMORYOS_API_URL"])
 result = await client.get(query="customer preference", external_user_id="cust_123")
 ```
 
@@ -552,27 +380,6 @@ if result.retrieval_id:
     if feedback.queued_retrospective_extraction:
         print("MemoryOS queued a background correction pass")
 ```
-## Quickstart
-
-1. Start the local beta backend and use its synthetic bootstrap key (see above).
-2. Install the package with `pip install memoryo-sdk`.
-3. Import `Memory` for sync code or `AsyncMemory` for async apps.
-4. Pass your API key as `api_key="mem_live_..."`.
-5. Override `base_url` only for local or self-hosted environments.
-6. Call `add()` with the tenant's `external_user_id`.
-7. Check `result.status` and `result.quota_mode` to handle `blocked` or `passthrough` gracefully.
-8. Call `get()` with the same `external_user_id` to retrieve relevant memories for a query.
-9. Check `retrieve_result.memory_visibility` first; a hold stops this answer. Only then consider eligible context and quota mode.
-10. Call `list()` to page through stored memories.
-11. Call `delete()` to archive or hard-delete a memory.
-12. Call `export()` to download the user export bundle.
-13. All calls raise typed SDK errors on failure.
-14. `401` maps to `AuthError`.
-15. `404` maps to `NotFoundError`.
-16. `429` maps to `RateLimitError`.
-17. Use the `examples/` folder for common integration patterns.
-18. If a domain schema is enabled for the tenant, keep using the same `add()` and `get()` calls.
-
 ## Handling Degraded Responses
 
 ```python

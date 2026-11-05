@@ -1,14 +1,8 @@
-# Explicit service-correction review (local beta)
+# Review service corrections
 
-This API lets an authorized operator explicitly bind a retained service correction
-to its current target. It does not infer a property, target, value, scope or
-authorization from chat. It is separate from verified-user restatement reviews
-and typed preferences. There is no dashboard button or SDK adapter in this change.
+Use this HTTP API to review a proposed correction from a service. Choose the current record it would replace, inspect the preview, and decide whether to apply the change.
 
-Every route requires a **currently active tenant-admin API key**, rechecked in SQL
-on each request. Ordinary read/write keys and bearer/Clerk sessions are not
-supported by this bounded operator interface. Tenant and owner must remain active;
-blocked owners are hidden. Responses use the normal request-ID/timestamp envelope.
+Use an active tenant-admin API key. Each response includes a request ID and timestamp.
 
 ## Discover, preview, decide
 
@@ -42,7 +36,7 @@ blocked owners are hidden. Responses use the normal request-ID/timestamp envelop
    are rejected. The operator must explicitly assert that the selected target is
    the correct business fact: matching category/scope cannot prove field identity.
 
-## Guarantees and limits
+## What happens when you decide
 
 - Both actions recheck current tenant-admin permission, owner, source/event/job
   bindings and the complete preview under SQL locks. A current coherent generic

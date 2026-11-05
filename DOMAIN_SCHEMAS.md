@@ -1,15 +1,10 @@
 # Domain Schemas and Governed State Overlays
 
-> Reference/experimental material: domain overlays are not part of the current
-> local beta journey or a production support commitment. Start with
-> [README.md](README.md) for the current supported entry points.
+This guide covers domain-specific extensions. For a first integration, start with the [quickstart](README.md#quickstart).
 
 ## Why Domain Overlays Exist
 
-Domain overlays are not separate memory databases and are not the primary value proposition of
-MemoryOS. They add typed state and domain policy where a generic proposition is insufficient for a
-real workflow. The governed general engine remains responsible for provenance, claims, conflicts,
-versions, temporal validity, access boundaries, and retrieval.
+Domain overlays add structured fields and domain-specific rules. The general engine handles sources, versions, conflicts and retrieval.
 
 For example, the EdTech overlay can represent learning stage, weak topics, exam goals, and
 forgetting state in a structured profile. Those fields still enter the same governance model: a
@@ -30,7 +25,7 @@ MemoryOS has two plugin layers:
 
 The generic engine always stays on. A domain schema should add useful structured state, not replace the base memory system.
 
-Domain schemas can also project safe portable summaries into `universal_memories` for cross-agent sharing. The full domain state stays in its domain table. See `docs/domain_universal_projection.md` for the consent-aware projection rules.
+Domain schemas can also project summaries into `universal_memories` for consent-aware sharing across agents. The full domain state stays in its domain table.
 
 ## Available Schemas
 

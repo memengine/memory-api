@@ -1,62 +1,26 @@
 # MemoryOS architecture
 
-This describes the current local beta's main paths. It is not a guarantee that
-every experimental route is enabled or qualified. Use [the beta guide](beta/README.md)
-for the current runtime setup.
+Start with the [README](README.md) to integrate your app or the [Docker guide](beta/README.md) to run the service.
 
 ## Components
 
-| Component | Responsibility |
+| Component | Job |
 | --- | --- |
-| FastAPI | Credential checks, tenant/owner context, admission, reads and operator routes |
-| PostgreSQL | Durable jobs/receipts, records, source events, claim revisions, history and outbox |
-| Celery workers | Asynchronous extraction, reconciliation and background processing |
-| Redis | Broker, cache, rate limits and coordination; not the authoritative replay receipt |
-| Qdrant | Derived semantic index synchronized through the outbox |
-| Scoped beta publisher | Dispatches the selected tenant's vector outbox; not full Beat scheduling |
-
-The beta Compose profile runs its own storage/network. LocalStack supplies local
-AWS-compatible endpoints; no real AWS account is required. The app DB role is
-non-superuser. These choices do not make the public test credentials suitable for
-hosting.
+| FastAPI | Authenticates requests and exposes write, read, and operator endpoints |
+| PostgreSQL | Stores records, source events, history, jobs, and pending changes |
+| Celery | Processes writes and background jobs |
+| Redis | Runs the job broker, cache, and rate limits |
+| Qdrant | Indexes records for retrieval |
+| Publisher | Sends committed record changes to the search index |
 
 ## Ingestion and delivery
 
-```text
-Application-authenticated owner + registered service credential + declared scope
-  -> API validation / quota / durable admission
-  -> source event and job
-  -> worker extraction and reconciliation
-  -> accepted state transition OR retained pending correction
-  -> SQL history / claim revision / transactional vector outbox
-  -> scoped publisher and worker synchronize Qdrant
-  -> governed retrieval + provenance + visibility status
-  -> application checks visibility before constructing an answer
-```
-
-Natural-language extraction/relation handling uses models; it is distinct from
-an explicit typed operation. Admitted work is not applied state, and a completed
-job does not alone prove the intended correction occurred. Vector publication
-follows SQL commit. Current SQL and authorization checks remain necessary around
-derived/cached results; no universal lag/availability guarantee is implied.
+Your app sends an update with a user or account ID. MemoryOS creates a job, processes the update, and records its source. It saves accepted changes in PostgreSQL and publishes them to Qdrant. Your app can poll the job and retrieve the current records with their source information.
 
 ## Pending service correction
 
-A retained unresolved correction can withhold the affected category/scope from
-current context. An operator discovers pending items, selects an explicit current
-target, reviews a version-bound preview and submits apply or decline. Current
-permissions, source policy and target bindings are rechecked; apply commits the
-state/history/outbox/audit change atomically. Publication is subsequent.
-
-Use [beta/OPERATOR.md](beta/OPERATOR.md) for exact HTTP contracts, replay and token
-limits. This admin-key interface is separate from dashboard-authenticated writer
-management and from disabled preference-confirmation/interpretation paths.
+When a correction needs review, retrieval can return a notice for the affected context. An operator selects the current record, reviews the proposed change, and applies or declines it. Apply updates the record and its history and queues publication. See the [operator API](beta/OPERATOR.md).
 
 ## Client boundary
 
-API keys are tenant-scoped with separate permissions. The application supplies
-trusted user identity and authorizes which owners/projects a caller may access.
-Source evidence supports attribution, not real-world truth or human authorship.
-SDKs transport visibility; they cannot force applications or models to honor it.
-Historical/domain/consent code outside this beta path is reference material, not
-additional release qualification.
+Your server supplies the authenticated user or account ID. Keep API keys server-side and check the retrieval notice before using the returned context in an answer or action.

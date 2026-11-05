@@ -4,82 +4,9 @@
 npm install memoryo-sdk@0.1.3
 ```
 
-## Local beta and release status
+## Connect to MemoryOS
 
-**0.1.3 is published.** Check your installed version before using these
-additions; older registry versions do not expose all of the same status fields. SDK installation installs a client, not the MemoryOS backend.
-The guided local beta is not production-qualified. Start the backend using the
-[local beta instructions](https://github.com/memengine/memory-api/blob/main/beta/README.md)
-and use its newly generated synthetic credentials. Keep keys server-side.
-The hosted default URL does not establish hosted availability; explicitly set
-the local URL shown below (or your own verified server).
-
-```ts
-import { MemoryOS } from "memoryo-sdk";
-const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!, "http://127.0.0.1:18000");
-const context = await mem.get("What is current?", "application-owned-user-id");
-if (context.memoryVisibility) {
-  throw new Error("Memory context is unavailable or processing; stop this answer.");
-}
-// Only after the visibility check, consider context.items/systemPromptAddition.
-```
-
-This example deliberately stops on any hold. An affected-context hold may leave
-unaffected records, but the application must decide whether they can answer its
-request. `has_context`/`hasContext`, a nonempty prompt, HTTP 200 or `FULL` quota
-alone do not establish safe/current context. Unknown visibility states are rejected.
-Queued ingestion means admitted, not applied; poll the same job and inspect the
-committed result. Retrieval and ingestion may use paid backend providers; this
-snippet is not a cost-free smoke test. No provider calls are made by installing.
-
-Explicit retained service-correction preview/decision remains an operator HTTP
-workflow, documented in the
-[operator guide](https://github.com/memengine/memory-api/blob/main/beta/OPERATOR.md).
-These SDKs do not yet provide service-correction convenience methods or API-key
-writer registration. Local bootstrap supplies synthetic writers; normal writer
-management requires dashboard authentication. Experimental methods below do not
-enable server flags; keep V2 disabled for the local beta.
-
-## Ordered current-turn preparation (default off, source checkout)
-
-`prepareTurn()` registers one incoming user turn before retrieving context in
-one request; it does not poll or synchronously resolve a preference:
-
-```ts
-const context = await mem.prepareTurn({
-  externalUserId: "user_123", conversationId: "chat_456", turnId: "message_789",
-  message: "Python instead",
-});
-// Check context.admission separately from context.memoryVisibility.
-// Accepted registration does not mean processing completed.
-```
-
-Reuse those IDs and the exact transcript on retry; do not also `add()` this
-turn or fall back to an ordinary read after a refusal. Operator rollout gates
-and both read/write permissions are required. This remains disabled by default,
-not a general chat latency/availability solution. See the
-[backend contract](../../docs/turn_preparation.md) for response states,
-withholding, identity, evidence, and release limits. No npm publication or
-version change is implied by this source-checkout API.
-
-## Preference confirmations (internal v2, source checkout)
-
-Retrieval preserves `result.preferenceReviews`; alternatively call
-`mem.listPreferenceReviews(externalUserId)`. Display the returned scope, proposal
-and allowed actions in the existing authenticated chat. Only after an explicit
-user action, your server can call
-`mem.answerPreferenceReview({reviewId: review.id, externalUserId,
-version: review.version, action: "confirm"})`.
-Derive the external user ID from your authenticated session, not the model. Keep
-the API key server-only; never expose confirmation as an autonomous agent tool.
-
-The backend rechecks ownership, source, target/version, permissions and authority.
-Confirmation remains an application assertion at authority 20, not independently
-verified human authority. Source reviews never activate text. V1 remains the
-runtime default. All V2 preference creations/replacements require confirmation,
-including direct statements; the SDK never auto-confirms them. These methods do
-not enable v2 or imply npm publication. See the
-[full contract](../../docs/preference_confirmation_contract.md).
+Follow the [quickstart](../../README.md#quickstart) to start the API and save your first memory. Set `MEMORYOS_API_URL` to your server URL and `MEMORYOS_API_KEY` to your application key. The Docker setup uses `http://127.0.0.1:18000`.
 
 ## Start simple: solo builders and small teams
 
@@ -89,7 +16,7 @@ not enable v2 or imply npm publication. See the
 ```ts
 import { MemoryOS } from "memoryo-sdk";
 
-const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!);
+const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!, process.env.MEMORYOS_API_URL!);
 
 const write = await mem.add(
   [
@@ -147,129 +74,6 @@ change, and the typed question survives zero prompt budget. With discovery off,
 generic reads still exclude declared preferences. No automatic polling or extra
 read-time model call is added. Source changes are not a published package release.
 
-## Opt-in scoped preferences (0.1.2 release candidate)
-
-This source checkout exposes an application-declared contract, **not automatic
-natural-language scope/uncertainty recognition**. These fields are included in
-the `0.1.2` source/tarball, not the published `0.1.1` package. Preparing a tarball
-does not publish a release. The backend feature remains disabled by default; disabled
-requests fail with `409 / PREF_409` rather than falling back to unscoped writes.
-
-```ts
-const applicability = { kind: "context", namespace: "project", key: "release-check" } as const;
-const quote = "For Release Check, use Python for examples.";
-const write = await mem.add({
-  externalUserId: "user_123",
-  messages: [{ role: "user", content: quote }],
-  preferenceClaims: [{
-    propertyKey: "examples.language", value: "Python", applicability,
-    turnIndex: 0, quote,
-  }],
-});
-// Queued, not confirmed storage. Check status separately, not during streaming.
-const context = await mem.get({
-  externalUserId: "user_123", query: "Which language should examples use?",
-  preferenceContext: { applicability, propertyKeys: ["examples.language"] },
-});
-```
-
-Existing positional `add()` and `get()` calls remain supported. Omitted preference
-fields stay omitted. When declarations are supplied, the job processes only those
-declarations, not other facts in the transcript. Property/scope keys must be stable
-and application-owned; never guess unknown scope as global. Declarations stay
-`client_asserted`, authority capped at 20. Do not combine them with `source` or
-`agentId`, or explicit reads with `asOf`. Types are not runtime security checks;
-the backend validates evidence, limits, permissions and authority.
-
-For intentional replacement, use `commitment: "replacement"`, `replacesMemoryId`
-and the exact string at `provenance.preference_version` returned by the backend.
-Tentative uncertainty stays pending without withholding an existing default;
-review actions never activate candidate text. Existing job status
-preserves raw `extractionMetadata` and provides `sourceReviewsCapacityRejected`;
-completion alone does not mean storage. Immediate reads may precede job completion.
-There is no automatic polling, new model call, authority decision, or read-after-write
-guarantee in the SDK. See [the full contract](../../docs/explicit_preference_contract.md).
-
-### An explicitly unresolved current choice
-
-The `0.1.2` types also accept `choiceState: "current_choice_unresolved"`
-with `commitment: "uncertain"`, known applicability, and both existing-winner
-references. This is an application declaration, not automatic interpretation of
-the user's wording. Merely tentative interest is not a reason to withhold a default.
-
-```ts
-// currentId/currentVersion come from an owned backend management or prior
-// retrieval result; never fabricate them from assistant text.
-const undecidedQuote = "For Release Check, I am undecided between my current C++ default and Python.";
-const held = await mem.add({
-  externalUserId: "user_123", messages: [{ role: "user", content: undecidedQuote }],
-  preferenceClaims: [{
-    propertyKey: "examples.language", value: "Python", applicability,
-    turnIndex: 0, quote: undecidedQuote, commitment: "uncertain",
-    choiceState: "current_choice_unresolved",
-    replacesMemoryId: currentId, replacesVersion: currentVersion,
-  }],
-});
-```
-
-The backend validates evidence, exact identity, ownership, currentness, authority
-and version. JavaScript can bypass TypeScript shapes; the SDK does not silently
-repair invalid declarations or strip fields after server rejection. A queued
-write is not confirmed withholding: raw job `extractionMetadata.preference_choices`
-records processing outcomes. Poll only when your workflow explicitly needs that
-confirmation, not automatically while generating an answer.
-
-Tenant `get()` returns exported `PreferenceReadDecision` entries in
-`context.preferenceDecisions` (an empty array from old servers without the field)
-and preserves `context.clarificationQuestion`. The result type's field is optional
-for compatibility with existing consumers constructing result objects. Check it
-independently of `context.hasContext` and `context.items`: unresolved choice can
-be the only information, or accompany usable unrelated facts.
-
-```ts
-const reviewed = await mem.get({
-  externalUserId: "user_123", query: "Which language should examples use?",
-  preferenceContext: { applicability, propertyKeys: ["examples.language"] },
-});
-for (const decision of reviewed.preferenceDecisions ?? []) {
-  // Pass this structured outcome to your existing chat workflow. The SDK
-  // does not render UI, change an agent prompt, choose a value or resolve it.
-  console.log(decision.propertyKey, decision.applicability, decision.state);
-}
-```
-
-Review dismissal/expiry cannot restore a withheld default. A matching
-`keep_current` review can reaffirm an existing valid value; an exact version-bound
-replacement can resolve the choice. Neither raises authority or activates
-candidate text. This capability remains unpublished and disabled by default,
-and does not add automatic semantic admission.
-
-### Validate a release before publication
-
-From `sdk/typescript`, after installing development dependencies:
-
-```bash
-npm run typecheck
-npm run test:package
-```
-
-`test:package` builds via the real `prepack` lifecycle, packs the release, and
-installs that tarball into a disposable consumer offline. It reuses the existing
-contract tests through the public package name in ESM and CommonJS, and checks
-positive/negative preference type fixtures with Node16, NodeNext and Bundler
-resolution. It also rejects unexpected package files or runtime dependencies.
-The disposable consumer and tarball are removed after testing; nothing is published.
-
-For a tarball to hand off, run `npm pack` after those checks. Packing rebuilds
-`dist` so an old local bundle cannot silently become the release. Publication
-also runs the typecheck and installed-package gate in `prepublishOnly`.
-Both lifecycles follow [npm's documented script ordering](https://docs.npmjs.com/cli/v11/using-npm/scripts/).
-
-These are client packaging/contract checks against controlled responses, not
-proof of live extraction accuracy or permission to enable backend features.
-Consumers must upgrade their dependency explicitly; publishing a release does
-not update a deployed assistant automatically.
-
 ## Multi-service mode: support, billing, CRM, and product services
 
 > **For whom:** teams where multiple services can write facts about the same user.
@@ -280,7 +84,7 @@ After registering the service writers in the Tenant Dashboard, teams can pass th
 ```ts
 import { MemoryOS } from "memoryo-sdk";
 
-const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!);
+const mem = new MemoryOS(process.env.MEMORYOS_API_KEY!, process.env.MEMORYOS_API_URL!);
 
 await mem.add(
   [{ role: "assistant", content: "Customer is on the Growth plan." }],
@@ -335,7 +139,7 @@ if (!signature || !verifyMemoryOSWebhook(rawBody, signature, WEBHOOK_SECRET)) {
 ```ts
 import { MemoryOS } from "memoryo-sdk";
 
-const client = new MemoryOS("mem_live_xxx", "https://api.memoryo.dev");
+const client = new MemoryOS(process.env.MEMORYOS_API_KEY!, process.env.MEMORYOS_API_URL!);
 
 const result = await client.add(
   [{ role: "user", content: "I prefer Python and FastAPI" }],
@@ -362,30 +166,6 @@ console.log(memories.items[0]?.content ?? "No memories found");
 - ESM and CJS bundles
 
 > **Security:** Keep tenant API keys on your server. Do not embed a MemoryOS API key in browser JavaScript or any `NEXT_PUBLIC_*` environment variable.
-
-## Quickstart
-
-1. Create an API key in MemoryOS.
-2. Install with `npm install memoryo-sdk`.
-3. Import `MemoryOS`.
-4. Construct the client with your API key.
-5. Override `baseUrl` only for local or self-hosted environments.
-6. Call `add()` with the tenant's `externalUserId`.
-7. Check `result.status` and `result.quotaMode` to handle `blocked` or `passthrough` cleanly.
-8. Call `get()` with the same `externalUserId`.
-9. Use `retrieveResult.systemPromptAddition` only when `retrieveResult.quotaMode !== "PASSTHROUGH"`.
-10. Call `list()` to paginate stored memories.
-
-`add().wasQueued` means extraction was queued, not that storage is complete.
-Use `waitForJob()` and `job.createdMemoryIds` when you need exact created
-records. `wasStored` remains as a deprecated compatibility alias.
-`waitForJob()` continues polling through the backend's retryable `failed`
-state and returns when the job completes or exhausts retries as `dead`.
-
-When retrieval returns `result.clarification`, render its question in your
-existing chat and send the user's selected answer with
-`client.answerClarification(...)`. MemoryOS—not the model—validates identity,
-expiry, and the conflict transition.
 
 ## Source reviews (0.1.1)
 

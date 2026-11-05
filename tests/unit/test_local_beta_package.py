@@ -89,7 +89,7 @@ def test_demo_uses_bound_client_keys_without_dashboard_registration(monkeypatch)
     def call(base, key, method, path, body=None, **kwargs):
         seen.append((key, method, path, body))
         if path == "/v1/memories/add":
-            return {"data": {"job_id": "synthetic-job"}}
+            return {"job_id": "synthetic-job", "status": "queued"}
         if path == "/v1/memories/retrieve":
             return {"data": []}
         if path.startswith("/v1/memories/service-corrections?"):

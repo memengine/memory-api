@@ -1,6 +1,6 @@
 # Contributing to MemoryOS
 
-Start with the [project status](README.md#project-status),
+Start with the [quickstart](README.md#quickstart),
 [development guide](DEVELOPMENT.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
 Documentation, setup reports and small synthetic regressions are welcome; no AWS
 account, paid model key or private dataset is needed for the starter checks.
@@ -26,9 +26,6 @@ there is no promised response time.
 | SDKs | Improve an error/example and verify it using mocked transports. |
 | Governance | Add a focused regression for an existing scope, provenance or replay invariant. |
 | Documentation | Clarify admission versus application, holds or operator review. |
-
-These are ideas, not assigned tickets or requests to add new product features.
-Current delivery priorities are in [ROADMAP.md](ROADMAP.md).
 
 ## Engineering expectations
 

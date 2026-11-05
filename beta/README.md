@@ -1,140 +1,81 @@
-# MemoryO local developer beta
+# Run MemoryOS locally
 
-This package is for a **guided, synthetic-only local beta**, not production.
-It contains the source for the bounded service-fact governance journey and a small
-HTTP client. It does not contain Relay, private acceptance cases, previous research
-reports, real credentials, databases, generated test output or a trained model.
-
-## What is verified
-
-The preceding local candidate demonstrated source-priority updates, pending
-containment/visibility, explicit operator resolution, vector publication and exact
-replay in bounded synthetic journeys. Three Relay roles subsequently passed an
-**exact quotation path** with separate citations. General model answer grounding,
-arbitrary canonical matching, exhaustive security/load behavior, production
-readiness and a technical advantage over competent SQL are not established.
-
-`CANDIDATE.json` identifies that runtime and the equivalent source files. Git may
-normalize line endings; the source hashes explicitly normalize CRLF to LF. This
-is a source package, not a claim that a newly built image has identical dependency
-bytes to the earlier runtime.
-
-Fresh isolated build, non-superuser migrations, atomic bootstrap, authentication,
-workers and the scoped publisher passed local checks on 3 November 2026. The paid
-ingestion example below remains unexecuted after the packaging repair. Earlier
-runtime results do not prove this entire fresh-install journey. Preserve the first
-failure rather than bypassing migration or permission guards. Internet is needed
-for dependency/image downloads.
+Use this guide to start MemoryOS with Docker and connect your first app. You'll need Git, Docker with Compose, and Python 3.12 or newer for the command-line example.
 
 ## Fresh local startup
 
-Requires Docker Compose v2 and Python 3.12+ for the host-side example. Use a fresh
-Git clone and a clean shell. Do not use the root deployment
-Compose files or overwrite an existing environment file.
+From the root of a fresh clone, check that port `18000` and the `memoryos-beta` Docker project name are available. For a second installation, use a different name after `-p`, change the host port in `beta/compose.yml`, and use that port in your API URL.
+
+Create `beta/beta.env` from `beta/beta.env.example`. Keep your existing file if you have one. To save memories in the examples below, set `OPENAI_API_KEY` in this file before starting the API and workers. The examples use your OpenAI account for extraction and embeddings.
+
+Define a short Compose command for your shell.
+
+**PowerShell**
 
 ```powershell
-# Run from the repository root. Refuse to overwrite existing beta credentials.
-$betaContainers = docker ps -aq --filter label=com.docker.compose.project=memoryos-beta
-$betaVolumes = docker volume ls -q --filter label=com.docker.compose.project=memoryos-beta
-if ($betaContainers -or $betaVolumes) { throw 'Existing beta resources: stop and inspect; do not reuse or delete them for a fresh install.' }
-if (Test-Path beta/beta.env) { throw 'Existing beta.env: inspect it before proceeding.' }
-Copy-Item beta/beta.env.example beta/beta.env
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta build api
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta up -d --wait postgres redis
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta up -d qdrant localstack
-# Wait for Qdrant/LocalStack readiness; diagnose failures instead of skipping dependencies.
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta run --rm api alembic upgrade head
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta up -d api worker background
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta exec api python beta/bootstrap.py --create
-# This file contains the newly generated local operator secret: keep it private.
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta cp api:/tmp/beta-credentials.local.json beta/credentials.local.json
+function dc { docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta @args }
 ```
 
-The profile uses dedicated project volumes/network, a non-superuser runtime DB
-role and no shared host DB/broker. Only API `127.0.0.1:18000` is exposed. Check
-`/health` dependency details and `/docs`; HTTP 200 alone is not complete readiness.
-If the host port is occupied, do not stop another service to make this work.
-Change this profile's host mapping and the example's `--base-url` together.
+**Bash**
 
-After bootstrap, put the printed **new tenant ID** in `LOCAL_VECTOR_TENANT_ID` in
-`beta/beta.env`, then start its single-purpose publisher:
-
-```powershell
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta --profile publisher up -d publisher
+```bash
+dc() { docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta "$@"; }
 ```
 
-This dispatches only that tenant's vector outbox, not full Beat/lifecycle schedules.
-Keep V2/experimental flags off. No real AWS account, Clerk or dashboard is required
-for this API-key workflow. Local-only example passwords are not hosted credentials.
-The default provider key is empty; setup does not authorize provider usage.
+Start the dependencies.
+
+```text
+dc build api
+dc up -d --wait postgres redis
+dc up -d qdrant localstack
+dc logs qdrant localstack
+```
+
+Once Qdrant and LocalStack are ready, run the database migrations, start the API and create a test workspace.
+
+```text
+dc run --rm api alembic upgrade head
+dc up -d api worker background
+dc exec api python beta/bootstrap.py --create
+dc cp api:/tmp/beta-credentials.local.json beta/credentials.local.json
+```
+
+Copy the printed tenant ID into `LOCAL_VECTOR_TENANT_ID` in `beta/beta.env`, then start the publisher.
+
+```text
+dc --profile publisher up -d publisher
+```
+
+Open [API health](http://127.0.0.1:18000/health) to check PostgreSQL, Redis and Qdrant. The [interactive API reference](http://127.0.0.1:18000/docs) runs on the same port. Keep the generated credentials file on your server. It contains an operator key and separate Billing and CRM keys for the examples.
+
+You're ready to [save and read your first memory](../README.md#2-save-and-read-a-memory) with Python or Node.js.
 
 ## One two-service integration example
 
-After explicitly approving your own extraction/embedding spend, place your own
-OpenAI key in the ignored `beta/beta.env` and recreate only this beta's app roles
-using the same explicit Compose command. Do not copy a real project environment.
-Do not share that file or include it in a bug report.
+From the repository root, run this example to see how Billing and CRM updates affect the same account. The flag enables the configured provider calls.
 
-```powershell
+```text
 python beta/example.py demo --allow-paid-calls --output beta/journey.local.json
 ```
 
-The one-time bootstrap atomically provisions the synthetic tenant, operator key
-and two read/write-only client keys bound to Billing20/CRM95 writers. This is
-local database initialization, not an API-key bypass of dashboard-only writer
-registration. Keep all three keys private. The example reuses that catalog, creates
-a fresh synthetic owner and declares a global/account scope. It submits Growth,
-INR, Scale and Enterprise source events,
-polling each original job without resubmitting on automatic retry. It then reads
-current context and discovers pending corrections. Client credentials are loaded
-from the private bootstrap file;
-the output does not include newly created raw client keys.
+Open `beta/journey.local.json` to see the account ID, job results, current records, and any corrections waiting for review. The script submits each update once and polls its job until processing finishes. Use a new output filename for another run.
 
-This optional ingestion path uses existing model extraction/relation handling,
-not guaranteed natural-language interpretation. **Enterprise may apply or remain
-pending; the example does not force a pending fixture or silently resolve it.**
-Other failures remain failures. An admitted/completed job is not proof of the
-desired memory transition; inspect stored content, provenance and current results.
+## Review a correction
 
-The final adapter returns exact record quotations/IDs and refuses a visibility
-hold. It is not a general agent, relevance/entailment validator or model answer.
-Applications must supply stable owner/scope/authorization, honor holds before
-inference/actions, and own their business-field identity and answer policy.
+If a correction is pending, use its candidate ID and the current memory ID for the same fact. Inspect the preview before choosing an action.
 
-## Pending correction: explicit operator choice
-
-Use the returned candidate ID and explicitly choose its current target from
-authorized listing/history. Do not infer the target automatically by text/order.
-
-```powershell
+```text
 python beta/example.py preview --owner OWNER --candidate CANDIDATE_UUID --target TARGET_UUID --output beta/preview.local.json
-# Review the actual preview, priorities, target, scope and blockers first.
 python beta/example.py decide --owner OWNER --preview-file beta/preview.local.json --action apply --allow-paid-calls
-# Or explicitly decline without changing current facts:
-# python beta/example.py decide --owner OWNER --preview-file beta/preview.local.json --action decline
 python beta/example.py read --owner OWNER --allow-paid-calls
 ```
 
-Preview is read-only. Apply can call the embedding provider and atomically commits
-SQL history/winner/outbox/audit/candidate closure; publication is subsequent. Exact
-replay returns the original receipt. Current-state preview equality can become
-valid again after identical policy restoration; it is not permanent revocation.
-See [the operator contract](OPERATOR.md) for all limits.
+Use `--action decline` to close the candidate and keep the current record. For request fields and response examples, see the [operator API](OPERATOR.md).
 
-## Feedback and stopping
+## Stop MemoryOS
 
-Record setup time separately from integration time, custom code/workarounds,
-first failure, request/job IDs, supported vs expected behavior, and the work this
-service saved or added compared with your own SQL/CAS/audit service. No willingness
-to adopt/pay is inferred from passing a demo. Stop on a scope/authorization failure
-or if continuing requires a backend workaround; preserve evidence instead of
-retrying away a failure. No private acceptance suite is part of this beta.
+Stop this Docker project and keep its data volumes.
 
-Stop only this fresh beta stack, retaining its volumes:
-
-```powershell
-docker compose --env-file beta/beta.env -f beta/compose.yml -p memoryos-beta down
+```text
+dc --profile publisher down
 ```
-
-Do not use `down -v`, clear someone else's queues, or change existing application
-data. These commands do not deploy a hosted service or authorize paid runs.

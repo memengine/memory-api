@@ -19,21 +19,12 @@ Redact tokens, authorization headers, DSNs and personal data. Do not send databa
 dumps, live credentials or private acceptance inputs. If a secret is exposed,
 revoke/rotate it with its issuer; removing a log or commit does not revoke it.
 
-## Release scope
-
-The current offering is a local developer beta, with published Python 0.1.2 and
-TypeScript 0.1.3 clients. There is no production security certification,
-supported-release maintenance matrix, response SLA or bug-bounty commitment.
-Report issues against older versions too, identifying the exact version.
-Passing tests do not establish that every trust boundary is safe. Report observed
-security violations with the affected version and a minimal reproduction.
-
 Relevant concerns include cross-tenant disclosure, credential theft, authority
 escalation, unauthorized mutation and corruption of provenance/revision history.
 
 ## Deployment and application boundary
 
-- The beta uses public local test passwords. Keep its API on loopback; do not
+- The Docker quickstart uses public local test passwords. Keep its API on loopback; do not
   expose it as a hosted deployment or reuse its keys outside disposable testing.
 - Keep API/provider keys server-side. Never commit `.env`, bootstrap credentials,
   database state or tokens, and do not place admin keys in browser/agent tools.
