@@ -44,9 +44,10 @@ Copy the printed tenant ID into `LOCAL_VECTOR_TENANT_ID` in `beta/beta.env`, the
 
 ```text
 dc --profile publisher up -d publisher
+dc --profile publisher ps -a
 ```
 
-Open [API health](http://127.0.0.1:18000/health) to check PostgreSQL, Redis and Qdrant. The [interactive API reference](http://127.0.0.1:18000/docs) runs on the same port. Keep the generated credentials file on your server. It contains an operator key and separate Billing and CRM keys for the examples.
+Check that `api`, `worker`, `background`, and `publisher` are all running. If a service exited, use `dc --profile publisher logs SERVICE` to see its error. Open [API health](http://127.0.0.1:18000/health) to check PostgreSQL, Redis and Qdrant. The [interactive API reference](http://127.0.0.1:18000/docs) runs on the same port. Keep the generated credentials file on your server. It contains an operator key and separate Billing and CRM keys for the examples.
 
 You're ready to [save and read your first memory](../README.md#2-save-and-read-a-memory) with Python or Node.js.
 

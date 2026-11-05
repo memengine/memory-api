@@ -58,7 +58,7 @@ with Memory(
         messages=[{"role": "user", "content": "This account has subscription plan Growth."}],
     )
     if not saved.job_id:
-        raise RuntimeError(f"Memory was not queued: {saved.status}")
+        raise RuntimeError(f"Memory was not queued: {saved.blocked_reason or saved.status}")
 
     job = memory.wait_for_job(saved.job_id)
     if not job.succeeded:
@@ -109,7 +109,7 @@ const saved = await memory.add({
   externalUserId: "demo-account",
   messages: [{ role: "user", content: "This account has subscription plan Growth." }],
 });
-if (!saved.jobId) throw new Error(`Memory was not queued: ${saved.status}`);
+if (!saved.jobId) throw new Error(`Memory was not queued: ${saved.blockedReason ?? saved.status}`);
 
 const job = await memory.waitForJob(saved.jobId);
 if (!job.succeeded) throw new Error(`Memory processing stopped: ${job.status}`);
