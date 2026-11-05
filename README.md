@@ -23,7 +23,7 @@ Follow the [Docker setup](beta/README.md#fresh-local-startup) to start the API, 
 
 ### 2. Save and read a memory
 
-Choose Python or TypeScript. Run the example from the repository root if you're using the generated test credentials.
+Choose Python or TypeScript. Run the example from the repository root if you're using the generated test credentials. Each run creates a fresh synthetic account so you can repeat the walkthrough. In your app, reuse the account ID for the same customer.
 
 <details open>
 <summary><strong>Python</strong></summary>
@@ -41,6 +41,7 @@ import json
 import os
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from memoryos import Memory
 
@@ -49,12 +50,14 @@ if not api_key:
     credentials = json.loads(Path("beta/credentials.local.json").read_text())
     api_key = credentials["clients"]["billing"]["api_key"]
 
+demo_account = f"demo-account-{uuid4()}"
+
 with Memory(
     api_key=api_key,
     base_url=os.getenv("MEMORYOS_API_URL", "http://127.0.0.1:18000"),
 ) as memory:
     saved = memory.add(
-        external_user_id="demo-account",
+        external_user_id=demo_account,
         messages=[{"role": "user", "content": "This account has subscription plan Growth."}],
     )
     if not saved.job_id:
@@ -67,7 +70,7 @@ with Memory(
     for _ in range(15):
         context = memory.get(
             query="What subscription plan does this account have?",
-            external_user_id="demo-account",
+            external_user_id=demo_account,
         )
         if not context.memory_visibility or context.memory_visibility.state != "processing":
             break
@@ -94,6 +97,7 @@ npm install memoryo-sdk@0.1.3
 Save this as `example.mjs` and run `node example.mjs`.
 
 ```javascript
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { MemoryOS } from "memoryo-sdk";
 
@@ -105,8 +109,9 @@ const memory = new MemoryOS(
   process.env.MEMORYOS_API_URL ?? "http://127.0.0.1:18000",
 );
 
+const demoAccount = `demo-account-${randomUUID()}`;
 const saved = await memory.add({
-  externalUserId: "demo-account",
+  externalUserId: demoAccount,
   messages: [{ role: "user", content: "This account has subscription plan Growth." }],
 });
 if (!saved.jobId) throw new Error(`Memory was not queued: ${saved.blockedReason ?? saved.status}`);
@@ -117,7 +122,7 @@ if (!job.succeeded) throw new Error(`Memory processing stopped: ${job.status}`);
 for (let attempt = 0; attempt < 15; attempt++) {
   const context = await memory.get({
     query: "What subscription plan does this account have?",
-    externalUserId: "demo-account",
+    externalUserId: demoAccount,
   });
   if (!context.memoryVisibility) {
     for (const record of context.items) console.log(record.content);
