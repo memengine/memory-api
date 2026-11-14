@@ -78,6 +78,21 @@ With discovery off, generic reads still exclude declared preferences. No automat
 polling or additional read-time model call is added. This source change is not a
 claim that a new package has been published.
 
+### LangGraph example
+
+[`examples/langgraph_governed_read.py`](examples/langgraph_governed_read.py)
+adapts the [chatbot handler](../../README.md#3-connect-your-agent) into two
+LangGraph nodes. `read_memory` reads MemoryOS with the account ID your app
+supplies. It passes eligible records to `answer`. On a visibility hold, the graph
+returns an unavailable reply without invoking `answer`. Install LangGraph in your
+application; it is not an SDK dependency. The demo runs offline with mocked SDK
+results, a synthetic account ID and a local answer stub:
+
+```bash
+python -m pip install memoryo-sdk langgraph
+python sdk/python/examples/langgraph_governed_read.py
+```
+
 ## Multi-service mode: support, billing, CRM, and product services
 
 > **For whom:** teams where multiple services can write facts about the same user.
