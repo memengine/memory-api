@@ -6,6 +6,25 @@ Building a chatbot or agent? Use MemoryOS to save useful information from conver
 
 [Quickstart](#quickstart) · [Python SDK](sdk/python/README.md) · [TypeScript SDK](sdk/typescript/README.md) · [API docs](https://docs.memoryo.dev/)
 
+When Billing corrects a customer's plan, what should a support agent use in its
+next chat? The [two-source walkthrough](#4-try-it-with-two-sources) lets you
+inspect the current record, its source, and a correction awaiting review.
+MemoryOS is a local developer beta. The walkthrough uses a synthetic account and
+your own OpenAI API key.
+
+## Ways to contribute
+
+- **Try a fresh clone.** Report the first setup step that blocked you, with your
+  OS, tool versions, and sanitized output.
+- **Pick a [good first issue](https://github.com/memengine/memory-api/labels/good%20first%20issue).**
+  Start with setup docs, a small SDK example, or a focused regression.
+- **Share a memory failure from your agent.** Tell us what went stale, which
+  source should win, and how your app handles it today in
+  [GitHub Discussions](https://github.com/memengine/memory-api/discussions/1).
+
+See the [contribution guide](CONTRIBUTING.md) and [development checks](DEVELOPMENT.md)
+for work you can verify without a paid model key.
+
 ## Quickstart
 
 ### 1. Start the API
