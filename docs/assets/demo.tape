@@ -1,6 +1,6 @@
 Output docs/assets/demo.gif
 
-Require python
+Require python3
 Set Shell "bash"
 Set FontSize 25
 Set Width 1440
@@ -10,17 +10,17 @@ Set TypingSpeed 6ms
 Env MEMORYOS_DEMO_MOCK "1"
 
 Hide
-Type "PS1='$ '"
+Type "PS1='$ '; clear"
 Enter
 Sleep 500ms
 Show
 
-Type "python examples/demo/billing_says_growth.py"
+Type "python3 examples/demo/billing_says_growth.py"
 Enter
 Sleep 2s
-Type "python examples/demo/crm_says_scale.py"
+Type "python3 examples/demo/crm_says_scale.py"
 Enter
 Sleep 2s
-Type "python examples/demo/ask_agent.py"
+Type "python3 examples/demo/ask_agent.py"
 Enter
 Sleep 5s

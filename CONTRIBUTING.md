@@ -7,14 +7,14 @@ account, paid model key or private dataset is needed for the starter checks.
 
 ## First passing test run
 
-In Bash with Git and Python 3.12+, run these five commands from the directory
+In Bash with Git and Python 3.12+ with venv support, run these five commands from the directory
 where you want the clone. Dependency installation uses the package registry.
 The tests use synthetic requests and require no provider key or services.
 
 ```bash
 git clone https://github.com/memengine/memory-api.git
 cd memory-api
-python -m venv .venv
+python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m pytest tests/unit/test_local_beta_package.py -q
 ```

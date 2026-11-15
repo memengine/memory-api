@@ -21,4 +21,4 @@ python examples/demo/crm_says_scale.py
 python examples/demo/ask_agent.py
 ```
 
-To regenerate the terminal recording, install [VHS and its dependencies](https://github.com/charmbracelet/vhs#installation), then run `make gif`.
+To regenerate the terminal recording, use Bash with `python3` on PATH. Install [VHS and its dependencies](https://github.com/charmbracelet/vhs#installation), then run `make gif`.
