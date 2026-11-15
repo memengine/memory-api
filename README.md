@@ -6,7 +6,7 @@ Building a chatbot or agent? Use MemoryOS to save useful information from conver
 
 [Quickstart](docs/quickstart.md) · [Python SDK](sdk/python/README.md) · [TypeScript SDK](sdk/typescript/README.md) · [API docs](https://docs.memoryo.dev/)
 
-When Billing corrects a customer's plan, what should a support agent use in its
+When CRM corrects the plan Billing recorded, what should a support agent use in its
 next chat? The [two-source walkthrough](#try-the-no-key-demo) shows
 the current record, its source, and a correction awaiting review.
 

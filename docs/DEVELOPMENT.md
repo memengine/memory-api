@@ -51,6 +51,8 @@ offline suite. Read prerequisites before running integration, provider or load
 checks. Keep generated packages, `dist`, `node_modules` and runtime evidence out
 of a contribution. SDK package verification is distinct from backend integration.
 
+<!-- TODO: Repair the legacy Compose make test recipe separately. The app image can omit pytest, and the full suite needs additional service fixtures and setup beyond the CI selection. -->
+
 ## Service-dependent work
 
 Use the [Docker guide](../beta/README.md) to run the API and workers. The image contains the source, so rebuild your local image after backend changes. `deploy/compose.contributor.yml` provides storage services for development. Use a separate Compose project for each setup.
