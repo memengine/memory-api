@@ -12,7 +12,7 @@ x-app-env: &app-env
 x-app-service: &app-service
   build:
     context: .
-    dockerfile: Dockerfile
+    dockerfile: deploy/Dockerfile
     args:
       INSTALL_DEV_DEPS: ${INSTALL_DEV_DEPS:-false}
   image: memoryos-api:latest

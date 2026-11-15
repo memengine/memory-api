@@ -30,7 +30,7 @@ def _distribution(values: list[float]) -> dict[str, float | int | None]:
 def _events_from_logs() -> list[dict[str, Any]]:
     completed = subprocess.run(
         [
-            "docker", "compose", "-p", "memoryos-scale", "-f", "docker-compose.scale.yml",
+            "docker", "compose", "-p", "memoryos-scale", "-f", "deploy/docker-compose.scale.yml",
             "--env-file", ".env.scale", "logs", "--no-color", "api",
         ],
         capture_output=True,

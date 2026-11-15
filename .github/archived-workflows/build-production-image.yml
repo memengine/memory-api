@@ -46,7 +46,7 @@ jobs:
 
       - name: Build and push immutable image
         run: |
-          docker build \
+          docker build -f deploy/Dockerfile \
             --build-arg INSTALL_DEV_DEPS=false \
             -t "$IMAGE_URI" \
             .

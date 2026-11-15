@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY pyproject.toml /app/
 COPY api /app/api
 RUN python -m pip install --no-cache-dir .
-COPY alembic.ini /app/
+COPY deploy/alembic.ini /app/
 COPY docs/extraction_spec.md /app/docs/extraction_spec.md
 COPY beta/bootstrap.py /app/beta/bootstrap.py
 COPY beta/local_vector_publisher.py /app/local_vector_publisher.py

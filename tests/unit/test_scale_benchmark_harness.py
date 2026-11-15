@@ -112,7 +112,7 @@ def test_scale_launcher_rejects_unsafe_run_id() -> None:
 
 
 def test_scale_compose_allows_benchmark_only_postgres_pool_budget_overrides() -> None:
-    compose = (ROOT / "docker-compose.scale.yml").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/docker-compose.scale.yml").read_text(encoding="utf-8")
 
     assert "DB_POOL_SIZE: ${BENCHMARK_DB_POOL_SIZE:-20}" in compose
     assert "DB_MAX_OVERFLOW: ${BENCHMARK_DB_MAX_OVERFLOW:-30}" in compose
@@ -132,7 +132,7 @@ def test_scale_harness_requires_generation_cache_isolation(monkeypatch: pytest.M
 
 
 def test_scale_compose_labels_postgres_connections_by_process_role() -> None:
-    compose = (ROOT / "docker-compose.scale.yml").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/docker-compose.scale.yml").read_text(encoding="utf-8")
 
     for role in ("api", "celery-scale", "celery-background", "celery-beat"):
         assert f"PGAPPNAME: mosb-role-{role}" in compose
@@ -140,7 +140,7 @@ def test_scale_compose_labels_postgres_connections_by_process_role() -> None:
 
 
 def test_scale_compose_disables_container_local_celery_pidfiles() -> None:
-    compose = (ROOT / "docker-compose.scale.yml").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/docker-compose.scale.yml").read_text(encoding="utf-8")
 
     assert compose.count('"--pidfile="') == 3
     assert "/tmp/celery-background.pid" not in compose
@@ -189,7 +189,7 @@ def test_runtime_telemetry_requires_explicit_benchmark_opt_in(monkeypatch: pytes
 
 
 def test_scale_compose_keeps_runtime_telemetry_off_by_default() -> None:
-    compose = (ROOT / "docker-compose.scale.yml").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/docker-compose.scale.yml").read_text(encoding="utf-8")
     assert "BENCHMARK_RUNTIME_TELEMETRY: ${BENCHMARK_RUNTIME_TELEMETRY:-0}" in compose
 
 

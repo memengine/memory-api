@@ -39,8 +39,8 @@ x-scale-env: &scale-env
 
 x-scale-app: &scale-app
   build:
-    context: .
-    dockerfile: Dockerfile.scale
+    context: ..
+    dockerfile: deploy/Dockerfile.scale
   image: memoryos-api-scale:latest
   environment: *scale-env
   init: true

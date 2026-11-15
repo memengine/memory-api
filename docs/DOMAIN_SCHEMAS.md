@@ -1,6 +1,6 @@
 # Domain Schemas and Governed State Overlays
 
-This guide covers domain-specific extensions. For a first integration, start with the [quickstart](README.md#quickstart).
+This guide covers domain-specific extensions. For a first integration, start with the [quickstart](quickstart.md).
 
 ## Why Domain Overlays Exist
 

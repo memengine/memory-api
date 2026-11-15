@@ -1,6 +1,6 @@
 # MemoryOS architecture
 
-Start with the [README](README.md) to integrate your app or the [Docker guide](beta/README.md) to run the service.
+Start with the [README](../README.md) to integrate your app or the [Docker guide](../beta/README.md) to run the service.
 
 ## Components
 
@@ -19,7 +19,7 @@ Your app sends an update with a user or account ID. MemoryOS creates a job, proc
 
 ## Pending service correction
 
-When a correction needs review, retrieval can return a notice for the affected context. An operator selects the current record, reviews the proposed change, and applies or declines it. Apply updates the record and its history and queues publication. See the [operator API](beta/OPERATOR.md).
+When a correction needs review, retrieval can return a notice for the affected context. An operator selects the current record, reviews the proposed change, and applies or declines it. Apply updates the record and its history and queues publication. See the [operator API](../beta/OPERATOR.md).
 
 ## Client boundary
 

@@ -1,5 +1,5 @@
 # Infrastructure only. No API/worker/Beat, paid providers or cloud provisioning.
-# Always use -f compose.contributor.yml -p memoryos-contributor explicitly.
+# Always use -f deploy/compose.contributor.yml -p memoryos-contributor explicitly.
 services:
   postgres:
     image: postgres:16-alpine

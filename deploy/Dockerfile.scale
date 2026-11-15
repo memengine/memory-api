@@ -17,7 +17,7 @@ WORKDIR ${APP_HOME}
 RUN groupadd --gid 1000 memoryos \
     && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin memoryos
 COPY --from=builder /dist/*.whl /tmp/
-COPY alembic.ini ${APP_HOME}/alembic.ini
+COPY deploy/alembic.ini ${APP_HOME}/alembic.ini
 COPY api/db/migrations ${APP_HOME}/api/db/migrations
 COPY docs/extraction_spec.md ${APP_HOME}/docs/extraction_spec.md
 RUN WHEEL_PATH="$(ls /tmp/*.whl)" \

@@ -22,7 +22,7 @@ your own OpenAI API key.
   source should win, and how your app handles it today in
   [GitHub Discussions](https://github.com/memengine/memory-api/discussions/1).
 
-See the [contribution guide](CONTRIBUTING.md) and [development checks](DEVELOPMENT.md)
+See the [contribution guide](CONTRIBUTING.md) and [development checks](docs/DEVELOPMENT.md)
 for work you can verify without a paid model key.
 
 ## Quickstart
@@ -215,4 +215,4 @@ Billing says a test customer is on Growth. CRM reports a correction to Scale. Wh
 
 Run the [Billing and CRM walkthrough](beta/README.md#one-two-service-integration-example) to see what MemoryOS returns for the same account, which source supplied the current record, and whether a correction needs review before your agent can use the affected context.
 
-[Contributing](CONTRIBUTING.md) · [Development](DEVELOPMENT.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Contributing](CONTRIBUTING.md) · [Development](docs/DEVELOPMENT.md) · [Security](SECURITY.md) · [MIT license](LICENSE)

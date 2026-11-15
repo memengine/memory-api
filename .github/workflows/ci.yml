@@ -72,7 +72,7 @@ jobs:
           OPENAI_API_KEY: test-key-for-unit-tests
           GEMINI_API_KEY: test-key-for-unit-tests
           REDIS_URL: redis://localhost:6379/0
-        run: alembic upgrade head
+        run: alembic -c deploy/alembic.ini upgrade head
 
       - name: Run unit tests
         env:

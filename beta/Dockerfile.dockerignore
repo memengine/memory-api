@@ -1,7 +1,7 @@
 # Dockerfile-specific allowlist: never send credentials/evidence to the builder.
 **
 !pyproject.toml
-!alembic.ini
+!deploy/alembic.ini
 !api/
 !api/**
 !docs/
