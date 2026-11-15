@@ -49,7 +49,7 @@ dc --profile publisher ps -a
 
 Check that `api`, `worker`, `background`, and `publisher` are all running. If a service exited, use `dc --profile publisher logs SERVICE` to see its error. Open [API health](http://127.0.0.1:18000/health) to check PostgreSQL, Redis and Qdrant. The [interactive API reference](http://127.0.0.1:18000/docs) runs on the same port. Keep the generated credentials file on your server. It contains an operator key and separate Billing and CRM keys for the examples.
 
-You're ready to [save and read your first memory](../README.md#2-save-and-read-a-memory) with Python or Node.js.
+You're ready to [save and read your first memory](../docs/quickstart.md#2-save-and-read-a-memory) with Python or Node.js.
 
 ## One two-service integration example
 

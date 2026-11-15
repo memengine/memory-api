@@ -95,3 +95,7 @@ docs/*
 !docs/assets/demo.tape
 !docs/assets/demo.gif
 examples/demo/.scenario.json
+!docs/quickstart.md
+!docs/connect-your-agent.md
+!docs/release-notes-v0.1.x.md
+!docs/REPO_SETTINGS.md

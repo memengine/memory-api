@@ -21,6 +21,34 @@ Your app sends an update with a user or account ID. MemoryOS creates a job, proc
 
 When a correction needs review, retrieval can return a notice for the affected context. An operator selects the current record, reviews the proposed change, and applies or declines it. Apply updates the record and its history and queues publication. See the [operator API](../beta/OPERATOR.md).
 
+## Write, retrieve, and review
+
+```mermaid
+flowchart LR
+    App[Application] -->|Write| API[FastAPI]
+    API -->|Source event and job| PG[(PostgreSQL)]
+    API -->|Queue| Worker[Celery extraction and conflict resolution]
+    Worker -->|Accepted memory, history, outbox| PG
+    Worker -->|Unresolved correction| Pending[Pending candidate in PostgreSQL]
+    PG -->|Committed outbox| Publisher[Vector publisher]
+    Publisher --> Index[(Qdrant)]
+    App -->|Retrieve| Read[Retriever]
+    Index -->|Candidate IDs| Read
+    PG -->|Current records and source claims| Read
+    Pending -->|Visibility check| Read
+    Read -->|Records and visibility| App
+    Pending -->|Preview and decide| Operator[Operator API]
+    Operator -->|Apply or decline| PG
+```
+
+In [the database models](../api/db/models.py), `memory_source_events` stores
+source event IDs, writer bindings, and scope. `memory_versions` and
+`memory_claim_revisions` track revisions. The
+[retriever](../api/services/retriever.py) checks current source claims and
+pending corrections before returning context. The
+[operator service](../api/services/service_correction_service.py) checks the
+candidate and target versions before applying a correction.
+
 ## Client boundary
 
 Your server supplies the authenticated user or account ID. Keep API keys server-side and check the retrieval notice before using the returned context in an answer or action.

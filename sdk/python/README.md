@@ -80,18 +80,7 @@ claim that a new package has been published.
 
 ### LangGraph example
 
-[`examples/langgraph_governed_read.py`](examples/langgraph_governed_read.py)
-adapts the [chatbot handler](../../README.md#3-connect-your-agent) into two
-LangGraph nodes. `read_memory` reads MemoryOS with the account ID your app
-supplies. It passes eligible records to `answer`. On a visibility hold, the graph
-returns an unavailable reply without invoking `answer`. Install LangGraph in your
-application; it is not an SDK dependency. The demo runs offline with mocked SDK
-results, a synthetic account ID and a local answer stub:
-
-```bash
-python -m pip install memoryo-sdk langgraph
-python sdk/python/examples/langgraph_governed_read.py
-```
+See the [LangGraph governed read](../../examples/langgraph/README.md) for the mock run and the read-before-answer pattern.
 
 ## Multi-service mode: support, billing, CRM, and product services
 
