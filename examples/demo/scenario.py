@@ -8,7 +8,7 @@ from pathlib import Path
 
 STATE = Path(__file__).with_name(".scenario.json")
 QUESTION = "What subscription plan is this account on?"
-FALLBACK = "I can't confirm your subscription plan while the correction is under review."
+FALLBACK = "I can't confirm your plan while the correction is under review."
 
 
 def start():
@@ -56,4 +56,3 @@ def save(state):
 def show(label, record):
     print(f"{label}: {record['content']}")
     print(f"source_event_id: {record['source_event_id']}")
-

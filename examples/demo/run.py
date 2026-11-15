@@ -13,4 +13,3 @@ for script in ("billing_says_growth.py", "crm_says_scale.py", "ask_agent.py"):
         env={**os.environ, "MEMORYOS_DEMO_MOCK": "1"},
         check=True,
     )
-
