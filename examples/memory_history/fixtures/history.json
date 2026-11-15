@@ -1,0 +1,23 @@
+[
+  {
+    "version_number": 1,
+    "content": "Customer is on the monthly Team plan.",
+    "change_type": "created",
+    "change_reason": null,
+    "created_at": "2026-10-02T09:15:00Z"
+  },
+  {
+    "version_number": 2,
+    "content": "Customer switched to the annual Team plan.",
+    "change_type": "manual_edit",
+    "change_reason": "billing webhook: plan change",
+    "created_at": "2026-10-28T11:03:00Z"
+  },
+  {
+    "version_number": 3,
+    "content": "Customer is on the annual Team plan, renewing 2027-03-01.",
+    "change_type": "conflict_update",
+    "change_reason": "renewal date confirmed",
+    "created_at": "2026-11-04T16:40:00Z"
+  }
+]

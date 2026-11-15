@@ -159,6 +159,8 @@ for (let attempt = 0; attempt < 15; attempt++) {
 
 A successful read prints the saved plan. The example waits for the write job and briefly retries retrieval while indexing catches up. A correction that needs review can be resolved through the [operator API](beta/OPERATOR.md).
 
+To look at one stored memory and its revision history without the SDK, run the read-only [memory history example](examples/memory_history/README.md). It runs against bundled fixtures with no server, or against a live API when `MEMORYOS_API_KEY` is set.
+
 ### 3. Connect your agent
 
 Start with one question your chatbot already handles, such as “What plan is my account on?” Add the MemoryOS read in your **server-side chat handler**, after you authenticate the customer and **before** you call your model. Get the account ID from your authenticated session or database. Use that same ID when saving account updates.
