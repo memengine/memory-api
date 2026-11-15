@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-COPY pyproject.toml /app/
+COPY LICENSE pyproject.toml /app/
 COPY api /app/api
 RUN python -m pip install --no-cache-dir .
 COPY deploy/alembic.ini /app/

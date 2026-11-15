@@ -6,7 +6,7 @@ WORKDIR /build
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
-COPY pyproject.toml ./
+COPY pyproject.toml LICENSE ./
 COPY api ./api
 RUN python -m pip install --upgrade pip build \
     && python -m build --wheel --outdir /dist
