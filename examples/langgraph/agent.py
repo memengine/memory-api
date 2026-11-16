@@ -7,13 +7,14 @@ reply and ends without invoking the answer node.
 
 LangGraph is an application dependency here, not an SDK dependency:
 
-    python -m pip install memoryo-sdk langgraph
-    python sdk/python/examples/langgraph_governed_read.py
+    python -m pip install memoryo-sdk==0.1.2 langgraph
+    MEMORYOS_DEMO_MOCK=1 python examples/langgraph/agent.py
 
 The demo runs offline with mocked SDK responses, a synthetic account ID and a
 local answer stub. In your app, pass ``Memory(api_key=..., base_url=...)`` and
 your model wrapper to ``build_graph``.
 """
+import os
 from collections.abc import Callable
 from typing import Any, TypedDict
 
@@ -119,6 +120,9 @@ def run_demo(name: str, result: RetrieveResult) -> None:
 
 
 def main() -> None:
+    if os.getenv("MEMORYOS_DEMO_MOCK") != "1":
+        raise SystemExit("Set MEMORYOS_DEMO_MOCK=1 to run the offline fixture.")
+    print("[MemoryOS mock mode]")
     plan_record = MemoryResult(
         id="mem_synthetic_plan",
         content="The account is on the Growth plan.",
