@@ -35,10 +35,3 @@ build/
 infrastructure/terraform/backend*.hcl
 edge-tmp/
 tmp/
-
-# Local environments, demo state, and beta credentials
-.venv/
-venv/
-beta/beta.env
-beta/*.local.json
-examples/demo/.scenario.json

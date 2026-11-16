@@ -91,7 +91,7 @@ jobs:
       - name: Build image
         if: ${{ env.BUILD_IMAGE == 'true' }}
         run: |
-          docker build -f deploy/Dockerfile --no-cache \
+          docker build --no-cache \
             --build-arg INSTALL_DEV_DEPS=false \
             -t "$IMAGE_URI" \
             -t "$LATEST_URI" \

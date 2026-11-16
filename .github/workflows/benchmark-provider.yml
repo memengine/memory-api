@@ -54,7 +54,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MEMORYOS_HOLDOUT_APPROVAL: ""
-        run: alembic -c deploy/alembic.ini upgrade head
+        run: alembic upgrade head
       - name: Run explicitly approved PROVIDER benchmark tier
         env: *provider-env
         run: python -m benchmarks.internal.orchestrator --tier provider --approve-provider

@@ -49,7 +49,7 @@ jobs:
           SECRET_KEY: integration-secret-key
           ADMIN_SECRET: integration-admin-secret-32-chars
           MEMORYOS_HOLDOUT_APPROVAL: ""
-        run: alembic -c deploy/alembic.ini upgrade head
+        run: alembic upgrade head
       - name: Start required Celery workers
         env: *benchmark-env
         run: |

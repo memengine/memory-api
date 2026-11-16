@@ -1,7 +1,7 @@
 # Contributing to MemoryOS
 
 Start with the [quickstart](README.md#quickstart),
-[development guide](docs/DEVELOPMENT.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
+[development guide](DEVELOPMENT.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
 Documentation, setup reports and small synthetic regressions are welcome; no AWS
 account, paid model key or private dataset is needed for the starter checks.
 
@@ -20,14 +20,14 @@ python3 -m venv .venv
 ```
 
 For native Windows commands and broader checks, see the
-[development guide](docs/DEVELOPMENT.md).
+[development guide](DEVELOPMENT.md).
 
 ## Your first contribution
 
 1. Choose an [open issue](https://github.com/memengine/memory-api/issues) or
    describe the problem in a new one. Small typo fixes can go straight to a PR.
 2. Fork, clone and create a focused branch.
-3. Follow [DEVELOPMENT.md](docs/DEVELOPMENT.md); start only services your change needs.
+3. Follow [DEVELOPMENT.md](DEVELOPMENT.md); start only services your change needs.
 4. Make one coherent change and run the relevant checks.
 5. Open a PR explaining the problem, resulting behavior, verification and limits.
 
@@ -61,7 +61,7 @@ See the [good first issue drafts](.github/seed-issues/) for focused changes with
   or someone else's experiment. Private acceptance material is not contributor input.
 
 Run focused checks appropriate to the change; see
-[DEVELOPMENT.md#test-paths](docs/DEVELOPMENT.md#test-paths) and
+[DEVELOPMENT.md#test-paths](DEVELOPMENT.md#test-paths) and
 [CI](.github/workflows/ci.yml). Documentation changes need link/command review and
 `git diff --check`, not a broad backend evaluation. Report unrun checks and the
 first failure honestly. Mock checks do not prove production behavior.

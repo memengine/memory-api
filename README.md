@@ -19,7 +19,7 @@ the current record, its source, and a correction awaiting review.
 - **Share a memory failure from your agent.** Tell us what went stale, which
   source should win, and how your app handles it today in a [memory failure report](https://github.com/memengine/memory-api/issues/new?template=memory_failure_report.md).
 
-See the [contribution guide](CONTRIBUTING.md) and [development checks](docs/DEVELOPMENT.md)
+See the [contribution guide](CONTRIBUTING.md) and [development checks](DEVELOPMENT.md)
 for work you can verify without a paid model key.
 
 ## Try the no-key demo
@@ -42,4 +42,4 @@ See [examples](examples/README.md) for individual commands and the LangGraph exa
 
 [Start the API and save a memory with Python or TypeScript](docs/quickstart.md), then [connect your agent](docs/connect-your-agent.md). The Docker beta requires `OPENAI_API_KEY` for extraction and embeddings. For the API version of the two-source scenario, follow the [Billing and CRM walkthrough](beta/README.md#one-two-service-integration-example).
 
-[Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)

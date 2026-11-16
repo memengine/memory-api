@@ -18,7 +18,7 @@ def percentile(values: list[float], fraction: float) -> float | None:
 
 def events_from_logs() -> list[dict[str, Any]]:
     completed = subprocess.run(
-        ["docker", "compose", "-p", "memoryos-scale", "-f", "deploy/docker-compose.scale.yml",
+        ["docker", "compose", "-p", "memoryos-scale", "-f", "docker-compose.scale.yml",
          "--env-file", ".env.scale", "logs", "--no-color", "api", "celery-scale",
          "celery-background", "celery-beat"],
         capture_output=True, text=True, check=False,

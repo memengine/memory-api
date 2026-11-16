@@ -1,6 +1,6 @@
 # Local contributor development
 
-Use the [Docker guide](../beta/README.md) to run the API. Follow the steps below to install development tools and run tests.
+Use the [Docker guide](beta/README.md) to run the API. Follow the steps below to install development tools and run tests.
 
 ## Install for code changes
 
@@ -19,7 +19,7 @@ Windows PowerShell:
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
 if (Test-Path -LiteralPath .env) { throw 'Existing .env found; inspect it instead of overwriting.' }
-Copy-Item -LiteralPath deploy/contributor.env.example -Destination .env
+Copy-Item -LiteralPath contributor.env.example -Destination .env
 .\.venv\Scripts\python.exe -B -m pytest tests/unit/test_sdk_preferences.py tests/unit/test_domain_schema_registry.py -q -p no:cacheprovider
 ```
 
@@ -28,7 +28,7 @@ macOS/Linux:
 ```bash
 .venv/bin/python -m pip install -e '.[dev]'
 test ! -e .env || { echo 'Existing .env found; stop and inspect it.'; exit 1; }
-cp deploy/contributor.env.example .env
+cp contributor.env.example .env
 .venv/bin/python -B -m pytest tests/unit/test_sdk_preferences.py tests/unit/test_domain_schema_registry.py -q -p no:cacheprovider
 ```
 
@@ -44,18 +44,16 @@ Do not copy production settings or add model keys just to run mocked tests.
 | Python SDK | Root virtualenv: `python -m pytest tests/unit/test_sdk_memory_visibility.py tests/unit/test_sdk_preferences.py -q` |
 | TypeScript SDK | In `sdk/typescript`: `npm ci`, `npm run typecheck`, `npm run test:package` |
 | Backend | Focused regressions for the changed invariant; service-dependent checks need disposable resources |
-| CI parity | Read [.github/workflows/ci.yml](../.github/workflows/ci.yml) for exact commands |
+| CI parity | Read [.github/workflows/ci.yml](.github/workflows/ci.yml) for exact commands |
 
 Replace `python` with your virtualenv executable. The whole test tree is not an
 offline suite. Read prerequisites before running integration, provider or load
 checks. Keep generated packages, `dist`, `node_modules` and runtime evidence out
 of a contribution. SDK package verification is distinct from backend integration.
 
-<!-- TODO: Repair the legacy Compose make test recipe separately. The app image can omit pytest, and the full suite needs additional service fixtures and setup beyond the CI selection. -->
-
 ## Service-dependent work
 
-Use the [Docker guide](../beta/README.md) to run the API and workers. The image contains the source, so rebuild your local image after backend changes. `deploy/compose.contributor.yml` provides storage services for development. Use a separate Compose project for each setup.
+Use the [Docker guide](beta/README.md) to run the API and workers. The image contains the source, so rebuild your local image after backend changes. `compose.contributor.yml` provides storage services for development. Use a separate Compose project for each setup.
 
 ## Troubleshooting
 

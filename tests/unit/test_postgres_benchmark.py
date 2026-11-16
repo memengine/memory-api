@@ -111,7 +111,7 @@ def test_postgres_observer_derives_disposable_compose_credentials(monkeypatch) -
 
     url = database_url_from_compose(
         project="memoryos-scale",
-        compose_file=Path("deploy/docker-compose.scale.yml"),
+        compose_file=Path("docker-compose.scale.yml"),
         env_file=Path(".env.scale"),
     )
 

@@ -1,6 +1,6 @@
 # MemoryOS architecture
 
-Start with the [README](../README.md) to integrate your app or the [Docker guide](../beta/README.md) to run the service.
+Start with the [README](README.md) to integrate your app or the [Docker guide](beta/README.md) to run the service.
 
 ## Components
 
@@ -19,7 +19,7 @@ Your app sends an update with a user or account ID. MemoryOS creates a job, proc
 
 ## Pending service correction
 
-When a correction needs review, retrieval can return a notice for the affected context. An operator selects the current record, reviews the proposed change, and applies or declines it. Apply updates the record and its history and queues publication. See the [operator API](../beta/OPERATOR.md).
+When a correction needs review, retrieval can return a notice for the affected context. An operator selects the current record, reviews the proposed change, and applies or declines it. Apply updates the record and its history and queues publication. See the [operator API](beta/OPERATOR.md).
 
 ## Write, retrieve, and review
 
@@ -41,12 +41,12 @@ flowchart LR
     Operator -->|Apply or decline| PG
 ```
 
-In [the database models](../api/db/models.py), `memory_source_events` stores
+In [the database models](api/db/models.py), `memory_source_events` stores
 source event IDs, writer bindings, and scope. `memory_versions` and
 `memory_claim_revisions` track revisions. The
-[retriever](../api/services/retriever.py) checks current source claims and
+[retriever](api/services/retriever.py) checks current source claims and
 pending corrections before returning context. The
-[operator service](../api/services/service_correction_service.py) checks the
+[operator service](api/services/service_correction_service.py) checks the
 candidate and target versions before applying a correction.
 
 ## Client boundary

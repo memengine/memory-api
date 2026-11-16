@@ -31,7 +31,7 @@ def require_disposable_stack_ready(environment: dict[str, str]) -> None:
         raise RuntimeError("Disposable scale marker is required before checking services.")
     command = [
         "docker", "compose", "-p", "memoryos-scale",
-        "-f", "deploy/docker-compose.scale.yml", "--env-file", ".env.scale",
+        "-f", "docker-compose.scale.yml", "--env-file", ".env.scale",
         "ps", "--format", "json",
     ]
     completed = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, check=False)
