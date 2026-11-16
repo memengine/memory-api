@@ -23,14 +23,13 @@ def main():
     project = f"memoryos-gif-{uuid4().hex[:10]}"
     compose = (
         "compose", "-p", project, "-f", "beta/compose.yml",
-        "-f", "examples/demo/compose.recording.yml",
+        "-f", "examples/recording/compose.recording.yml",
     )
-    docker("build", "-f", "examples/demo/vhs.Dockerfile", "-t", VHS, ".")
+    docker("build", "-f", "examples/recording/vhs.Dockerfile", "-t", VHS, ".")
     with TemporaryDirectory(prefix="memoryos-recording-") as directory:
         scratch = Path(directory)
         assets = scratch / "assets"
         assets.mkdir()
-        shutil.copyfile(ROOT / "docs/assets/demo.tape", assets / "demo.tape")
         publisher = None
         try:
             docker(*compose, "build", "api")
@@ -55,8 +54,8 @@ def main():
             )
             # Prime the worker and vector index on a separate synthetic account.
             docker(*runner, "-e", "MEMORYOS_DEMO_MOCK=1", "--entrypoint", "python",
-                   VHS, "examples/demo/1_write.py")
-            docker(*runner, VHS, "docs/assets/demo.tape")
+                   VHS, "examples/recording/1_write.py")
+            docker(*runner, VHS, "examples/recording/demo.tape")
             state = json.loads((scratch / "recording-state.local.json").read_text())
             if not state.get("recorded"):
                 raise RuntimeError("The fifth scene did not complete. The checked-in GIF was preserved.")

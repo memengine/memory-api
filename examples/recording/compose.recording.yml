@@ -8,7 +8,7 @@ x-demo: &demo
     COHERE_API_KEY: ""
   image: memoryos-api:local-recording
   volumes:
-    - ../examples/demo/local_provider.py:/app/local_provider.py:ro
+    - ../examples/recording/local_provider.py:/app/local_provider.py:ro
 
 services:
   api:

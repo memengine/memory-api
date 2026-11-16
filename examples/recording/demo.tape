@@ -13,22 +13,22 @@ Set TypingSpeed 40ms
 Env MEMORYOS_DEMO_MOCK "1"
 Env PROMPT_COMMAND "PS1='$ '"
 
-Type "python examples/demo/1_write.py"
+Type "python examples/recording/1_write.py"
 Enter
 Sleep 3s
 
-Type "python examples/demo/2_conflict.py"
+Type "python examples/recording/2_conflict.py"
 Enter
 Sleep 3s
 
-Type "python examples/demo/3_ask_agent.py"
+Type "python examples/recording/3_ask_agent.py"
 Enter
 Sleep 3s
 
-Type "python examples/demo/4_operator_resolve.py"
+Type "python examples/recording/4_operator_resolve.py"
 Enter
 Sleep 3s
 
-Type "python examples/demo/5_history.py"
+Type "python examples/recording/5_history.py"
 Enter
 Sleep 3.6s

@@ -30,9 +30,9 @@ With Python 3.12+ and Make, run this from the repository root.
 make demo
 ```
 
-Billing records Growth. CRM proposes Scale. While the correction awaits review, the agent withholds the plan answer. The demo uses a synthetic account, a deterministic mock extractor and embedder, and local fixture state. It needs no API keys, containers, or paid calls.
+Billing records Growth. CRM proposes Scale. While the correction awaits review, the agent withholds the plan answer. This is a local simulation with no server. It uses a synthetic account, mock extraction and embeddings, and a local state file. It needs no API keys, containers, or paid calls.
 
-The recording shows the full correction and review flow against a local API with mock model providers.
+For maintainers, `make gif` regenerates this recording by running the real MemoryOS API locally with mocked model calls. See the [recording guide](examples/recording/README.md).
 
 ![Terminal recording of the MemoryOS API correction and review flow](docs/assets/demo.gif)
 
