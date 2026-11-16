@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,12 +18,16 @@ CREDENTIALS = DATA / "recording-credentials.local.json"
 API = "http://127.0.0.1:8000"
 QUESTION = "What subscription plan is this account on?"
 CORRECTIONS = "/v1/memories/service-corrections"
-COLORS = {"ok": 32, "warning": 33, "review": 31, "label": 36, "note": 90}
+COLORS = {"label": "36", "value": "38;2;255;255;255", "ok": "32", "warning": "33", "note": "38;2;160;168;200"}
 HTTP = build_opener(ProxyHandler({}))
 
 
-def show(label, value, color="label"):
-    print(f"  \033[{COLORS[color]}m{label:<17}\033[0m {value}")
+def show(label, value, color="value"):
+    print(f"  \033[{COLORS['label']}m{label:<17}\033[0m \033[{COLORS[color]}m{value}\033[0m")
+
+
+def short_id(value):
+    return f"{value[:12]}…{value[-4:]}" if len(value) > 17 else value
 
 
 class Demo:
@@ -113,11 +118,12 @@ def write():
     demo.save()
     show("MemoryOS", "[local API with mock model providers]", "note")
     show("record", record["content"])
-    show("source", source(record)["service"])
-    show("source event", source(record)["event_id"])
+    show("source", short_id(source(record)["service"]))
+    show("source event", short_id(source(record)["event_id"]))
     show("evidence", record["metadata"]["provenance"]["evidence"][0]["reference"])
     show("is_archived", record["is_archived"])
     show("job status", job["status"], "ok")
+    print()
 
 
 def conflict():
@@ -131,9 +137,10 @@ def conflict():
     demo.save()
     show("current record", preview["target_content"])
     show("correction", preview["candidate_content"], "warning")
-    show("source event", preview["source_external_event_id"])
+    show("source event", short_id(preview["source_external_event_id"]))
     show("authority basis", preview["authority_basis"], "note")
-    show("operator actions", ", ".join(preview["actions"]), "review")
+    show("operator actions", ", ".join(preview["actions"]), "warning")
+    print()
 
 
 def ask():
@@ -148,6 +155,8 @@ def ask():
     show("scope", visibility["scope"])
     show("returned records", len(result["data"]), "note")
     show("degraded read", result["is_degraded"], "warning")
+    show("agent", "fallback: \"I can't confirm your plan yet.\"", "warning")
+    print()
 
 
 def resolve():
@@ -172,15 +181,16 @@ def resolve():
     demo.state["audit"] = {"action": audit["action"], "created_at": audit["created_at"]}
     demo.save()
     show("target", preview["target_content"])
-    show("target event", source(previous)["event_id"])
+    show("target event", short_id(source(previous)["event_id"]))
     show("candidate", preview["candidate_content"], "warning")
-    show("candidate event", preview["source_external_event_id"])
+    show("candidate event", short_id(preview["source_external_event_id"]))
     show("operator action", decision["action"], "ok")
     show("candidate status", decision["candidate_status"], "ok")
     show("old is_archived", previous["is_archived"])
     show("new is_archived", current["is_archived"])
     show("audit action", audit["action"], "ok")
     show("audit timestamp", audit["created_at"], "note")
+    print()
 
 
 def history():
@@ -191,13 +201,17 @@ def history():
     record, = result["data"]
     show("account", demo.owner)
     for key, saved in (("original", original), ("replacement", current)):
-        show("source", source(saved)["service"])
-        show("source event", source(saved)["event_id"])
+        show("source", short_id(source(saved)["service"]))
+        show("source event", short_id(source(saved)["event_id"]))
         for version in sorted(demo.history(key), key=lambda row: row["version_number"]):
             show(f"version {version['version_number']}", f"{version['change_type']} / {version['change_reason']}", "note")
     show("audit action", demo.state["audit"]["action"], "note")
     show("Q", QUESTION)
     show("agent quotes", record["content"], "ok")
-    show("cites event", source(record)["event_id"])
+    plan = re.fullmatch(r"Correction: (\w+) replaces the prior tier\.", record["content"])
+    if plan is None:
+        raise RuntimeError("The retrieved record does not match the demo plan format.")
+    show("answer", plan[1], "ok")
+    show("cites event", short_id(source(record)["event_id"]))
     demo.state["recorded"] = True
     demo.save()

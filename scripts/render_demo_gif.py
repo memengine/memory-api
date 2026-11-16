@@ -60,13 +60,13 @@ def main():
             state = json.loads((scratch / "recording-state.local.json").read_text())
             if not state.get("recorded"):
                 raise RuntimeError("The fifth scene did not complete. The checked-in GIF was preserved.")
-            # VHS renders its GIF at the encoder's rate. Resample to 12 fps.
+            # VHS renders its GIF at the encoder's rate. Resample to 10 fps.
             docker("run", "--rm", "--network", "none",
                    "--mount", f"type=bind,src={assets},dst=/assets", "--workdir", "/assets",
                    "--entrypoint", "ffmpeg", VHS, "-v", "error", "-i", "demo.gif",
-                   "-filter_complex", "fps=12,split[a][b];[a]palettegen[p];[b][p]paletteuse",
-                   "-loop", "0", "demo-12fps.gif")
-            gif = assets / "demo-12fps.gif"
+                   "-filter_complex", "fps=10,split[a][b];[a]palettegen[p];[b][p]paletteuse",
+                   "-loop", "0", "demo-10fps.gif")
+            gif = assets / "demo-10fps.gif"
             if not 0 < gif.stat().st_size < 6_000_000:
                 raise RuntimeError("The recording must be under 6 MB.")
             shutil.copyfile(gif, ROOT / "docs/assets/demo.gif")
