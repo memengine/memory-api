@@ -21,4 +21,10 @@ python examples/demo/crm_says_scale.py
 python examples/demo/ask_agent.py
 ```
 
-To regenerate the terminal recording, use Bash with `python3` on PATH. Install [VHS and its dependencies](https://github.com/charmbracelet/vhs#installation), then run `make gif`.
+## README recording
+
+With Docker Compose running, use `make gif` from the repository root. It starts a
+disposable beta, runs the five numbered scripts against its API, records them
+with VHS, and removes the temporary stack. A local model fixture supplies
+extraction and embeddings. Storage, review, visibility, history, and audit
+fields come from MemoryOS responses.

@@ -32,7 +32,9 @@ make demo
 
 Billing records Growth. CRM proposes Scale. While the correction awaits review, the agent withholds the plan answer. The demo uses a synthetic account, a deterministic mock extractor and embedder, and local fixture state. It needs no API keys, containers, or paid calls.
 
-![Terminal recording of the Billing and CRM mock demo](docs/assets/demo.gif)
+The recording shows the full correction and review flow against a local API with mock model providers.
+
+![Terminal recording of the MemoryOS API correction and review flow](docs/assets/demo.gif)
 
 See [examples](examples/README.md) for individual commands and the LangGraph example.
 

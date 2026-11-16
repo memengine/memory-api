@@ -1,0 +1,30 @@
+x-demo: &demo
+  env_file: !override [beta.env.example]
+  environment:
+    MEMORYOS_DEMO_MOCK: "1"
+    OPENAI_API_KEY: local-demo-placeholder
+    GEMINI_API_KEY: ""
+    ANTHROPIC_API_KEY: ""
+    COHERE_API_KEY: ""
+  image: memoryos-api:local-recording
+  volumes:
+    - ../examples/demo/local_provider.py:/app/local_provider.py:ro
+
+services:
+  api:
+    <<: *demo
+    command: ["python", "/app/local_provider.py", "api"]
+    ports: !reset []
+  worker:
+    <<: *demo
+    command: ["python", "/app/local_provider.py", "worker", "free-extraction", "starter-extraction"]
+  background:
+    <<: *demo
+    command: ["python", "/app/local_provider.py", "worker", "celery", "reembedding", "dead-letter"]
+  publisher:
+    <<: *demo
+    command: ["python", "/app/local_provider.py", "publisher"]
+
+networks:
+  default:
+    internal: true
