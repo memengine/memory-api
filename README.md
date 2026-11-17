@@ -24,17 +24,19 @@ for work you can verify without a paid model key.
 
 ## Try the no-key demo
 
-With Python 3.12+ and Make, run this from the repository root.
+From the repository root, run this with Python 3.12+.
 
 ```bash
-make demo
+python examples/demo/run.py
 ```
+
+If you have Make installed, `make demo` runs the same simulation.
 
 Billing records Growth. CRM proposes Scale. While the correction awaits review, the agent withholds the plan answer. This is a local simulation with no server. It uses a synthetic account, mock extraction and embeddings, and a local state file. It needs no API keys, containers, or paid calls.
 
-For maintainers, `make gif` regenerates this recording by running the real MemoryOS API locally with mocked model calls. See the [recording guide](examples/recording/README.md).
-
 ![Terminal recording of the MemoryOS API correction and review flow](docs/assets/demo.gif)
+
+*The recording uses the local MemoryOS API with mocked model calls. It shows how an operator resolves the correction and how to inspect its revision history.*
 
 See [examples](examples/README.md) for individual commands and the LangGraph example.
 
