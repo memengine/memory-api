@@ -78,6 +78,10 @@ With discovery off, generic reads still exclude declared preferences. No automat
 polling or additional read-time model call is added. This source change is not a
 claim that a new package has been published.
 
+### LangGraph example
+
+See the [LangGraph governed read](../../examples/langgraph/README.md) for the mock run and the read-before-answer pattern.
+
 ## Multi-service mode: support, billing, CRM, and product services
 
 > **For whom:** teams where multiple services can write facts about the same user.

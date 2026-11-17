@@ -19,3 +19,17 @@ migrate-current:
 
 clean:
 	docker compose -f docker-compose.yml -f docker-compose.test.yml down -v --remove-orphans
+
+ifeq ($(OS),Windows_NT)
+PYTHON ?= python
+else
+PYTHON ?= python3
+endif
+
+.PHONY: demo gif
+
+demo:
+	$(PYTHON) examples/demo/run.py
+
+gif:
+	$(PYTHON) scripts/render_demo_gif.py
