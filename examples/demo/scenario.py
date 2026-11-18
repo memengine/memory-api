@@ -47,6 +47,10 @@ def load():
         return json.loads(STATE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise SystemExit("Run billing_says_growth.py first.") from None
+    except json.JSONDecodeError:
+        raise SystemExit(
+            f"{STATE.name} is not valid JSON. Rerun billing_says_growth.py to recreate it."
+        ) from None
 
 
 def save(state):
