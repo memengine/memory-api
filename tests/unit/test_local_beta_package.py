@@ -108,3 +108,26 @@ def test_demo_uses_bound_client_keys_without_dashboard_registration(monkeypatch)
     assert seen[-2][0] == "key-crm"
     assert seen[-1][0] == "operator"
     assert "key-billing" not in str(result) and "key-crm" not in str(result)
+
+
+def test_timed_out_job_poll_raises_without_submitting_a_replacement(monkeypatch):
+    seen = []
+    clock = {"now": 0.0}
+    sleeps = []
+
+    def call(*args, **kwargs):
+        seen.append((args, kwargs))
+        return {"data": {"status": "failed"}}
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(example, "call", call)
+    monkeypatch.setattr(example.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(example.time, "sleep", sleep)
+    with pytest.raises(TimeoutError, match="do not resubmit"):
+        example.wait_for_job("http://127.0.0.1:18000", "synthetic-key", "job", timeout=5)
+    assert seen
+    assert all(args[2:] == ("GET", "/v1/memories/jobs/job") and not kwargs for args, kwargs in seen)
+    assert sleeps and clock["now"] >= 5
