@@ -108,3 +108,16 @@ def test_demo_uses_bound_client_keys_without_dashboard_registration(monkeypatch)
     assert seen[-2][0] == "key-crm"
     assert seen[-1][0] == "operator"
     assert "key-billing" not in str(result) and "key-crm" not in str(result)
+
+
+@pytest.mark.parametrize("missing", ["candidate", "target"])
+def test_preview_requires_both_candidate_and_target_before_credentials_or_network(monkeypatch, missing):
+    supplied = {"candidate": "--target", "target": "--candidate"}[missing]
+    monkeypatch.setattr(sys, "argv", ["example.py", "preview", "--owner", "synthetic-owner",
+        supplied, "00000000-0000-4000-8000-000000000001"])
+    monkeypatch.setattr(example.Path, "read_text", lambda *a, **k: pytest.fail("Credentials must not be read"))
+    monkeypatch.setattr(example, "call", lambda *a, **k: pytest.fail("Network must not be reached"))
+    monkeypatch.setattr(example, "urlopen", lambda *a, **k: pytest.fail("HTTP request must not be attempted"))
+    with pytest.raises(SystemExit) as error:
+        example.main()
+    assert error.value.code == 2
