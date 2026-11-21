@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SYNTHETIC_MEMORY_ID = "mem_synthetic_0001"
@@ -60,12 +60,20 @@ class Transport(Protocol):
     def get(self, path: str) -> dict[str, Any]: ...
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    """Do not reissue requests that carry the API key."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class HttpTransport:
     """Minimal read-only HTTP transport (standard library only)."""
 
     def __init__(self, base_url: str, api_key: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self._opener = build_opener(_RejectRedirects())
 
     def get(self, path: str) -> dict[str, Any]:
         request = Request(
@@ -77,9 +85,14 @@ class HttpTransport:
             },
         )
         try:
-            with urlopen(request, timeout=30) as response:
+            with self._opener.open(request, timeout=30) as response:
                 return json.load(response)
         except HTTPError as error:
+            if 300 <= error.code < 400:
+                error.close()
+                raise MemoryAPIError(
+                    error.code, "REDIRECT_REJECTED", "API redirects are not followed"
+                ) from None
             body = error.read().decode("utf-8", "replace")
             raise _error_from_body(error.code, body) from None
         except URLError as error:
