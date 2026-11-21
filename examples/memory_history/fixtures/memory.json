@@ -1,0 +1,25 @@
+{
+  "id": "mem_synthetic_0001",
+  "content": "Customer is on the annual Team plan, renewing 2027-03-01.",
+  "category": "preference",
+  "importance_score": 0.8,
+  "confidence_score": 0.92,
+  "created_at": "2026-10-02T09:15:00Z",
+  "updated_at": "2026-11-04T16:40:00Z",
+  "last_accessed_at": "2026-11-10T08:02:00Z",
+  "access_count": 4,
+  "is_archived": false,
+  "agent_id": "agent_billing_bot",
+  "previous_version_id": "mem_synthetic_0000",
+  "source_conversation_id": "conv_9f2c",
+  "source_event_id": "evt_20261104_0007",
+  "provenance": {
+    "service": "billing",
+    "event_id": "evt_20261104_0007",
+    "verified": true
+  },
+  "metadata": {
+    "plan": "team-annual",
+    "renewal_date": "2027-03-01"
+  }
+}
