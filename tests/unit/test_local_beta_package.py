@@ -58,6 +58,7 @@ def test_retryable_failed_job_is_polled_under_the_same_id(monkeypatch):
     assert len(seen) == 2
     assert all(args[2:] == ("GET", "/v1/memories/jobs/job") for args in seen)
 
+    
 
 def test_container_build_context_is_an_allowlist_without_local_keys_or_evidence():
     rules = (ROOT / "beta" / "Dockerfile.dockerignore").read_text().splitlines()
@@ -115,7 +116,7 @@ def test_preview_requires_candidate_when_target_provided(monkeypatch):
     owner = str(uuid.uuid4())
     target = str(uuid.uuid4())
     monkeypatch.setattr(sys, "argv", ["example.py", "preview", "--owner", owner, "--target", target])
-    monkeypatch.setattr(example, "call", lambda *a, **k: pytest.fail("Network must not be reached"))
+    monkeypatch.setattr(example.Path, "read_text", lambda *a, **k: pytest.fail("Network must not be reached"))
     monkeypatch.setattr(example.json, "loads", lambda *a, **k: pytest.fail("Credentials must not be read"))
     with pytest.raises(SystemExit) as error:
         example.main()
@@ -126,7 +127,7 @@ def test_preview_requires_target_when_candidate_provided(monkeypatch):
     owner = str(uuid.uuid4())
     candidate = str(uuid.uuid4())
     monkeypatch.setattr(sys, "argv", ["example.py", "preview", "--owner", owner, "--candidate", candidate])
-    monkeypatch.setattr(example, "call", lambda *a, **k: pytest.fail("Network must not be reached"))
+    monkeypatch.setattr(example.Path, "read_text", lambda *a, **k: pytest.fail("Network must not be reached"))
     monkeypatch.setattr(example.json, "loads", lambda *a, **k: pytest.fail("Credentials must not be read"))
     with pytest.raises(SystemExit) as error:
         example.main()

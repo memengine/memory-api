@@ -7,8 +7,6 @@ venv/
 .venv/
 osenv/
 
-opencode.jsonc
-
 __pycache__/
 *.pyc
 *.pyo
