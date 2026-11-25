@@ -44,7 +44,7 @@ dependencies = [
     "pydantic-settings>=2.3.0",
  
     # Monitoring
-    "sentry-sdk[fastapi]>=2.10.0",
+    "sentry-sdk[fastapi]>=2.10.0 ,<3",
     "boto3>=1.34.0",
 ]
  
