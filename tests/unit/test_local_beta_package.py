@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -108,3 +109,25 @@ def test_demo_uses_bound_client_keys_without_dashboard_registration(monkeypatch)
     assert seen[-2][0] == "key-crm"
     assert seen[-1][0] == "operator"
     assert "key-billing" not in str(result) and "key-crm" not in str(result)
+
+
+def test_preview_requires_candidate_when_target_provided(monkeypatch):
+    owner = str(uuid.uuid4())
+    target = str(uuid.uuid4())
+    monkeypatch.setattr(sys, "argv", ["example.py", "preview", "--owner", owner, "--target", target])
+    monkeypatch.setattr(example,"call",lambda *a,**k: pytest.fail("Network must not be reached"))
+    monkeypatch.setattr(example.Path, "read_text", lambda *a, **k: pytest.fail("Network must not be reached"))
+    with pytest.raises(SystemExit) as error:
+        example.main()
+    assert error.value.code == 2
+
+
+def test_preview_requires_target_when_candidate_provided(monkeypatch):
+    owner = str(uuid.uuid4())
+    candidate = str(uuid.uuid4())
+    monkeypatch.setattr(sys, "argv", ["example.py", "preview", "--owner", owner, "--candidate", candidate])
+    monkeypatch.setattr(example,"call",lambda *a,**k: pytest.fail("Network must not be reached"))
+    monkeypatch.setattr(example.Path, "read_text", lambda *a, **k: pytest.fail("Network must not be reached"))
+    with pytest.raises(SystemExit) as error:
+        example.main()
+    assert error.value.code == 2
